@@ -1,0 +1,52 @@
+{
+  "$schema": "https://fundingjson.org/schema/v1.0.0.schema.json",
+  "version": "v1.0.0",
+  "entity": {
+    "type": "individual",
+    "role": "maintainer",
+    "name": "Vaibhav Chhajer",
+    "email": "vchhajer0504@gmail.com",
+    "phone": "",
+    "description": "Mathematics researcher building Scriptavera, an open-source tool that turns handwritten research notes into faithful research papers.",
+    "webpageUrl": {
+      "url": "https://github.com/Chhajer2000"
+    }
+  },
+  "projects": [
+    {
+      "guid": "scriptavera",
+      "name": "Scriptavera",
+      "description": "Turns handwritten research notes (scans or photos) into a LaTeX research paper in small, checked steps. The author confirms the notation, every doubtful reading and every figure, and a mechanical audit checks that every formula reaches the paper unchanged. Mathematics first; designed for any field.",
+      "webpageUrl": {
+        "url": "https://github.com/Chhajer2000/scriptavera"
+      },
+      "repositoryUrl": {
+        "url": "https://github.com/Chhajer2000/scriptavera"
+      },
+      "licenses": ["spdx:AGPL-3.0-only"],
+      "tags": ["research-tools", "scientific-writing", "latex", "handwriting-recognition", "mathematics", "open-science"]
+    }
+  ],
+  "funding": {
+    "channels": [
+      {
+        "guid": "contact",
+        "type": "other",
+        "address": "vchhajer0504@gmail.com",
+        "description": "Write to arrange a grant or a donation; bank details are given on request."
+      }
+    ],
+    "plans": [
+      {
+        "guid": "development",
+        "status": "active",
+        "name": "Development and maintenance",
+        "description": "Support for developing Scriptavera, extending it to new fields, and keeping it maintained.",
+        "amount": 0,
+        "currency": "USD",
+        "frequency": "one-time",
+        "channels": ["contact"]
+      }
+    ]
+  }
+}

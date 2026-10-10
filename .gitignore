@@ -1,0 +1,7 @@
+.env
+settings.json
+projects/
+input_notes/
+__pycache__/
+*.pyc
+*.log
