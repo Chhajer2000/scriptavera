@@ -7,7 +7,7 @@
     "name": "Vaibhav Chhajer",
     "email": "vchhajer0504@gmail.com",
     "phone": "",
-    "description": "Mathematics researcher building Scriptavera, an open-source tool that turns handwritten research notes into faithful research papers.",
+    "description": "Mathematics researcher building Scriptavera, an open source tool that turns handwritten research notes into faithful research papers.",
     "webpageUrl": {
       "url": "https://github.com/Chhajer2000"
     }
@@ -24,7 +24,7 @@
         "url": "https://github.com/Chhajer2000/scriptavera"
       },
       "licenses": ["spdx:AGPL-3.0-only"],
-      "tags": ["research-tools", "scientific-writing", "latex", "handwriting-recognition", "mathematics", "open-science"]
+      "tags": ["mathematics", "latex", "research", "handwriting", "science", "education"]
     }
   ],
   "funding": {
@@ -38,10 +38,10 @@
     ],
     "plans": [
       {
-        "guid": "annual-roadmap-and-university-pilot",
+        "guid": "annualgrant",
         "status": "active",
-        "name": "12-Month Core Engineering Team, Compute Infrastructure & National Academic Pilot",
-        "description": "Full 12-month budget covering the 3-person core engineering team (Principal Investigator, Applied AI & Mathematical Pipeline Engineer, Full-Stack Systems & LaTeX Sandbox Engineer), dedicated GPU server rental and zero-retention frontier API compute for the 1-year free academic pilot across IITs, NITs, IISc, IISERs, ISI, TIFR, and CMI, developer workstations, and workspace infrastructure.",
+        "name": "Annual Core Engineering Team, Compute Infrastructure and University Pilot",
+        "description": "Full one year budget covering the three person core engineering team (Principal Investigator, Applied AI and Mathematical Pipeline Engineer, Full Stack Systems and LaTeX Sandbox Engineer), dedicated GPU server rental and private API compute for the one year free university pilot across IITs, NITs, IISc, IISERs, ISI, TIFR, and CMI, developer workstations, and office workspace.",
         "amount": 100000,
         "currency": "USD",
         "frequency": "one-time",
