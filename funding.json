@@ -38,11 +38,31 @@
     ],
     "plans": [
       {
+        "guid": "academic-pilot-and-v2",
+        "status": "active",
+        "name": "12-Month Core Development and Indian University Pilot",
+        "description": "Full-time development of cryptographic priority timestamping (RFC 3161), multi-model proof verification routing, Lean 4 export hooks, and a 1-year free pilot across mathematics departments at IITs, NITs, IISc, IISERs, ISI, TIFR, and CMI.",
+        "amount": 50000,
+        "currency": "USD",
+        "frequency": "one-time",
+        "channels": ["contact"]
+      },
+      {
+        "guid": "milestone-grant",
+        "status": "active",
+        "name": "6-Month Core Engineering and Benchmark Milestone",
+        "description": "Support for expanding handwritten mathematical transcription benchmarks, diagram reconstruction, and deterministic formula integrity auditing across LaTeX manuscripts.",
+        "amount": 15000,
+        "currency": "USD",
+        "frequency": "one-time",
+        "channels": ["contact"]
+      },
+      {
         "guid": "development",
         "status": "active",
-        "name": "Development and maintenance",
-        "description": "Support for developing Scriptavera, extending it to new fields, and keeping it maintained.",
-        "amount": 0,
+        "name": "General development and maintenance",
+        "description": "Flexible grant or donation support for developing Scriptavera, extending it to new scientific fields, and keeping it maintained.",
+        "amount": 5000,
         "currency": "USD",
         "frequency": "one-time",
         "channels": ["contact"]
