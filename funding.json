@@ -46,16 +46,6 @@
         "currency": "USD",
         "frequency": "yearly",
         "channels": ["contact"]
-      },
-      {
-        "guid": "opensourceengineering",
-        "status": "active",
-        "name": "Core Open Source Engineering Milestones (Priority Timestamping, Multi Model Proof Review, and Lean 4 Export)",
-        "description": "Milestone based open source engineering grant (50,000 EUR / Rs 54,00,000 INR) covering core software engineering for Step 0 SHA 256 and RFC 3161 priority timestamping, 6 role model routing, Step 16 interactive proof review, Lean 4 theorem skeleton export from Step 10, smart prompt engineering, and free open source testing at university mathematics institutes.",
-        "amount": 50000,
-        "currency": "EUR",
-        "frequency": "yearly",
-        "channels": ["contact"]
       }
     ]
   }
