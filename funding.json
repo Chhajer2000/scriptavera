@@ -40,10 +40,20 @@
       {
         "guid": "annualgrant",
         "status": "active",
-        "name": "Annual Core Engineering Team, Compute Infrastructure and University Pilot",
-        "description": "Full one year budget covering the three person core engineering team (Principal Investigator, Applied AI and Mathematical Pipeline Engineer, Full Stack Systems and LaTeX Sandbox Engineer), dedicated GPU server rental and private API compute for the one year free university pilot across IITs, NITs, IISc, IISERs, ISI, TIFR, and CMI, developer workstations, and office workspace.",
-        "amount": 100000,
+        "name": "Annual Core Engineering Team, Compute Infrastructure and University Testing",
+        "description": "Full 12 month seed grant budget ($99,000 USD / Rs 95,04,000 INR) covering the 3 person engineering team (Principal Investigator and Mathematical Lead, Applied AI Engineer, and Full Stack Backend Engineer), 3 developer PCs/laptops, high resolution monitors, and an iPad tablet with stylus for handwritten mathematical note testing, dedicated GPU server rental and frontier AI API compute, managed 3 seat office cabin, RFC 3161 timestamping infrastructure, and free testing at university mathematics institutes.",
+        "amount": 99000,
         "currency": "USD",
+        "frequency": "yearly",
+        "channels": ["contact"]
+      },
+      {
+        "guid": "opensourceengineering",
+        "status": "active",
+        "name": "Core Open Source Engineering Milestones (Priority Timestamping, Multi Model Proof Review, and Lean 4 Export)",
+        "description": "Milestone based open source engineering grant (50,000 EUR / Rs 54,00,000 INR) covering core software engineering for Step 0 SHA 256 and RFC 3161 priority timestamping, 6 role model routing, Step 16 interactive proof review, Lean 4 theorem skeleton export from Step 10, smart prompt engineering, and free open source testing at university mathematics institutes.",
+        "amount": 50000,
+        "currency": "EUR",
         "frequency": "yearly",
         "channels": ["contact"]
       }
