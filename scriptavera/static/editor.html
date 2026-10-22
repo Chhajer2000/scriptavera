@@ -1,0 +1,87 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only. Copyright (C) 2026 Vaibhav Chhajer -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LaTeX editor – Scriptavera</title>
+<link rel="stylesheet" href="/static/vendor/codemirror/codemirror.min.css">
+<link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/static/editor.css?v=1.1">
+<link rel="icon" href="/static/mark.svg" type="image/svg+xml">
+</head>
+<body>
+<div id="ed" class="ed" data-view="code">
+  <header class="ed-top" id="top">
+    <a class="ed-brand" id="back" href="/" title="Back to Scriptavera"><img src="/static/mark-rail.svg" alt=""><span>Scripta<i>vera</i></span></a>
+    <div class="ed-name" id="name">Loading…</div>
+    <div class="ed-views" role="tablist" aria-label="Show">
+      <button data-act="view" data-view="files" role="tab">Files</button><button data-act="view" data-view="code" role="tab">Code</button><button data-act="view" data-view="pdf" role="tab">PDF</button>
+    </div>
+    <div class="ed-compile">
+      <button class="btn primary" id="compileBtn" data-act="compile" title="Compile (Ctrl+S or Ctrl+Enter)">Recompile</button>
+      <label class="ed-auto" title="Compile by itself a moment after you stop typing"><input type="checkbox" id="autoCompile" checked> Auto</label>
+      <span class="ed-status" id="status" role="status" aria-live="polite"></span>
+    </div>
+    <nav class="ed-actions">
+      <button class="btn quiet" data-act="review" title="A referee's report or the journal's proof corrections: carried out point by point, mathematics only with your agreement, and answered in a letter">Review &amp; proofs</button>
+      <button class="btn quiet" data-act="notes" title="Show where the line at the cursor came from in your handwritten notes (in the PDF: double-click a place first)">In my notes</button>
+      <button class="btn quiet" data-act="history">History</button>
+      <button class="btn quiet" data-act="download">Download</button>
+      <button class="btn quiet" data-act="more" aria-label="More">More</button>
+    </nav>
+  </header>
+  <div class="ed-banner" id="banner" hidden></div>
+  <aside class="ed-side" id="side" aria-label="Files and outline">
+    <div class="side-head"><span>Files</span>
+      <span class="side-tools"><button data-act="newfile" title="New file">New file</button><button data-act="newfolder" title="New folder">New folder</button><button data-act="upload" title="Upload images or files">Upload</button></span></div>
+    <div class="tree" id="tree" role="tree"></div>
+    <div class="side-head"><span>Outline</span><span class="side-note" id="outlineNote"></span></div>
+    <div class="outline" id="outline"></div>
+    <input type="file" id="uploadInput" multiple hidden>
+  </aside>
+  <section class="ed-code" id="codePane" aria-label="Source">
+    <div class="tabs" id="tabs" role="tablist"></div>
+    <div class="find" id="find" hidden>
+      <input id="findText" placeholder="Find" aria-label="Find" spellcheck="false">
+      <input id="replaceText" placeholder="Replace with" aria-label="Replace with" spellcheck="false">
+      <button data-act="findprev" title="Previous (Shift+Enter)">Previous</button><button data-act="findnext" title="Next (Enter)">Next</button>
+      <button data-act="replace">Replace</button><button data-act="replaceall">Replace all</button>
+      <label><input type="checkbox" id="findCase"> Match case</label>
+      <span class="find-count" id="findCount"></span>
+      <button data-act="findclose" aria-label="Close search">Close</button>
+    </div>
+    <div class="cm-host" id="cmHost"></div>
+    <div class="empty" id="empty" hidden></div>
+    <div class="review" id="review" hidden></div>
+    <form class="ask" id="ask" autocomplete="off">
+      <label for="askText" class="ask-label">Ask the AI to edit</label>
+      <input id="askText" spellcheck="true" placeholder="For example: remove Definition 2.1, or make the proof of Lemma 3.2 more detailed">
+      <button class="btn" type="submit" id="askBtn">Propose changes</button>
+    </form>
+  </section>
+  <div class="ed-gutter" id="gutter" aria-label="Move between code and PDF">
+    <button data-act="topdf" title="Show this line in the PDF" aria-label="Show this line in the PDF">→</button>
+    <button data-act="tocode" title="Show the source of the highlighted place (or double-click the PDF)" aria-label="Show the source of the place in the PDF">←</button>
+  </div>
+  <section class="ed-pdf" id="pdfPane" aria-label="PDF">
+    <div class="pdf-bar">
+      <button data-act="zoomout" aria-label="Zoom out">−</button>
+      <select id="zoom" aria-label="Zoom"><option value="fit">Fit width</option><option value="0.75">75%</option><option value="1">100%</option><option value="1.25">125%</option><option value="1.5">150%</option><option value="2">200%</option></select>
+      <button data-act="zoomin" aria-label="Zoom in">+</button>
+      <span class="pdf-page" id="pageNo"></span>
+      <a class="pdf-open" id="openPdf" href="#" target="_blank" rel="noopener">Open in a tab</a>
+    </div>
+    <div class="pages" id="pages" tabindex="0"><div class="pdf-empty" id="pdfEmpty">The PDF appears here after the first compile.</div></div>
+    <div class="logs" id="logs"></div>
+  </section>
+</div>
+<div id="modal" class="modal" hidden></div>
+<div id="menu" class="menu" hidden></div>
+<div id="complete" class="complete" hidden role="listbox"></div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script src="/static/vendor/codemirror/codemirror.min.js"></script>
+<script src="/static/vendor/katex/katex.min.js"></script>
+<script src="/static/editor.js?v=1.1"></script>
+</body>
+</html>

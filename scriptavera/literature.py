@@ -66,12 +66,64 @@ def _split_name(name: str) -> dict:
     return {"given": " ".join(parts[:i]), "family": " ".join(parts[i:])}
 
 
+# ------------------------------------------------------------ test mode
+# A test paper must not meet its own answer: in a project made in test mode every search is limited to papers that
+# appeared before a date, and papers named by the author are excluded outright. The limits are set for the thread
+# that runs the project (each project runs in its own thread), so other projects are never affected.
+_ctx = threading.local()
+
+
+def set_limits(limits: dict | None) -> None:
+    _ctx.limits = limits or None
+
+
+def limits() -> dict | None:
+    return getattr(_ctx, "limits", None)
+
+
+def _day_before() -> str:
+    b = (limits() or {}).get("before") or ""
+    if not b:
+        return ""
+    import datetime
+    return (datetime.date.fromisoformat(b[:10]) - datetime.timedelta(days=1)).isoformat()
+
+
+def allowed(p: dict, lim: dict | None = None) -> bool:
+    """In test mode: published strictly before the cutoff (an undated paper, or one dated only by the cutoff's
+    year, is left out to be safe), and not one of the excluded papers."""
+    lim = lim if lim is not None else limits()
+    if not lim:
+        return True
+    before = (lim.get("before") or "")[:10]
+    if before:
+        d = (p.get("date") or "")[:10]
+        if len(d) == 10:
+            if d >= before:
+                return False
+        elif not p.get("year") or int(p["year"]) >= int(before[:4]):
+            return False
+    ids = {clean_arxiv(p.get("arxiv") or "").split("v")[0], clean_doi(p.get("doi") or "").lower()} - {""}
+    title = norm_title(p.get("title") or "")
+    for ex in lim.get("exclude") or []:
+        e = str(ex).strip()
+        if not e:
+            continue
+        m = re.search(r"(\d{4}\.\d{4,5})", e)
+        if (m and m.group(1) in ids) or clean_doi(e).lower() in ids:
+            return False
+        t = norm_title(e)
+        if len(t) >= 15 and title and (t in title or title in t):
+            return False
+    return True
+
+
 def _paper(**kw) -> dict:
     p = {"title": "", "authors": [], "year": None, "venue": "", "volume": "", "issue": "", "pages": "",
          "journal_ref": "", "doi": "", "arxiv": "", "zbl": "", "openalex": "", "url": "", "pdf_url": "", "abstract": "",
          "cited_by": 0, "msc": [], "cats": [], "sources": [], "origin": "search",
          "lex": 0.0, "score": None, "why": "", "state": "candidate", "pinned": False,
-         "read": False, "fulltext": "", "notes": None, "verdict": ""}
+         "read": False, "fulltext": "", "notes": None, "verdict": "", "date": ""}
     p.update(kw)
     p["title"] = strip_markup(p["title"])
     p["abstract"] = strip_markup(p["abstract"])
@@ -131,7 +183,7 @@ def _arxiv_parse(root: ET.Element) -> list[dict]:
         out.append(_paper(
             title=title,
             authors=[_split_name(a.findtext("a:name", "", _ATOM)) for a in e.findall("a:author", _ATOM)],
-            year=int(published[:4]) if published[:4].isdigit() else None,
+            year=int(published[:4]) if published[:4].isdigit() else None, date=published[:10],
             journal_ref=re.sub(r"\s+", " ", e.findtext("x:journal_ref", "", _ATOM) or "").strip(),
             doi=e.findtext("x:doi", "", _ATOM) or "",
             arxiv=aid, url=f"https://arxiv.org/abs/{aid}", pdf_url=f"https://arxiv.org/pdf/{aid}",
@@ -151,6 +203,8 @@ def arxiv_search(query: str, cats: list[str], n: int = 12) -> list[dict]:
 
     def run(ws: list[str]) -> list[dict]:
         q = cat_q + "(" + " AND ".join(term(w) for w in ws) + ")"
+        if _day_before():
+            q += f" AND submittedDate:[190001010000 TO {_day_before().replace('-', '')}2359]"
         return _arxiv_parse(_arxiv_get({"search_query": q, "start": 0, "max_results": n, "sortBy": "relevance"}))
 
     res = run(words)
@@ -183,7 +237,7 @@ def arxiv_find_title(title: str) -> dict | None:
 
 # -------------------------------------------------------------- OpenAlex
 
-_OA_SELECT = ("id,doi,title,publication_year,authorships,primary_location,best_oa_location,open_access,"
+_OA_SELECT = ("id,doi,title,publication_year,publication_date,authorships,primary_location,best_oa_location,open_access,"
               "abstract_inverted_index,cited_by_count,biblio,type,ids")
 
 
@@ -229,7 +283,7 @@ def _oa_parse(item: dict) -> dict | None:
     return _paper(
         title=title,
         authors=[_split_name((a.get("author") or {}).get("display_name", "")) for a in item.get("authorships") or []][:12],
-        year=item.get("publication_year"),
+        year=item.get("publication_year"), date=item.get("publication_date") or "",
         venue=src.get("display_name") or "",
         volume=bib.get("volume") or "", issue=bib.get("issue") or "", pages=pages,
         doi="" if doi.startswith("10.48550/arxiv.") else doi,
@@ -254,9 +308,12 @@ def _oa_fields(domain_ids: list[str]) -> str:
 def openalex_search(query: str, domain_ids: list[str], n: int = 12) -> list[dict]:
     s = _session()
     base = {"search": query, "per-page": n, "select": _OA_SELECT}
+    until = f",to_publication_date:{_day_before()}" if _day_before() else ""
+    if until:
+        base["filter"] = until[1:]
     items: list[dict] = []
     r = s.get("https://api.openalex.org/works",
-              params=_oa_params({**base, "filter": f"primary_topic.field.id:{_oa_fields(domain_ids)}"}), timeout=30)
+              params=_oa_params({**base, "filter": f"primary_topic.field.id:{_oa_fields(domain_ids)}{until}"}), timeout=30)
     if r.status_code == 200:
         items = r.json().get("results") or []
     elif r.status_code == 429:
@@ -300,13 +357,15 @@ def openalex_neighbors(paper: dict, n: int = 12) -> list[dict]:
     out: list[dict] = []
     for flt in (f"cited_by:{wid}", f"cites:{wid}"):
         try:
+            if _day_before():
+                flt += f",to_publication_date:{_day_before()}"
             r = s.get("https://api.openalex.org/works",
                       params=_oa_params({"filter": flt, "per-page": n, "sort": "cited_by_count:desc",
                                          "select": _OA_SELECT}), timeout=30)
             if r.status_code == 200:
                 for it in r.json().get("results") or []:
                     p = _oa_parse(it)
-                    if p:
+                    if p and allowed(p):
                         p["origin"] = "graph"
                         out.append(p)
         except requests.RequestException:
@@ -326,6 +385,7 @@ def _cr_parse(it: dict) -> dict | None:
         authors=[{"given": a.get("given", ""), "family": a.get("family", "") or a.get("name", "")}
                  for a in it.get("author") or [] if a.get("family") or a.get("name")][:12],
         year=issued[0] if issued and isinstance(issued[0], int) else None,
+        date="-".join(f"{int(x):02d}" for x in issued) if len(issued) == 3 and all(isinstance(x, int) for x in issued) else "",
         venue=(it.get("container-title") or [""])[0],
         volume=it.get("volume") or "", issue=it.get("issue") or "",
         pages=(it.get("page") or "").replace("-", "--", 1) if "--" not in (it.get("page") or "") else it.get("page"),
@@ -337,6 +397,8 @@ def _cr_parse(it: dict) -> dict | None:
 def crossref_search(query: str, domain_ids: list[str], n: int = 10) -> list[dict]:
     params = {"query.bibliographic": query, "rows": n,
               "select": "DOI,title,author,issued,container-title,volume,issue,page,type,abstract,URL,is-referenced-by-count"}
+    if _day_before():
+        params["filter"] = f"until-pub-date:{_day_before()}"
     if config.get_env("CONTACT_EMAIL"):
         params["mailto"] = config.get_env("CONTACT_EMAIL")
     r = _session().get("https://api.crossref.org/works", params=params, timeout=30)
@@ -370,7 +432,9 @@ def s2_search(query: str, domain_ids: list[str], n: int = 10) -> list[dict]:
         fos.append("Physics")
     headers = {"x-api-key": config.get_env("S2_API_KEY")} if config.get_env("S2_API_KEY") else {}
     params = {"query": query, "limit": n, "fieldsOfStudy": ",".join(fos),
-              "fields": "title,abstract,year,authors,venue,externalIds,openAccessPdf,citationCount,journal"}
+              "fields": "title,abstract,year,publicationDate,authors,venue,externalIds,openAccessPdf,citationCount,journal"}
+    if _day_before():
+        params["publicationDateOrYear"] = f":{_day_before()}"
     r = None
     for attempt in range(2):
         r = _session().get("https://api.semanticscholar.org/graph/v1/paper/search", params=params,
@@ -388,7 +452,7 @@ def s2_search(query: str, domain_ids: list[str], n: int = 10) -> list[dict]:
         out.append(_paper(
             title=it.get("title") or "",
             authors=[_split_name(a.get("name", "")) for a in it.get("authors") or []][:12],
-            year=it.get("year"), venue=j.get("name") or it.get("venue") or "",
+            year=it.get("year"), date=it.get("publicationDate") or "", venue=j.get("name") or it.get("venue") or "",
             volume=str(j.get("volume") or ""), pages=str(j.get("pages") or "").strip().replace("-", "--", 1),
             doi=ext.get("DOI") or "", arxiv=ext.get("ArXiv") or "",
             url=f"https://www.semanticscholar.org/paper/{it.get('paperId')}",
@@ -571,7 +635,8 @@ def search(queries: list[str], domain_ids: list[str], log=lambda m: None, cancel
     """Run every query against every source. Returns (papers, per-source status)."""
     if config.mock_mode():
         devmock = config.simulator()
-        return devmock.papers(), {"Simulated library": {"ok": True, "found": len(devmock.papers()), "message": ""}}
+        papers = [x for x in devmock.papers() if allowed(x)]
+        return papers, {"Simulated library": {"ok": True, "found": len(papers), "message": ""}}
     cats = domains.arxiv_categories(domain_ids)
     msc = domains.msc_prefixes(domain_ids)
     sources = {
@@ -602,6 +667,8 @@ def search(queries: list[str], domain_ids: list[str], log=lambda m: None, cancel
     for st in status.values():
         if st["ok"]:
             st["message"] = "" if not st["fails"] else st["message"]
+    if limits():                                   # test mode: nothing from on or after the cutoff, nothing excluded
+        found = [x for x in found if allowed(x)]
     return found, status
 
 
@@ -630,6 +697,8 @@ def resolve_identifier(text: str) -> dict | None:
             p = next((r for r in res if norm_title(r["title"])[:30] == norm_title(t)[:30]), res[0] if res else None)
         except Exception:
             p = None
+    if p and not allowed(p):
+        return None                               # test mode: a paper from on or after the cutoff is not added
     if p:
         p["origin"], p["pinned"], p["state"] = "user", True, "selected"
     return p

@@ -28,8 +28,9 @@ from .util import est_tokens, strip_think
 
 # ------------------------------------------------------------------ roles
 
-# `strict` roles decide the quality of the paper. For them only the strongest model these keys reach, or one
-# equivalent to it (within `margin` points of it on this job), is used; if none is free the work waits.
+# `strict` roles decide the quality of the paper. For them only the strongest model these keys can use is used, on
+# whichever key still has room for it (`margin` 0: the same model, nothing lesser); if none of its keys is free, the
+# work waits. A lesser model does such a job only when the author allows it for that step.
 ROLES: dict[str, dict] = {
     "vision_fast": {
         "name": "Scout reader", "strict": False,
@@ -37,7 +38,7 @@ ROLES: dict[str, dict] = {
         "ideal": "Any fast multimodal model.",
     },
     "vision_best": {
-        "name": "Handwriting transcriber", "strict": True, "margin": 4,
+        "name": "Handwriting transcriber", "strict": True, "margin": 0,
         "job": "Reads every page twice (notation survey, then the final transcription) and redraws the figures.",
         "ideal": "The strongest multimodal model available. Paid upgrade: Gemini Pro, Claude Opus or GPT-5 class.",
     },
@@ -47,24 +48,39 @@ ROLES: dict[str, dict] = {
         "ideal": "A fast, cheap text model. Groq-hosted open models are ideal.",
     },
     "reason": {
-        "name": "Mathematical reasoner", "strict": True, "margin": 4,
+        "name": "Mathematical reasoner", "strict": True, "margin": 0,
         "job": "Resolves notation, understands the whole paper, decides its structure, looks for shorter arguments, "
                "checks every proof and reads the paper as a referee.",
         "ideal": "The strongest reasoning model available. Paid upgrade: Claude Opus, GPT-5 thinking or Gemini Pro.",
     },
     "reader": {
-        "name": "Paper reader", "strict": True, "margin": 10,
+        "name": "Paper reader", "strict": True, "margin": 0,
         "job": "Reads each relevant paper in full and takes structured notes.",
         "ideal": "A long-context model, so a whole paper fits in one request.",
     },
     "writer": {
-        "name": "Academic writer", "strict": True, "margin": 4,
+        "name": "Academic writer", "strict": True, "margin": 0,
         "job": "Writes the introduction and every section, does the final copy-edit, writes the abstract and proposes titles.",
         "ideal": "A model with strong prose and exact LaTeX. Paid upgrade: Claude Opus or Sonnet.",
     },
 }
 
 # ------------------------------------------------------------- providers
+
+# Gemini models Google sells on its paid tier (pricing page, 21 October 2026). Only these are used in Private mode:
+# a model without a paid price may be a free-tier-only model, whose inputs Google may use to improve its products.
+PAID_GEMINI = re.compile(r"^gemini-(4-argon|3\.8-flash|3\.6-flash|3\.5-flash-lite|3\.1-flash-lite|3\.1-pro(-preview)?|3-flash-preview|"
+                         r"2\.5-pro|2\.5-flash|2\.5-flash-lite)$")
+
+
+def private_ok(provider: str, model_id: str, settings: dict | None = None) -> bool:
+    s = settings if settings is not None else config.load_settings()
+    if not s.get("private"):
+        return True
+    if f"{provider}:{model_id}" in (s.get("private_models") or []) or provider == "ollama":
+        return True
+    return provider == "gemini" and bool(PAID_GEMINI.match(model_id.lower()))
+
 
 PROVIDERS: dict[str, dict] = {
     "gemini": {
@@ -117,6 +133,8 @@ PROVIDERS: dict[str, dict] = {
         "fallback": [],
     },
 }
+
+GEMINI_FLAGSHIPS = {"argon", "ultra"}        # Gemini models named above Pro (gemini-4-argon is Google's flagship)
 
 _NOT_CHAT = re.compile(
     r"whisper|tts|embed|guard|orpheus|imagen|veo|lyria|-live|transcribe|robotics|rerank|moderation|"
@@ -223,28 +241,24 @@ def classify(provider: str, model_id: str, meta: dict | None = None) -> Model | 
     m = Model(provider=provider, id=mid)
 
     if provider == "gemini":
-        g = re.match(r"^gemini-(\d+(?:\.\d+)?)-(pro|flash)(-lite)?(?:-preview.*|-\d{2,}.*|-exp.*)?$", low)
+        g = re.match(r"^gemini-(\d+(?:\.\d+)?)-([a-z]+)(-lite)?(?:-preview.*|-\d{2,}.*|-exp.*)?$", low)
         if not g:
             if low.startswith("gemma-3"):
                 m.vision, m.req_tokens, m.out_cap, m.interval = True, 12000, 4000, 2.5
                 m.scores = _s(vision_fast=50, vision_best=45, fast=55, reason=40, reader=35, writer=45)
                 return m
             return None
-        v, kind, lite = float(g.group(1)), g.group(2), bool(g.group(3))
-        b = 80 + 4 * v
+        v, name, lite = float(g.group(1)), g.group(2), bool(g.group(3))
+        # Ranked by tier first, then by version: the flagship (Gemini 4 Argon) above Pro, Pro above Flash, Flash above
+        # Flash-Lite, and within a tier the newer version first. Pro and Argon are not on Google's free tier: on a
+        # free key the first request is refused with "limit: 0" and the model is skipped on that key from then on.
+        tier = 3 if name in GEMINI_FLAGSHIPS else 2 if name == "pro" else 0 if lite else 1
+        q = (66, 81, 96, 108)[tier] + 4 * v
         m.vision, m.effort = True, True
         m.req_tokens, m.out_cap, m.think_pad = 200_000, 16000, 8000
-        if kind == "pro":
-            # Pro models are not on the free tier, so they rank just below Flash: used only when a
-            # paid key makes them work, or when the author pins them in Settings.
-            m.interval = 13.0
-            m.scores = _s(vision_best=b - 2, vision_fast=b - 24, fast=b - 34, reason=b - 2, reader=b - 4, writer=b - 2)
-        elif lite:
-            m.interval = 4.5
-            m.scores = _s(vision_best=b - 14, vision_fast=b, fast=b - 6, reason=b - 16, reader=b - 8, writer=b - 14)
-        else:
-            m.interval = 6.5
-            m.scores = _s(vision_best=b, vision_fast=b - 3, fast=b - 12, reason=b, reader=b, writer=b)
+        m.interval = (4.5, 6.5, 13.0, 13.0)[tier]
+        m.scores = _s(vision_best=q, reason=q, reader=q, writer=q,
+                      vision_fast=(96 + v, 90 + v, 70.0, 66.0)[tier], fast=(88 + v, 82 + v, 62.0, 58.0)[tier])
         return m
 
     if provider in ("groq", "cerebras"):
@@ -438,7 +452,7 @@ class Router:
             results = {(pid, ki): res for (pid, ki, _), res in zip(jobs, listed)}
             for pid, p in PROVIDERS.items():
                 keys = self._keys(pid)
-                st = {"label": p["label"], "configured": bool(keys), "ok": False, "count": 0, "message": "No key"}
+                st = {"label": p["label"], "configured": bool(keys), "ok": False, "count": 0, "message": "No key", "keys": []}
                 status[pid] = st
                 for ki, key in enumerate(keys):
                     found, msg = results[(pid, ki)]
@@ -458,6 +472,9 @@ class Router:
                     st["count"] += n
                     st["ok"] = st["ok"] or n > 0
                     st["message"] = msg if not n else f"{st['count']} usable models"
+                    st["keys"].append({"n": ki + 1, "ok": n > 0, "count": n, "message": msg if not n else f"{n} usable models"})
+                if st["ok"]:
+                    st["message"] = f"{st['count']} usable models"          # a key that failed is reported under "keys"
             self.models = models
             self.status = status
             self.discovered_at = time.time()
@@ -496,8 +513,10 @@ class Router:
         return rank
 
     def _pool(self, role: str, vision: bool) -> list[Model]:
-        """Every model these keys reach that could do the job at all."""
-        return [m for m in self.models if m.scores.get(role, 0) > 0 and (m.vision or not vision) and not m.dead]
+        """Every model these keys reach that could do the job at all (in Private mode, only the paid or local ones)."""
+        s = config.load_settings()
+        return [m for m in self.models if m.scores.get(role, 0) > 0 and (m.vision or not vision) and not m.dead
+                and private_ok(m.provider, m.id, s)]
 
     def peers(self, role: str, vision: bool = False) -> list[Model]:
         """The top class for a job: the strongest model these keys reach and every model equivalent to it
@@ -578,22 +597,39 @@ class Router:
             if self._cooling(role, vision):
                 raise self._limits_error(role, vision)
             what = "model that can read images" if images else "model"
+            if config.load_settings().get("private"):
+                raise LLMError(f"No paid-tier {what} is available for the '{ROLES[role]['name']}' role. Private mode uses only "
+                               "Gemini models that Google sells on its paid tier (4 Argon, 3.8 Flash, 3.6 Flash, 3.1 Pro, 3.5 and 3.1 "
+                               "Flash-Lite, 3 Flash Preview, 2.5) or a local Ollama model. Check that your Gemini key's project "
+                               "has billing enabled, or add a model to private_models in settings.json.")
             raise LLMError(f"No {what} is available for the '{ROLES[role]['name']}' role. "
                            f"Add an API key in Settings (Gemini is recommended) or wait for rate limits to reset.")
         errors: list[str] = []
-        for i, m in enumerate(cands):
-            if hooks.cancelled():
-                raise Cancelled()
-            try:
-                res = self._call_model(m, role, system, user, images, json_mode, max_out, temperature, effort, label, hooks,
-                                       patience=patience if i == 0 else min(patience, 1))
-            except _Skip as e:
-                errors.append(f"{m.ref}: {e}")
-                hooks.on_call({"role": role, "label": label, "provider": m.provider, "model": m.id, "ok": False, "note": str(e)})
-                continue
-            if res.truncated and allow_continue and not json_mode:
-                res = self._continue(m, role, system, user, images, res, max_out, temperature, label, hooks)
-            return res
+        tried: set[int] = set()
+        for _round in range(4):
+            for m in cands:
+                if hooks.cancelled():
+                    raise Cancelled()
+                if id(m) in tried:
+                    continue
+                tried.add(id(m))
+                try:
+                    res = self._call_model(m, role, system, user, images, json_mode, max_out, temperature, effort, label, hooks,
+                                           patience=patience if len(tried) == 1 else min(patience, 1))
+                except _Skip as e:
+                    errors.append(f"{m.ref}: {e}")
+                    hooks.on_call({"role": role, "label": label, "provider": m.provider, "model": m.id, "ok": False, "note": str(e)})
+                    continue
+                if res.truncated and allow_continue and not json_mode:
+                    res = self._continue(m, role, system, user, images, res, max_out, temperature, label, hooks)
+                return res
+            # every model asked has failed. If some turned out not to work on their key at all (Pro and Argon on a free
+            # key), the strongest model these keys can use is now another one: ask it in this same call.
+            if not any(m.dead for m in cands if id(m) in tried):
+                break
+            cands = [m for m in self.candidates(role, need, vision, max_out, strict) if id(m) not in tried]
+            if not cands:
+                break
         detail = " | ".join(errors[-4:])
         if errors and all("network error" in e for e in errors):
             raise LLMError(f"The AI providers could not be reached while working on '{label or role}'. "
@@ -771,6 +807,10 @@ class Router:
                 rec = {"role": role, "label": label, "provider": m.provider, "model": m.id, "ok": True,
                        "in": usage.get("prompt_tokens", 0), "out": usage.get("completion_tokens", 0),
                        "seconds": round(dt, 2)}
+                # thinking is billed as output; Gemini's OpenAI-style usage counts it only in total_tokens
+                details = usage.get("completion_tokens_details") or {}
+                total = usage.get("total_tokens") or 0
+                rec["think"] = int(details.get("reasoning_tokens") or (max(0, total - rec["in"] - rec["out"]) if total else 0))
                 hooks.on_call(rec)
                 return Result(text, m.id, m.provider, rec["in"], rec["out"], dt, truncated=(finish == "length"))
 
@@ -794,6 +834,11 @@ class Router:
                     m.cooldown_until = until + 5
                     m.note = "daily limit reached" if daily else "rate limited"
                     raise _Skip(m.note)
+                twin = next((o for o in self.models if o is not m and o.provider == m.provider and o.id == m.id
+                             and o.key != m.key and o.available()), None)
+                if twin:                              # the same model on the next key takes over at once
+                    m.cooldown_until, m.note = time.time() + delay + 1, "rate limited"
+                    raise _Skip(f"rate limited on key {m.key_index + 1}; key {twin.key_index + 1} takes over")
                 limited += 1
                 if limited >= 3:                      # keeps refusing: rest this model and move on
                     m.cooldown_until = time.time() + 900
@@ -810,6 +855,16 @@ class Router:
                     learned = int(need * 0.85)
                 m.req_tokens = max(1500, min(m.req_tokens, learned))
                 raise _Skip(f"request too large for this model (limit now {m.req_tokens} tokens)")
+            key_bad = r.status_code == 401 or bool(re.search(r"api key not valid|api_key_invalid|api key expired|unregistered callers|"
+                                                         r"service_disabled|has not been used in project", low))
+            if r.status_code in (400, 401, 403) and key_bad:
+                for other in self.models:
+                    if other.provider == m.provider and other.key == m.key:
+                        other.dead, other.note = True, "key rejected"
+                raise _Skip("API key rejected: " + err[:160])
+            if r.status_code == 403:                  # this model only: not on this key's tier, region or project
+                m.dead, m.note = True, "not available to this key"
+                raise _Skip(f"{m.note}: {err[:160]}")
             if r.status_code == 400 and re.search(r"max_?(output_?|completion_?)?tokens", low) and body["max_tokens"] > 4096:
                 cap = re.search(r"(?:at most|maximum(?: value)?(?: is| of)?|<=|less than or equal to|limit(?: is| of)?)\D{0,12}(\d{4,6})", low)
                 m.max_total = min(m.max_total, int(cap.group(1)) if cap else body["max_tokens"] // 2)
@@ -822,11 +877,6 @@ class Router:
             if r.status_code == 400 and optional:
                 optional = {}     # the provider rejected an optional parameter; retry plain
                 continue
-            if r.status_code in (401, 403):
-                for other in self.models:
-                    if other.provider == m.provider and other.key == m.key:
-                        other.dead, other.note = True, "key rejected"
-                raise _Skip("API key rejected")
             if r.status_code == 404 or "model_not_found" in low or "does not exist" in low or "decommissioned" in low:
                 m.dead, m.note = True, "model no longer available"
                 raise _Skip(m.note)

@@ -16,7 +16,7 @@ import webbrowser
 
 def _missing() -> list[str]:
     need = {"starlette": "starlette", "uvicorn": "uvicorn", "multipart": "python-multipart", "requests": "requests",
-            "pypdfium2": "pypdfium2", "PIL": "pillow"}
+            "pypdfium2": "pypdfium2", "PIL": "pillow", "cryptography": "cryptography"}
     out = []
     for module, package in need.items():
         try:

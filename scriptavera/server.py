@@ -19,11 +19,15 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from . import __version__, config, domains, final, ingest, journals, literature, paper as paperlib, pipeline, revision, store, writing
+from . import arxivpack, assist, citecheck, costs, extras, memory, phone, provenance, reviews, sources, typed, workspace
 from .llm import PROVIDERS, ROLES, LLMError, router
 
 DOWNLOADS = {
     "main.tex": "text/x-tex", "main_standard_class.tex": "text/x-tex", "references.bib": "text/plain",
     "paper.zip": "application/zip", "paper.html": "text/html", "paper.pdf": "application/pdf",
+    "summary.txt": "text/plain; charset=utf-8", "slides.tex": "text/x-tex", "slides.pdf": "application/pdf",
+    "poster.tex": "text/x-tex", "poster.pdf": "application/pdf",
+    "arxiv-submission.zip": "application/zip", "arxiv-metadata.txt": "text/plain; charset=utf-8",
 }
 
 
@@ -48,13 +52,79 @@ async def _body(request: Request) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def orcid_id(text: str) -> str | None:
+    """An ORCID iD written as 0000-0002-1825-0097, from any of its usual forms (with or without the
+    https://orcid.org/ prefix); None when the digits do not pass its check digit (ISO 7064 MOD 11-2)."""
+    d = re.sub(r"[^0-9Xx]", "", re.sub(r"(?i)^\s*(?:https?://)?(?:www\.)?orcid\.org/", "", str(text or "")))
+    if len(d) != 16 or not d[:15].isdigit():
+        return None
+    total = 0
+    for ch in d[:15]:
+        total = (total + int(ch)) * 2
+    r = (12 - total % 11) % 11
+    if d[15].upper() != ("X" if r == 10 else str(r)):
+        return None
+    d = d.upper()
+    return "-".join(d[i:i + 4] for i in range(0, 16, 4))
+
+
 def _people(items) -> list[dict]:
     out = []
     for a in items if isinstance(items, list) else []:
         if isinstance(a, dict) and str(a.get("name") or "").strip():
-            out.append({"name": str(a["name"]).strip()[:120], "affiliation": str(a.get("affiliation") or "").strip()[:300],
-                        "email": str(a.get("email") or "").strip()[:120]})
+            person = {"name": str(a["name"]).strip()[:120], "affiliation": str(a.get("affiliation") or "").strip()[:300],
+                      "email": str(a.get("email") or "").strip()[:120]}
+            oid = orcid_id(a.get("orcid") or "")
+            if oid:
+                person["orcid"] = oid
+            out.append(person)
     return out[:12]
+
+
+def declaration_text(authors: list[dict], made_by: dict) -> str:
+    """The statement signed in the record of the notes, like the one arXiv asks of every submitter."""
+    name = made_by.get("name") or "the person making this record"
+    if made_by.get("is_author"):
+        if len(authors) <= 1:
+            return (f"I, {name}, am the author of these notes. The details in this record are correct to the best of my "
+                    "knowledge, and the files are the notes as I uploaded them.")
+        return (f"I, {name}, am an author of these notes. The other authors listed agree to this record. The details in "
+                "this record are correct to the best of my knowledge, and the files are the notes as I uploaded them.")
+    return (f"I, {name}, am not an author of these notes. I record them for the authors listed, with their consent. The "
+            "details in this record are correct to the best of my knowledge, and the files are the notes as I uploaded them.")
+
+
+def _declaration(meta: dict, authors: list[dict]) -> tuple[dict | None, str]:
+    """The declaration sent with new notes: {agreed, author (index into the authors, or null), name}. Returns
+    (who made it, error)."""
+    d = meta.get("declaration") if isinstance(meta.get("declaration"), dict) else {}
+    if d.get("agreed") is not True:
+        return None, ("Tick the declaration: the record of your notes says, as arXiv does for every submission, who "
+                      "wrote them and that the details are correct.")
+    idx = d.get("author")
+    if isinstance(idx, int) and 0 <= idx < len(authors):
+        return {"name": authors[idx]["name"], "is_author": True}, ""
+    name = re.sub(r"\s+", " ", str(d.get("name") or "")).strip()[:120]
+    if not name:
+        return None, "Say who is making the record: choose your name among the authors, or give your name."
+    return {"name": name, "is_author": False}, ""
+
+
+def _record_about(meta: dict, made_by: dict | None) -> dict:
+    """What the record of the notes says about them, taken from what the author entered, as arXiv takes it."""
+    subjects = []
+    for d in meta.get("domains") or []:
+        info = domains.get(d)
+        if info:
+            subjects.append({"code": d, "name": info["name"], "msc": list(info.get("msc") or [])})
+    authors = meta.get("authors") or []
+    about = {"title": meta.get("title") or meta.get("name") or "", "authors": authors,
+             "author": {k: (authors[0] if authors else {}).get(k, "") for k in ("name", "email", "affiliation")},
+             "description": meta.get("problem") or "", "keywords": list(meta.get("keywords") or []), "subjects": subjects}
+    if made_by:
+        about["recorded_by"] = made_by
+        about["declaration"] = declaration_text(authors, made_by)
+    return about
 
 
 # ------------------------------------------------------------------ meta
@@ -69,18 +139,19 @@ def _meta_payload() -> dict:
         st = router.status.get(pid, {})
         providers.append({"id": pid, "label": pr["label"], "env": pr["env"], "signup": pr["signup"], "why": pr["why"],
                           "configured": bool(router._keys(pid)), "ok": st.get("ok", False),
-                          "count": st.get("count", 0), "message": st.get("message", "")})
+                          "count": st.get("count", 0), "message": st.get("message", ""), "keys": st.get("keys", [])})
     return {
         "version": __version__, "mock": config.mock_mode(), "domains": domains.DOMAINS,
         "phases": store.PHASES, "stages": store.STAGES,
         "roles": ROLES, "providers": providers, "plan": router.plan() if router.models else {},
-        "models": [m.public() for m in router.models], "settings": config.load_settings(), "env": env,
+        "models": [m.public() for m in router.models], "settings": config.load_settings(), "env": env, "memory": memory.stats(),
         "engine": paperlib.find_engine(), "macros": paperlib.MACROS, "has_vision": any(m.vision and not m.dead for m in router.models),
         "discovered": bool(router.discovered_at),
         "templates": journals.TEMPLATES,
         "families": [{"id": f["id"], "name": f["name"], "house": f["house"], "template": f["template"]}
                      for f in journals.FAMILIES if f["id"] != "generic"],
         "statements": [{"id": k, "name": name} for k, name in paperlib.STATEMENTS],
+        "identity": {k: v for k, v in _identity_public().items() if k in ("fingerprint", "error")},
     }
 
 
@@ -96,7 +167,7 @@ SOURCE_FILES = ("app.py", "run_app.bat", "requirements.txt", "README.md", "LICEN
                 "CONTRIBUTING.md", "TRADEMARKS.md", "THIRD_PARTY_NOTICES.md", "CITATION.cff", "funding.json",
                 ".gitignore")
 SOURCE_DIRS = ("scriptavera", "tests", "docs", ".github")
-SOURCE_KINDS = {".py", ".js", ".css", ".html", ".svg", ".png", ".woff2", ".woff", ".ttf", ".md", ".txt", ".bat",
+SOURCE_KINDS = {".py", ".js", ".mjs", ".css", ".html", ".svg", ".png", ".woff2", ".woff", ".ttf", ".md", ".txt", ".bat",
                 ".cff", ".yml", ".yaml", ""}
 
 
@@ -164,6 +235,23 @@ async def api_settings(request: Request):
     return ok(_meta_payload())
 
 
+async def api_test_mode(request: Request):
+    """Test mode on or off, with its cutoff date and the papers to exclude. Quick: no models are asked."""
+    import datetime
+    body = await _body(request)
+    on = bool(body.get("on"))
+    before = str(body.get("before") or "").strip()[:10]
+    if on:
+        try:
+            datetime.date.fromisoformat(before)
+        except ValueError:
+            return fail("Give the cutoff date: papers that appeared on or after it are never searched for (for a test "
+                        "paper, the day before it first appeared on arXiv).")
+    exclude = [x.strip()[:300] for x in str(body.get("exclude") or "").splitlines() if x.strip()][:50]
+    config.save_settings({"test_mode": {"on": on, "before": before, "exclude": exclude}})
+    return ok(_meta_payload())
+
+
 async def api_test(request: Request):
     await run_in_threadpool(router.discover, True)
     return ok(_meta_payload())
@@ -210,7 +298,8 @@ async def api_create(request: Request):
             if data:
                 files.append((f.filename or "upload", data))
     if not files:
-        return fail("Upload a PDF or page images of your notes.")
+        return fail("Upload your notes: a scanned PDF or photos of the pages, or typed notes (a .tex file, an Overleaf "
+                    "project as a .zip, Markdown or text).")
     doms = [d for d in meta.get("domains", []) if domains.get(d)]
     if not doms:
         return fail("Choose the domain you are working in. It limits the literature search.")
@@ -221,23 +310,54 @@ async def api_create(request: Request):
         return fail("Describe the problem you are working on in a sentence or two. It is what the literature search and the reading start from.")
     if len(keywords) < 2:
         return fail("Give at least two keywords, separated by commas.")
+    for a in meta.get("authors") or []:
+        if isinstance(a, dict) and str(a.get("name") or "").strip() and str(a.get("orcid") or "").strip() \
+                and not orcid_id(a["orcid"]):
+            return fail(f"The ORCID iD given for {str(a['name']).strip()[:80]} is not valid: check its 16 digits "
+                        "(it looks like 0000-0002-1825-0097).")
+    authors = _people(meta.get("authors"))
+    if not authors:
+        return fail("Name at least one author. The record of your notes says who wrote them, as arXiv does for every "
+                    "submission.")
+    made_by, why = _declaration(meta, authors)
+    if not made_by:
+        return fail(why)
     clean = {
         "name": (meta.get("name") or files[0][0]).strip()[:120],
         "domains": doms[:3], "subarea": (meta.get("subarea") or "").strip()[:300],
         "hints": (meta.get("hints") or "").strip()[:1500], "title": (meta.get("title") or "").strip()[:300],
-        "authors": _people(meta.get("authors")),
+        "authors": authors,
         "known_refs": [r.strip() for r in meta.get("known_refs", []) if r.strip()][:15],
         "problem": problem[:3000], "keywords": keywords[:20],
         "key_papers": [r.strip() for r in meta.get("key_papers", []) if str(r).strip()][:3],
         "files": [n for n, _ in files],
         "journal": journals.clean_journal(meta.get("journal")), "statements": {},
+        "declaration": {**made_by, "text": declaration_text(authors, made_by), "at": time.time()},
     }
     pid = store.new_id()
+    folder = config.PROJECTS_DIR / pid
+    try:                    # before anything else is done with the notes: keep them, fingerprint them, sign the record
+        await run_in_threadpool(provenance.make_record, folder, files, _record_about(clean, made_by))
+    except Exception as e:  # noqa: BLE001 - a missing library must not stop the paper; the author is told on the page
+        (folder / "proof").mkdir(parents=True, exist_ok=True)
+        (folder / "proof" / "error.txt").write_text(f"The record could not be made: {e}", encoding="utf-8")
     try:
-        pages = await run_in_threadpool(ingest.ingest, files, config.PROJECTS_DIR / pid / "pages")
+        pages = await run_in_threadpool(_ingest_any, files, folder, 0)
     except Exception as e:  # noqa: BLE001
+        import shutil
+        shutil.rmtree(folder, ignore_errors=True)
         return fail(f"Could not read the upload: {e}")
+    tinfo = json.loads((folder / "typed.json").read_text(encoding="utf-8")) if (folder / "typed.json").exists() else {}
+    if tinfo.get("title") and not clean["title"]:
+        clean["title"] = tinfo["title"][:300]
+    if tinfo:
+        clean["typed"] = tinfo.get("kind")
+    tm = config.load_settings().get("test_mode") or {}
+    if tm.get("on") and tm.get("before"):        # a test paper keeps its limits, whatever is switched later
+        clean["test"] = {"before": tm["before"], "exclude": tm.get("exclude") or [], "at": time.time()}
     store.create(clean, pages, pid)
+    if provenance.status(folder):
+        provenance.work_later(folder)     # the timestamps are asked for in the background; only fingerprints leave
     return ok(id=pid)
 
 
@@ -269,7 +389,7 @@ def _bundle(p: store.Project) -> dict:
         "figures": (p.load("figures") or {}).get("items"), "approved": bool(p.load("approved")),
         "doubt_answers": p.load("doubt_answers", []), "adding": pipeline.adding_now(p),
         "dossier": p.load("dossier"), "intro": p.load("intro"), "plan": p.load("plan"), "draft": draft,
-        "assessment": assessment, "scope": p.load("scope"), "scope_default": writing.default_scope(assessment) if assessment else None,
+        "assessment": assessment, "novelty": p.load("novelty"), "scope": p.load("scope"), "scope_default": writing.default_scope(assessment) if assessment else None,
         "finish": final.finish_info(p) if p.load("paper") else None,
         "revision": revision.state_json(p),
         "journal": meta.get("journal"), "profile": journals.profile(meta.get("journal")),
@@ -277,7 +397,21 @@ def _bundle(p: store.Project) -> dict:
         "paper": p.load("paper"), "calls": p.calls(300),
         "downloads": [n for n in DOWNLOADS if (p.dir / "out" / n).exists()],
         "kept": (p.dir / "out_before_update").exists(),
+        "proof": _proof_info(p),
+        "editor": {"exists": workspace.exists(p), "can": (p.dir / "out" / "main.tex").exists()},
+        "katex_macros": (p.load("typed") or {}).get("katex", {}),
+        "usage": costs.usage(p.calls(100000)),
+        "estimate": costs.estimate(len([x for x in st.get("pages", []) if not x.get("skip")]), bool(meta.get("typed"))),
     }
+
+
+def _proof_info(p: store.Project) -> dict:
+    s = provenance.summary(p.dir)
+    if s:
+        return s
+    err = p.dir / "proof" / "error.txt"
+    return {"missing": True, "error": err.read_text(encoding="utf-8") if err.exists() else "",
+            "originals": (p.dir / provenance.ORIGINALS).exists()}
 
 
 async def api_project(request: Request):
@@ -298,6 +432,16 @@ async def api_project(request: Request):
         got = [0]                             # a draft that stopped part of the way through the notes: written again
     if got:
         pipeline.start(p)                     # a page with work on it that was never read: read it now
+    if provenance.due(p.dir):
+        provenance.work_later(p.dir)          # timestamps not yet obtained, or the Bitcoin confirmation not yet added
+    paper = p.load("paper")
+    if paper and paper.get("macros") and paper.get("macros_version") != 2 and not pipeline.is_running(p.id):
+        # built before commands were checked with TeX itself: \cancel could have been declared as the word "cancel".
+        # Built again once (no model is called), so the files and the preview are right.
+        try:
+            await run_in_threadpool(final.build_outputs, p, paper)
+        except Exception:  # noqa: BLE001 - the paper still opens; the next change rebuilds it
+            pass
     return ok(await run_in_threadpool(_bundle, p))
 
 
@@ -508,7 +652,7 @@ async def api_library(request: Request):
         if not ident:
             return fail("Enter a DOI, an arXiv id or link, or a paper title.")
         try:
-            got = await run_in_threadpool(literature.resolve_identifier, ident)
+            got = await run_in_threadpool(_resolve_for, p, ident)
         except Exception as e:  # noqa: BLE001
             return fail(f"Lookup failed: {e}")
         if not got:
@@ -584,13 +728,15 @@ async def api_figure(request: Request):
     body = await _body(request)
     fid = request.path_params.get("fid", "")
     drawing = p.state["stages"].get("figures", {}).get("status") == "running"
-    if ("astext" in body or "redraw" in body) and drawing:
+    if ("astext" in body or "redraw" in body or "print" in body) and drawing:
         return fail("A figure is being drawn right now. Try again in a minute; your other answers are saved.")
     try:
         if "astext" in body:
             got = await run_in_threadpool(pipeline.figure_as_text, p, fid, str(body.get("astext") or "")[:1200])
             return ok(figure=None, page=got["page"], text=got["text"])
-        if "redraw" in body:
+        if "print" in body:                         # print a drawing the app took for an explanation
+            rec = await run_in_threadpool(pipeline.print_figure, p, fid)
+        elif "redraw" in body:
             rec = await run_in_threadpool(pipeline.redraw_figure, p, fid, str(body.get("redraw") or "")[:1200])
         else:
             choice = body.get("choice") if isinstance(body.get("choice"), str) else None
@@ -812,6 +958,47 @@ async def api_journal_guide(request: Request):
     return ok(res)
 
 
+async def api_extra(request: Request):
+    """A plain-language summary, slides or a poster, made from the finished paper."""
+    p = _project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    body = await _body(request)
+    try:
+        return ok(await run_in_threadpool(extras.make, p, str(body.get("kind") or "")))
+    except (ValueError, LLMError) as e:
+        return fail(str(e))
+
+
+async def api_review_pack(request: Request):
+    p = _project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    try:
+        data = await run_in_threadpool(extras.review_pack, p)
+    except ValueError as e:
+        return fail(str(e))
+    return Response(data, media_type="text/html", headers={"Content-Disposition": 'attachment; filename="review-pack.html"'})
+
+
+async def api_phone(request: Request):
+    """Photos from a phone on the same Wi-Fi: start or stop the upload page, list what arrived, hand over a photo."""
+    if request.method == "GET":
+        name = request.query_params.get("file")
+        if name:
+            data = phone.file_bytes(name)
+            return Response(data, media_type="image/png" if name.endswith(".png") else "image/jpeg") if data else Response(status_code=404)
+        return ok(phone.status())
+    body = await _body(request)
+    try:
+        if body.get("action") == "start":
+            return ok(await run_in_threadpool(phone.start))
+        phone.stop()
+        return ok(phone.status())
+    except (RuntimeError, OSError) as e:
+        return fail(str(e))
+
+
 async def api_download(request: Request):
     p = _project(request)
     name = request.path_params.get("name", "")
@@ -837,6 +1024,573 @@ async def api_shutdown(request: Request):
     return ok({"version": __version__})
 
 
+# --------------------------------------------------------------- the LaTeX editor
+
+def _editor_project(request: Request) -> store.Project | None:
+    p = _project(request)
+    return p
+
+
+async def editor_page(request: Request):
+    return FileResponse(config.STATIC_DIR / "editor.html", headers={"Cache-Control": "no-store"})
+
+
+async def api_editor(request: Request):
+    """The project for the editor: its files and the last compile. POST makes it from the finished paper."""
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    try:
+        if request.method == "POST":
+            body = await _body(request)
+            await run_in_threadpool(workspace.create, p, bool(body.get("reset")))
+        info = await run_in_threadpool(workspace.info, p)
+    except workspace.WorkspaceError as e:
+        return fail(str(e))
+    meta = p.state.get("meta", {})
+    return ok(info, name=meta.get("name") or "Untitled notes", title=(p.load("paper") or {}).get("title", ""),
+              finished=bool(p.load("paper")), version=__version__)
+
+
+async def api_editor_file(request: Request):
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    try:
+        if request.method == "GET":
+            path = request.query_params.get("path", "")
+            if request.query_params.get("raw"):
+                data = await run_in_threadpool(workspace.read_bytes, p, path)
+                import mimetypes
+                kind = mimetypes.guess_type(path)[0] or "application/octet-stream"
+                return Response(data, media_type=kind, headers={"Cache-Control": "no-store"})
+            return ok(await run_in_threadpool(workspace.read_text, p, path))
+        body = await _body(request)
+        res = await run_in_threadpool(workspace.write_text, p, str(body.get("path") or ""), str(body.get("text") or ""),
+                                      body.get("base") or None)
+        if not res.get("ok"):
+            return JSONResponse({"ok": False, "conflict": True, "sha": res.get("sha"),
+                                 "error": "This file changed since you opened it (another window, or an accepted AI "
+                                          "change). Reload it to see the latest version."}, status_code=409)
+        return ok(res)
+    except workspace.WorkspaceError as e:
+        return fail(str(e))
+
+
+async def api_editor_files(request: Request):
+    """New file, new folder, rename, delete."""
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    body = await _body(request)
+    action, path, to = body.get("action"), str(body.get("path") or ""), str(body.get("to") or "")
+    try:
+        if action == "new_file":
+            await run_in_threadpool(workspace.new_file, p, path)
+        elif action == "new_folder":
+            await run_in_threadpool(workspace.new_folder, p, path)
+        elif action == "rename":
+            await run_in_threadpool(workspace.rename, p, path, to)
+        elif action == "delete":
+            await run_in_threadpool(workspace.delete, p, path)
+        else:
+            return fail("Unknown action.")
+    except workspace.WorkspaceError as e:
+        return fail(str(e))
+    return ok(tree=workspace.tree(p))
+
+
+async def api_editor_upload(request: Request):
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    form = await request.form()
+    folder = str(form.get("folder") or "").strip().strip("/")
+    saved = []
+    try:
+        for f in form.getlist("files"):
+            if not hasattr(f, "read"):
+                continue
+            data = await f.read()
+            name = re.sub(r"[^A-Za-z0-9._\-]+", "-", (f.filename or "file").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]).strip("-.")
+            rel = f"{folder}/{name}" if folder else name
+            await run_in_threadpool(workspace.write_bytes, p, rel, data)
+            saved.append(rel)
+    except workspace.WorkspaceError as e:
+        return fail(str(e))
+    return ok(saved=saved, tree=workspace.tree(p))
+
+
+async def api_editor_compile(request: Request):
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    res = await run_in_threadpool(workspace.compile_project, p)
+    return ok(build=workspace._public(res))
+
+
+async def api_editor_pdf(request: Request):
+    p = _editor_project(request)
+    if not p:
+        return Response(status_code=404)
+    f = workspace.pdf_path(p)
+    if not f.exists():
+        return Response(status_code=404)
+    name = re.sub(r"[^A-Za-z0-9._\-]+", "-", (p.state.get("meta", {}).get("name") or "paper"))[:60].strip("-") or "paper"
+    return FileResponse(f, media_type="application/pdf", filename=f"{name}.pdf" if request.query_params.get("download") else None,
+                        headers={"Cache-Control": "no-store"})
+
+
+async def api_editor_log(request: Request):
+    p = _editor_project(request)
+    if not p:
+        return Response(status_code=404)
+    return Response(workspace.log_text(p) or "No log yet: compile first.", media_type="text/plain; charset=utf-8",
+                    headers={"Cache-Control": "no-store"})
+
+
+def _completions(p: store.Project, items: list[dict], kinds: dict) -> dict:
+    """What the editor offers while typing \\ref{, \\cite{, \\begin{ or \\input{."""
+    labels = []
+    for it in items:
+        for lab in it.get("labels") or ([it["label"]] if it.get("label") else []):
+            name = assist.display(it) if lab == it.get("label") else f"in {assist.display(it)}"
+            labels.append({"label": lab, "what": name, "path": it["path"], "line": it["line"]})
+    cites: list[dict] = []
+    for rel in workspace.files(p):
+        if workspace._kind(rel) != "text":
+            continue
+        text = (workspace.root(p) / rel).read_text(encoding="utf-8", errors="replace")
+        if rel.endswith(".bib"):
+            for m in re.finditer(r"@\w+\s*\{\s*([^,\s]+)\s*,", text):
+                if not any(c["key"] == m.group(1) for c in cites):
+                    t = re.search(r"title\s*=\s*[{\"]+([^}\"]+)", text[m.end():m.end() + 1500])
+                    cites.append({"key": m.group(1), "what": (t.group(1) if t else "")[:90]})
+        else:
+            for m in re.finditer(r"\\bibitem\s*(?:\[[^\]]*\])?\s*\{([^{}]+)\}([^\n]{0,160})", text):
+                if not any(c["key"] == m.group(1) for c in cites):
+                    t = re.search(r"\\emph\{([^{}]+)\}", m.group(2))
+                    cites.append({"key": m.group(1), "what": (t.group(1) if t else m.group(2).strip())[:90]})
+    envs = sorted(set(kinds) | {"proof", "equation", "equation*", "align", "align*", "gather", "gather*", "multline",
+                                "itemize", "enumerate", "description", "figure", "table", "center", "tabular", "cases",
+                                "pmatrix", "bmatrix", "abstract", "quote"})
+    files = workspace.files(p)
+    return {"labels": labels, "cites": cites, "envs": envs,
+            "tex": [f[:-4] for f in files if f.endswith(".tex")], "images": [f for f in files if workspace._kind(f) == "binary"]}
+
+
+async def api_editor_outline(request: Request):
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    o = await run_in_threadpool(workspace.outline, p)
+    comp = await run_in_threadpool(_completions, p, o["items"], o["kinds"])
+    return ok(items=o["items"], numbers_from=o["numbers_from"], complete=comp)
+
+
+async def api_editor_sync(request: Request):
+    """SyncTeX: from a line to the PDF (forward), or from a point of the PDF to the line (inverse)."""
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    body = await _body(request)
+    s = await run_in_threadpool(workspace.sync, p)
+    if not s:
+        return fail("Compile first: the link between the source and the PDF comes from compiling.")
+    try:
+        if body.get("direction") == "inverse":
+            got = s.inverse(int(body.get("page") or 1), float(body.get("x") or 0), float(body.get("y") or 0))
+        else:
+            got = s.forward(str(body.get("path") or ""), int(body.get("line") or 1))
+    except (TypeError, ValueError):
+        return fail("Bad position.")
+    if not got:
+        return fail("That place could not be found in the PDF. Compile again, then try once more.")
+    return ok(got)
+
+
+def _ingest_any(files: list[tuple[str, bytes]], folder, start: int) -> list[dict]:
+    """Pages from any upload: typed notes (LaTeX, an Overleaf zip, Markdown, text) become pages whose source is their
+    transcript; PDFs and images are rendered as before (a computer-made PDF keeps its text layer beside them)."""
+    typed_files = [(n, d) for n, d in files if typed.is_typed(n, d)]
+    other = [(n, d) for n, d in files if not typed.is_typed(n, d)]
+    pages: list[dict] = []
+    if typed_files:
+        pages, info = typed.ingest_typed(typed_files, folder / "pages", start)
+        f = folder / "typed.json"
+        old = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+        if old:                                   # typed pages added later: their pages join the earlier ones
+            info = {**old, "pages": {**old.get("pages", {}), **info["pages"]},
+                    "preamble": list(dict.fromkeys(old.get("preamble", []) + info["preamble"])),
+                    "katex": {**old.get("katex", {}), **info["katex"]}}
+        f.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+        typed.save_assets(typed_files, folder)
+    if other:
+        pages += ingest.ingest(other, folder / "pages", start + len(pages))
+    return pages
+
+
+def _resolve_for(p: store.Project, ident: str):
+    """A paper added by hand, within the project's test-mode limits (if it was made in test mode)."""
+    literature.set_limits(p.state.get("meta", {}).get("test"))
+    try:
+        return literature.resolve_identifier(ident)
+    finally:
+        literature.set_limits(None)
+
+
+async def import_paper(request: Request):
+    """A paper written elsewhere (a .tex file, or an Overleaf project as a .zip), opened in the editor for a
+    referee's report or the proofs. Nothing is read by a model and no pipeline runs on it."""
+    form = await request.form()
+    files = []
+    for f in form.getlist("files"):
+        if hasattr(f, "read"):
+            data = await f.read()
+            if data:
+                files.append((f.filename or "upload", data))
+    if not files:
+        return fail("Choose the paper's .tex file, or its Overleaf project as a .zip (with its figures and .bib).")
+    try:
+        tree = typed.unpack(files)
+    except Exception as e:  # noqa: BLE001
+        return fail(f"Could not read the upload: {e}")
+    main = typed.main_tex(tree)
+    if not main:
+        return fail("No .tex file with \\documentclass was found in the upload.")
+    title = typed.split_document(typed.text_of(tree[main]))[2]
+    pid = store.new_id()
+    meta = {"name": (str(form.get("name") or "") or title or main)[:120], "title": title[:300], "imported": True,
+            "domains": [], "subarea": "", "hints": "", "authors": [], "known_refs": [], "problem": "", "keywords": [],
+            "key_papers": [], "files": sorted(tree)[:200], "journal": None, "statements": {}}
+    p = store.create(meta, [], pid)
+    try:
+        await run_in_threadpool(workspace.import_tree, p, tree, main)
+    except workspace.WorkspaceError as e:
+        store.delete(pid)
+        return fail(str(e))
+    return ok(id=pid)
+
+
+async def api_add_pages(request: Request):
+    """More pages for notes that already have a paper: recorded like the first upload, then read on their own."""
+    p = store.get(request.path_params["pid"])
+    if not p:
+        return fail("Project not found.", 404)
+    if pipeline.is_running(p.id):
+        return fail("Stop the run before adding pages.")
+    form = await request.form()
+    files = []
+    for f in form.getlist("files"):
+        if hasattr(f, "read"):
+            data = await f.read()
+            if data:
+                files.append((f.filename or "upload", data))
+    if not files:
+        return fail("Choose a PDF or page images to add.")
+    meta = p.state["meta"]
+    start = max([pg["n"] for pg in p.state.get("pages", [])] or [0])
+    k = len(list((p.dir / "additions").iterdir())) + 1 if (p.dir / "additions").exists() else 1
+    folder = p.dir / "additions" / f"{k:03d}"
+    try:                    # the added pages get their own signed, timestamped record, following the record of the notes
+        about = _record_about(meta, meta.get("declaration"))
+        notes = provenance.status(p.dir)
+        if notes:
+            about["follows"] = {"kind": "notes", "fingerprint": notes["digest"]}
+        await run_in_threadpool(provenance.make_record, folder, files, about, "notes", True,
+                                f"Pages added to the notes (pages {start + 1} onwards)")
+        provenance.work_later(folder)
+    except Exception as e:  # noqa: BLE001 - the record must not stop the reading; the error is kept beside it
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "error.txt").write_text(f"The record could not be made: {e}", encoding="utf-8")
+    try:
+        new = await run_in_threadpool(_ingest_any, files, p.dir, start)
+    except Exception as e:  # noqa: BLE001
+        return fail(f"Could not read the upload: {e}")
+    if not new:
+        return fail("No pages were found in the upload.")
+    return ok(await run_in_threadpool(pipeline.add_pages, p, new))
+
+
+async def api_reply(request: Request):
+    """The referee's report or the proof corrections: read, carried out point by point, and answered in a letter."""
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    if request.method == "GET":
+        return ok({**reviews.load(p), "busy": reviews.is_busy(p)})
+    try:
+        if (request.headers.get("content-type") or "").startswith("multipart/"):
+            form = await request.form()
+            body = {k: form.get(k) for k in ("action", "kind", "text", "title")}
+            f = form.get("file")
+            if hasattr(f, "read"):
+                data = await f.read()
+                if data:
+                    body["text"] = ((body.get("text") or "") + "\n\n" + reviews.report_text(f.filename or "", data)).strip()
+        else:
+            body = await _body(request)
+        action = body.get("action")
+        if action == "start":
+            res = await run_in_threadpool(reviews.start, p, str(body.get("kind") or ""), str(body.get("text") or ""), str(body.get("title") or ""))
+        elif action == "decide":
+            res = await run_in_threadpool(reviews.decide, p, str(body.get("round") or ""), str(body.get("point") or ""),
+                                          str(body.get("choice") or ""), str(body.get("note") or ""))
+        elif action == "letter":
+            res = await run_in_threadpool(reviews.letter, p, str(body.get("round") or ""))
+        else:
+            return fail("Unknown action.")
+    except (assist.AssistError, LLMError) as e:
+        return fail(str(e))
+    return ok({"round": res, **reviews.load(p), "busy": reviews.is_busy(p)})
+
+
+async def api_refcheck(request: Request):
+    """Every reference of the paper looked up: exists, is the paper the entry says, not retracted."""
+    p = _project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    if workspace.exists(p):
+        bib = "\n".join(workspace.read_text(p, rel)["text"] for rel in workspace.files(p) if rel.lower().endswith(".bib"))
+    else:
+        f = p.dir / "out" / "references.bib"
+        bib = f.read_text(encoding="utf-8") if f.exists() else ""
+    if not bib.strip():
+        return fail("The paper has no .bib file to check.")
+    return ok(await run_in_threadpool(citecheck.check_bib, bib))
+
+
+async def api_arxiv(request: Request):
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    try:
+        return ok(await run_in_threadpool(arxivpack.prepare, p))
+    except (ValueError, workspace.WorkspaceError) as e:
+        return fail(str(e))
+
+
+async def api_memory(request: Request):
+    body = await _body(request)
+    if body.get("action") == "clear":
+        memory.clear()
+    return ok(memory.stats())
+
+
+async def api_editor_source(request: Request):
+    """Where a line of the paper came from in the handwritten notes: the page, and the lines on it."""
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    body = await _body(request)
+    try:
+        doc = await run_in_threadpool(workspace.read_text, p, str(body.get("path") or ""))
+        line = int(body.get("line") or 1)
+    except (workspace.WorkspaceError, TypeError, ValueError) as e:
+        return fail(str(e) or "Bad position.")
+    try:
+        res = await run_in_threadpool(sources.source_of, p, doc.get("text", ""), line, bool(body.get("point", True)))
+    except LLMError as e:
+        return fail(f"The page reader is not available: {e}")
+    return ok(res)
+
+
+async def api_editor_history(request: Request):
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    if request.method == "GET":
+        vs = workspace.versions(p)
+        return ok(versions=[{k: v for k, v in x.items() if k != "files"} | {"files": len(x["files"])} for x in reversed(vs)])
+    body = await _body(request)
+    try:
+        if body.get("action") == "save":
+            v = await run_in_threadpool(workspace.snapshot, p, str(body.get("label") or "Saved by you")[:120] or "Saved by you",
+                                        "manual", True)
+            return ok(version={k: x for k, x in (v or {}).items() if k != "files"})
+        if body.get("action") == "diff":
+            return ok(files=await run_in_threadpool(workspace.diff_version, p, int(body.get("id"))))
+        if body.get("action") == "restore":
+            await run_in_threadpool(workspace.restore, p, int(body.get("id")))
+            return ok(tree=workspace.tree(p))
+    except (workspace.WorkspaceError, TypeError, ValueError) as e:
+        return fail(str(e) or "Unknown version.")
+    return fail("Unknown action.")
+
+
+async def api_editor_download(request: Request):
+    p = _editor_project(request)
+    if not p:
+        return Response(status_code=404)
+    data = await run_in_threadpool(workspace.zip_project, p)
+    name = re.sub(r"[^A-Za-z0-9._\-]+", "-", (p.state.get("meta", {}).get("name") or "paper"))[:60].strip("-") or "paper"
+    return Response(data, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{name}-latex.zip"'})
+
+
+async def api_editor_assist(request: Request):
+    """A command in plain words, answered with a proposal to review. Nothing is written here."""
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    body = await _body(request)
+    where = body.get("where") if isinstance(body.get("where"), dict) else {}
+    try:
+        if isinstance(body.get("error"), dict):
+            prop = await run_in_threadpool(assist.explain_error, p, body["error"])
+        else:
+            prop = await run_in_threadpool(assist.run, p, str(body.get("command") or "")[:4000], where, bool(body.get("relax")))
+    except assist.AssistError as e:
+        return fail(str(e))
+    except workspace.WorkspaceError as e:
+        return fail(str(e))
+    return ok(proposal=prop)
+
+
+async def api_editor_apply(request: Request):
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    body = await _body(request)
+    keep = body.get("keep")
+    try:
+        res = await run_in_threadpool(assist.apply, p, str(body.get("id") or ""),
+                                      [str(x) for x in keep] if isinstance(keep, list) else None)
+    except (assist.AssistError, workspace.WorkspaceError) as e:
+        return fail(str(e))
+    return ok(res)
+
+
+# ------------------------------------------------------------ proof of authorship
+
+async def api_proof(request: Request):
+    """GET: the record of the notes. POST: make it now (a paper started before records existed), ask for the
+    timestamps again, or record the current version of the paper from the editor."""
+    p = _project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    if request.method == "GET":
+        return ok(proof=_proof_info(p), versions=_version_proofs(p), identity=_identity_public())
+    body = await _body(request)
+    action = body.get("action")
+    meta = p.state.get("meta", {})
+    try:
+        if action == "record_now":
+            if provenance.status(p.dir):
+                return fail("These notes already have a record.")
+            authors = meta.get("authors") or []
+            if not authors:
+                return fail("Name at least one author first (the paper's details): the record says who wrote the notes.")
+            made_by, why = _declaration(body, authors)
+            if not made_by:
+                return fail(why)
+            pages = sorted((p.dir / "pages").glob("p*.jpg"))
+            if not pages:
+                return fail("No page images were found for these notes.")
+            await run_in_threadpool(provenance.make_record, p.dir, [(f.name, f.read_bytes()) for f in pages],
+                                    _record_about(meta, made_by), "notes", False,
+                                    "Recorded after the upload, from the page images Scriptavera kept: the version of "
+                                    "Scriptavera that read these notes did not keep the original files.")
+            p.update_state(lambda st: st["meta"].update(declaration={**made_by, "text": declaration_text(authors, made_by),
+                                                                         "at": time.time()}))
+            provenance.work_later(p.dir)
+        elif action == "retry":
+            if not provenance.status(p.dir):
+                return fail("There is no record yet.")
+            await run_in_threadpool(provenance.timestamp, p.dir)
+            await run_in_threadpool(provenance.upgrade, p.dir)
+        elif action == "version":
+            if not workspace.exists(p):
+                return fail("Open the editor first.")
+            n = len(_version_proofs(p)) + 1
+            folder = p.dir / "editor_proofs" / f"{n:03d}"
+            files = [(rel, (workspace.root(p) / rel).read_bytes()) for rel in workspace.files(p)]
+            about = _record_about(meta, None)
+            about["title"] = (p.load("paper") or {}).get("title") or about["title"]
+            notes = provenance.status(p.dir)
+            if notes:                         # the chain: this version of the paper follows the record of the notes
+                about["follows"] = {"kind": "notes", "fingerprint": notes["digest"]}
+            await run_in_threadpool(provenance.make_record, folder, files, about, "paper", False,
+                                    str(body.get("label") or "A version of the paper, from the LaTeX editor")[:300])
+            provenance.work_later(folder)
+        else:
+            return fail("Unknown action.")
+    except Exception as e:  # noqa: BLE001
+        return fail(f"The record could not be made: {e}")
+    return ok(proof=_proof_info(p), versions=_version_proofs(p))
+
+
+def _version_proofs(p: store.Project) -> list[dict]:
+    base = p.dir / "editor_proofs"
+    out = []
+    if base.exists():
+        for d in sorted(base.iterdir()):
+            s = provenance.summary(d) if d.is_dir() else None
+            if s:
+                if provenance.due(d):
+                    provenance.work_later(d)
+                out.append({"id": d.name, **s})
+    return out
+
+
+def _proof_folder(p: store.Project, rec: str):
+    if rec in ("", "notes"):
+        return p.dir
+    if re.fullmatch(r"\d{3}", rec) and (p.dir / "editor_proofs" / rec).is_dir():
+        return p.dir / "editor_proofs" / rec
+    return None
+
+
+async def api_proof_certificate(request: Request):
+    p = _project(request)
+    folder = _proof_folder(p, request.query_params.get("rec", "")) if p else None
+    if not folder or not provenance.status(folder):
+        return Response("No record.", status_code=404)
+    return Response(provenance.certificate_html(folder), media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
+
+
+async def api_proof_bundle(request: Request):
+    p = _project(request)
+    rec = request.query_params.get("rec", "")
+    folder = _proof_folder(p, rec) if p else None
+    if not folder or not provenance.status(folder):
+        return Response(status_code=404)
+    data = await run_in_threadpool(provenance.bundle, folder, bool(request.query_params.get("files")))
+    name = "notes" if rec in ("", "notes") else f"version-{rec}"
+    return Response(data, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="proof-of-{name}.zip"'})
+
+
+async def api_proof_verify(request: Request):
+    """Check a record the way anyone would: from the proof zip and the files themselves."""
+    form = await request.form()
+    files = []
+    for f in form.getlist("files"):
+        if hasattr(f, "read"):
+            data = await f.read()
+            if data:
+                files.append((f.filename or "file", data))
+    if not files:
+        return fail("Add the proof (the zip) and the files it is about.")
+    res = await run_in_threadpool(provenance.verify, files)
+    return ok(check=res)            # nested: a record that does not hold is a finding, not a failed request
+
+
+def _identity_public() -> dict:
+    try:
+        me = provenance.identity()
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)}
+    return {"fingerprint": me["fingerprint"], "created": me["created"], "pem": me["pem"]}
+
+
+async def api_identity(request: Request):
+    me = await run_in_threadpool(_identity_public)
+    if request.query_params.get("download") and me.get("pem"):
+        return Response(me["pem"], media_type="application/x-pem-file",
+                        headers={"Content-Disposition": 'attachment; filename="scriptavera-public-key.pem"'})
+    return ok(identity=me)
+
+
 async def index(request: Request):
     return FileResponse(config.STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
@@ -848,9 +1602,12 @@ routes = [
     Route("/api/shutdown", api_shutdown, methods=["POST"]),
     Route("/api/settings", api_settings, methods=["POST"]),
     Route("/api/settings/test", api_test, methods=["POST"]),
+    Route("/api/test_mode", api_test_mode, methods=["POST"]),
     Route("/api/journals", api_journals),
     Route("/api/projects", api_projects, methods=["GET"]),
     Route("/api/projects", api_create, methods=["POST"]),
+    Route("/api/import_paper", import_paper, methods=["POST"]),
+    Route("/api/phone", api_phone, methods=["GET", "POST"]),
     Route("/api/projects/{pid}", api_project, methods=["GET", "DELETE"]),
     Route("/api/projects/{pid}/run", api_run, methods=["POST"]),
     Route("/api/projects/{pid}/stop", api_stop, methods=["POST"]),
@@ -861,6 +1618,7 @@ routes = [
     Route("/api/projects/{pid}/confirm", api_confirm, methods=["POST"]),
     Route("/api/projects/{pid}/library", api_library, methods=["POST"]),
     Route("/api/projects/{pid}/locate", api_locate, methods=["POST"]),
+    Route("/api/projects/{pid}/add_pages", api_add_pages, methods=["POST"]),
     Route("/api/projects/{pid}/reglossary", api_reglossary, methods=["POST"]),
     Route("/api/projects/{pid}/transcript/{n}", api_transcript, methods=["PUT"]),
     Route("/api/projects/{pid}/doubt", api_doubt, methods=["POST"]),
@@ -877,6 +1635,32 @@ routes = [
     Route("/api/projects/{pid}/name", api_name, methods=["POST"]),
     Route("/api/projects/{pid}/journal/guide", api_journal_guide, methods=["POST"]),
     Route("/api/projects/{pid}/download/{name}", api_download),
+    Route("/api/projects/{pid}/extra", api_extra, methods=["POST"]),
+    Route("/api/projects/{pid}/review_pack", api_review_pack),
+    Route("/editor/{pid}", editor_page),
+    Route("/api/projects/{pid}/editor", api_editor, methods=["GET", "POST"]),
+    Route("/api/projects/{pid}/editor/file", api_editor_file, methods=["GET", "PUT"]),
+    Route("/api/projects/{pid}/editor/files", api_editor_files, methods=["POST"]),
+    Route("/api/projects/{pid}/editor/upload", api_editor_upload, methods=["POST"]),
+    Route("/api/projects/{pid}/editor/compile", api_editor_compile, methods=["POST"]),
+    Route("/api/projects/{pid}/editor/pdf", api_editor_pdf),
+    Route("/api/projects/{pid}/editor/log", api_editor_log),
+    Route("/api/projects/{pid}/editor/outline", api_editor_outline),
+    Route("/api/projects/{pid}/editor/sync", api_editor_sync, methods=["POST"]),
+    Route("/api/projects/{pid}/editor/source", api_editor_source, methods=["POST"]),
+    Route("/api/projects/{pid}/editor/reply", api_reply, methods=["GET", "POST"]),
+    Route("/api/projects/{pid}/refcheck", api_refcheck, methods=["POST"]),
+    Route("/api/projects/{pid}/editor/arxiv", api_arxiv, methods=["POST"]),
+    Route("/api/memory", api_memory, methods=["POST"]),
+    Route("/api/projects/{pid}/editor/history", api_editor_history, methods=["GET", "POST"]),
+    Route("/api/projects/{pid}/editor/download", api_editor_download),
+    Route("/api/projects/{pid}/editor/assist", api_editor_assist, methods=["POST"]),
+    Route("/api/projects/{pid}/editor/apply", api_editor_apply, methods=["POST"]),
+    Route("/api/projects/{pid}/proof", api_proof, methods=["GET", "POST"]),
+    Route("/api/projects/{pid}/proof/certificate", api_proof_certificate),
+    Route("/api/projects/{pid}/proof/bundle", api_proof_bundle),
+    Route("/api/proof/verify", api_proof_verify, methods=["POST"]),
+    Route("/api/identity", api_identity),
     Mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static"),
 ]
 
@@ -914,6 +1698,10 @@ class LocalOnly:
 
 
 def create_app():
+    import mimetypes
+    for ext, kind in ((".js", "text/javascript"), (".mjs", "text/javascript"), (".css", "text/css"), (".svg", "image/svg+xml"),
+                      (".woff2", "font/woff2"), (".pdf", "application/pdf")):
+        mimetypes.add_type(kind, ext)     # Windows can map .js to text/plain in its registry; modules then refuse to load
     config.load_env()
     config.PROJECTS_DIR.mkdir(exist_ok=True)
     _recover()

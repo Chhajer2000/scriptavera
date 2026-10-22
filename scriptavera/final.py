@@ -90,6 +90,13 @@ def build_outputs(p: Project, paper: dict, compile_now: bool = True) -> dict:
     out = p.dir / "out"
     out.mkdir(exist_ok=True)
     extra: dict[str, bytes] = {}
+    typed = p.load("typed") or {}
+    paper["source_preamble"], paper["katex_macros"] = typed.get("preamble", []), typed.get("katex", {})
+    src_dir = p.dir / "source_files"
+    if src_dir.exists():                        # figures and files of typed notes, where \includegraphics finds them
+        for f in src_dir.rglob("*"):
+            if f.is_file() and f.suffix.lower() in (".png", ".jpg", ".jpeg", ".pdf", ".eps"):
+                extra[f.relative_to(src_dir).as_posix()] = f.read_bytes()
     for fid in paperlib.figures_used(paper):
         if paper["figures"][fid].get("mode") == "orig" and figure_file(p, fid, "orig").exists():
             extra[f"figures/{fid}.jpg"] = figure_file(p, fid, "orig").read_bytes()
@@ -101,17 +108,35 @@ def build_outputs(p: Project, paper: dict, compile_now: bool = True) -> dict:
     pages = None
     standard_tex = ""
     if compile_now:
-        res, marked = None, ""
-        for _ in range(3):                         # a command defined nowhere is declared as an operator name, once
-            marked = paperlib.build_tex(paper, refs, prof, markers=True)
-            res = paperlib.compile_pdf(marked, files=extra)
-            fresh = {"\\" + n: f"\\operatorname{{{n}}}" for n in res["undefined"]
-                     if n.isalpha() and "\\" + n not in {**paperlib.MACROS, **(paper.get("macros") or {})}}
-            if not fresh:
-                break
-            paper["macros"] = {**(paper.get("macros") or {}), **fresh}
+        # A command used in a formula that LaTeX does not define, even with the packages the paper loads (a
+        # shorthand a model invented, such as \Fix), is declared as an operator name and said so. Which commands
+        # are undefined is asked of TeX itself, on every build, so a wrong declaration made earlier disappears.
+        undef = paperlib.undefined_commands(paperlib.build_tex({**paper, "macros": {}}, refs, prof))
+        if undef is not None:
+            paper["macros"] = {"\\" + n: f"\\operatorname{{{n}}}" for n in undef if "\\" + n not in paperlib.MACROS}
+        else:                                      # no LaTeX here to ask: at least never redeclare a known command
+            paper["macros"] = {k: v for k, v in (paper.get("macros") or {}).items()
+                               if k[1:] not in paperlib.PACKAGE_OF and k[1:] not in paperlib.KNOWN_COMMANDS}
+        paper["macros_version"] = 2
+        marked = paperlib.build_tex(paper, refs, prof, markers=True)
+        res = paperlib.compile_pdf(marked, files=extra)
+        if res["pdf"] and res.get("overfull"):        # formulas wider than the page: broken over lines, the standard way
+            for _ in range(3):
+                if not paperlib.break_overfull(paper, marked, res["overfull"]):
+                    break
+                marked = paperlib.build_tex(paper, refs, prof, markers=True)
+                res = paperlib.compile_pdf(marked, files=extra)
+                if not res.get("overfull"):
+                    break
         errs = [{**e, "block": paperlib.block_at_line(marked, e["line"])} for e in res["errors"]]
-        paper["compile"].update(engine=res["engine"], ok=res["ok"], errors=errs)
+        notes = [{"message": f"{n} is not defined by LaTeX or by any package the paper loads; it is printed as the "
+                             f"upright name “{n[1:]}”. If you meant something else, change the passages that use it.",
+                  "command": n} for n in sorted(paper.get("macros") or {})]
+        notes += [{"message": f"A formula is {o['too_wide']} wider than the page and could not be broken over lines "
+                              "by rule; it sticks into the margin. Break it by hand (with split or multline) or ask "
+                              "for it to be rewritten.", "block": paperlib.block_at_line(marked, o["line"]), "line": o["line"]}
+                  for o in res.get("overfull") or [] if o.get("math")]
+        paper["compile"].update(engine=res["engine"], ok=res["ok"], errors=errs, notes=notes)
         pdf, pages = res["pdf"], res["pages"]
         if res["engine"] and not res["ok"] and prof["template"] not in ("amsart", "article"):
             # the journal's class is missing or failed on this computer: the PDF is set in the standard class
@@ -271,6 +296,18 @@ def _polish_one(run: Run, text: str, points: list[dict], notation: str, choice: 
     """Copy-edit one passage. Returns (new text or "", what happened)."""
     system = prompts.POLISH.format()
     listing = "\n".join(f"- ({x['type']}) {x['comment']} {x['action']}".strip() for x in points) or "(none for this part)"
+    ckey = hashlib.sha256(f"{listing}\n{notation}\n{choice}\n{text}".encode("utf-8")).hexdigest()[:24]
+    cache = run.p.load("polish_cache", {}) or {}
+    if run.p.state.get("incremental") and ckey in cache:
+        return cache[ckey][0], "kept from the last version (unchanged)"
+    out = _polish_fresh(run, system, listing, text, notation, choice, label)
+    if out[0]:
+        cache[ckey] = list(out)
+        run.p.save("polish_cache", dict(list(cache.items())[-400:]))
+    return out
+
+
+def _polish_fresh(run: Run, system: str, listing: str, text: str, notation: str, choice: str, label: str) -> tuple[str, str]:
     head = (f"NOTATION CHOICE\n{choice or '(none)'}\n\nCONFIRMED NOTATION\n{notation}\n\n"
             f"REFEREE'S POINTS ON PRESENTATION\n{listing}\n\n")
     why = ""
@@ -473,7 +510,7 @@ def stage_assemble(run: Run) -> None:
             run, body.get("blocks", []), (p.load("intro") or {}).get("text", ""))
         state.update(blocks=blocks, intro_decided=decided, waived=waived, approved=approved, report=report)
         save()
-        done = len(report["simplified"]) + len(report["corrected"]) + len(report["instructed"]) + len(report["remarks"])
+        done = len(report["simplified"]) + len(report.get("completed", [])) + len(report["corrected"]) + len(report["instructed"]) + len(report["remarks"])
         if done or report["unapplied"]:
             run.log(f"{done} decided change(s) made." + (f" {len(report['unapplied'])} could not be made automatically; "
                     "they are listed in the Revision tab." if report["unapplied"] else ""),
@@ -743,6 +780,13 @@ def open_items(p: Project, paper: dict | None = None) -> list[dict]:
     unapplied = {x.get("id") for x in (paper.get("revision") or {}).get("unapplied", [])}
     changed = {c["label"] for c in revision.decision_items(p)["issues"]
                if (dec.get(c["id"]) or {}).get("choice") in ("fix", "instruct") and c["id"] not in unapplied}
+    cdec = (p.load("decisions") or {}).get("complete") or {}
+    for c in revision.decision_items(p)["complete"]:
+        how = (cdec.get(c["id"]) or {}).get("choice")
+        if how in ("accept", "edit", "instruct") and c["id"] not in unapplied:
+            changed.add(c["label"])
+        elif how == "keep":
+            items.append({"level": "note", "text": f"{c['name']}: its proof is a sketch, and you kept the sketch rather than the completed proof."})
     for x in d.get("results", []):
         if x.get("treatment") == "gap" and f"res:{x['id']}" not in changed:
             items.append({"level": "error", "text": f"Result {x['id']}: its proof in your notes is incomplete, and it is "

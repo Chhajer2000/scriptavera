@@ -213,4 +213,46 @@ assert P["abstract"].endswith("(Revised as requested.)"), "an abstract inside th
 P = final.set_journal(p, None)
 assert P["profile"]["journal"] is None and len(P["keywords"]) == 7 and "Test Author" in (p.dir / "out" / "main.tex").read_text()
 print("5. journal: guide read, requirements applied, anonymous version built, journal cleared again")
+
+# ---------------------------------------------------------------- from the finished paper: summary, slides, poster
+from scriptavera import extras
+sm = extras.make(p, "summary")
+assert sm["text"].startswith("The question") and (p.dir / "out" / "summary.txt").exists()
+sl = extras.make(p, "slides")
+assert (p.dir / "out" / "slides.tex").exists() and "\\begin{frame}{The question}" in (p.dir / "out" / "slides.tex").read_text()
+assert any("x^{17}" in f for f in sl["foreign"]), "a formula that is not in the paper is reported"
+assert sl["compiled"] in (None, True) and (sl["compiled"] is None or (p.dir / "out" / "slides.pdf").exists()), sl
+po = extras.make(p, "poster")
+assert "\\section*{Results}" in (p.dir / "out" / "poster.tex").read_text() and po["compiled"] in (None, True), po
+pack = extras.review_pack(p).decode("utf-8")
+assert "var PACK=" in pack and "data:image/jpeg;base64," in pack and "Download my comments" in pack and 'data-block="' in pack
+PK = json.loads(re.search(r"var PACK=(\{.*?\});</script>", pack, re.S).group(1))
+bid = next(k for k, v in PK["blocks"].items() if v["page"])
+rep = extras.comments_to_report(json.dumps({"paper": "T", "reviewer": "A. Colleague", "comments": [
+    {"block": bid, "where": PK["blocks"][bid]["where"], "quote": "We have", "comment": "Say why the sum is finite."}]}).encode())
+assert rep.startswith("Comments from A. Colleague") and "Say why the sum is finite." in rep and PK["blocks"][bid]["where"] in rep
+print("5b. from the paper: a plain-language summary, slides (a formula not in the paper reported), a poster, and a review pack for a co-author")
+
+# ---------------------------------------------------------------- pages added to notes that already have a paper
+from helpers import page_images
+from scriptavera import ingest
+before = len(p.calls(100000))
+new = ingest.ingest(page_images(1), p.dir / "pages", start=max(pg["n"] for pg in p.state["pages"]))
+assert pipeline.add_pages(p, new)["pages"] == [7] and p.state["incremental"]["rounds"][-1]["pages"] == [7]
+st = p.state["stages"]
+assert st["review"]["status"] == "pending" and st["transcribe"]["status"] == "pending" and st["assemble"]["status"] == "pending"
+assert p.load("write_cache") and p.load("verify_cache") and "1" in (p.load("transcript") or {}).get("pages", {})
+pipeline.start(p); wait(p, "review")
+read = [c.get("label") or "" for c in p.calls(100000)[before:] if c.get("stage") in ("survey", "transcribe")]
+assert read and not any(re.search(r"\bpage ([1-6])\b", l) for l in read), read
+pipeline.submit_review(p, {"figures": {f["id"]: f.get("choice") or "orig" for f in (p.load("figures") or {}).get("items", [])}})
+pipeline.start(p); wait(p, "scope")
+if p.state["stages"]["scope"]["status"] == "waiting":
+    writing.submit_scope(p, {"kind": "article", "results": {"R4": "keep", "R2": "credit"}})
+pipeline.start(p); wait(p, "decide")
+kept = [c for c in p.calls(100000)[before:] if c.get("stage") == "structure" and c.get("role") == "writer"]
+log = (p.dir / "calls.jsonl").read_text(encoding="utf-8")
+vk = [r for r in (p.load("verify") or {}).get("results", {}).values() if r.get("kept")]
+assert vk, "an unchanged proof keeps its check"
+print(f"6. pages added: only page 7 read; {len(vk)} unchanged proof check(s) kept; {len(kept)} writer call(s) for the changed part")
 print("pipeline ok")

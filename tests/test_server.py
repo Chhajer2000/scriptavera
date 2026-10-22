@@ -69,12 +69,15 @@ assert call("GET", "/api/journals", params={"q": "ab"})["journals"] == []
 assert post("/api/projects/nope/run", expect=404)["error"]
 
 meta = {"name": "Server test", "domains": ["math.CA", "not.a.domain"], "subarea": "series", "title": "",
-        "authors": [{"name": "A. Tester", "affiliation": "Somewhere", "email": ""}, {"name": "  "}],
+        "authors": [{"name": "A. Tester", "affiliation": "Somewhere", "email": "", "orcid": "https://orcid.org/0000-0002-1825-0097"}, {"name": "  "}],
+        "declaration": {"agreed": True, "author": 0},
         "known_refs": [], "journal": j["journals"][0], "problem": "Bounds for partial sums of series of reciprocal powers.",
         "keywords": "partial sums, reciprocal powers, explicit bounds", "key_papers": []}
 bad = requests.post(B + "/api/projects", data={"meta": json.dumps({**meta, "domains": []})}, files={"files": ("notes.pdf", pages_pdf(), "application/pdf")})
 assert bad.status_code == 400 and "domain" in bad.json()["error"]
-for missing, word in (({"problem": "short"}, "problem"), ({"keywords": "one"}, "keywords")):
+for missing, word in (({"problem": "short"}, "problem"), ({"keywords": "one"}, "keywords"), ({"authors": [{"name": " "}]}, "author"),
+                      ({"declaration": {"agreed": False, "author": 0}}, "declaration"), ({"declaration": {"agreed": True}}, "making the record"),
+                      ({"authors": [{"name": "A. Tester", "orcid": "0000-0002-1825-0098"}]}, "ORCID")):
     bad = requests.post(B + "/api/projects", data={"meta": json.dumps({**meta, **missing})}, files={"files": ("notes.pdf", pages_pdf(), "application/pdf")})
     assert bad.status_code == 400 and word in bad.json()["error"], bad.text
 r = requests.post(B + "/api/projects", data={"meta": json.dumps(meta)}, files={"files": ("notes.pdf", pages_pdf(), "application/pdf")})
@@ -82,6 +85,17 @@ assert r.status_code == 200, r.text
 pid = r.json()["id"]
 b = project(pid)
 assert len(b["state"]["pages"]) == 6 and b["state"]["meta"]["domains"] == ["math.CA"] and len(b["state"]["meta"]["authors"]) == 1
+assert b["state"]["meta"]["authors"][0]["orcid"] == "0000-0002-1825-0097", "an ORCID iD is kept in its standard form"
+pr = b["proof"]                                   # the record made at upload names the authors and carries the declaration
+assert pr["authors"][0]["name"] == "A. Tester" and pr["recorded_by"] == {"name": "A. Tester", "is_author": True}
+assert pr["declaration"].startswith("I, A. Tester, am the author of these notes.") and pr["subjects"][0]["code"] == "math.CA"
+assert pr["description"].startswith("Bounds for partial sums") and pr["keywords"][0] == "partial sums"
+import shutil                                     # a paper uploaded before records existed: recorded later, with a declaration
+shutil.rmtree(config.PROJECTS_DIR / pid / "proof"); shutil.rmtree(config.PROJECTS_DIR / pid / "originals")
+assert project(pid)["proof"]["missing"]
+assert "declaration" in post(f"/api/projects/{pid}/proof", {"action": "record_now"}, expect=400)["error"]
+late = post(f"/api/projects/{pid}/proof", {"action": "record_now", "declaration": {"agreed": True, "author": 0}})["proof"]
+assert late["declaration"].startswith("I, A. Tester, am the author") and "after the upload" in late["note"] and len(late["files"]) == 6
 assert b["journal"]["name"] == "Simulated Annals of Inequalities" and b["profile"]["template"] == "elsarticle" and b["profile"]["origin"]["template"] == "typical"
 assert call("GET", f"/api/projects/{pid}/page/1").headers["content-type"] == "image/jpeg" and call("GET", f"/api/projects/{pid}/page/99", 404)
 assert any(x["id"] == pid for x in call("GET", "/api/projects")["projects"])

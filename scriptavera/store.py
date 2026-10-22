@@ -35,7 +35,7 @@ STAGES: list[dict] = [
      "desc": "Refined search; the most relevant papers read one by one"},
     {"id": "transcribe", "phase": "read", "name": "Final transcription",
      "desc": "Every page re-read with confirmed notation and context"},
-    {"id": "figures", "phase": "read", "name": "Figures", "desc": "Each sketch in your notes is redrawn as a proper figure"},
+    {"id": "figures", "phase": "read", "name": "Figures", "desc": "Each drawing is judged: a figure for the paper is redrawn; one that only explains your argument is not printed"},
     {"id": "review", "phase": "read", "name": "Your review",
      "desc": "You check the transcript and say whether each figure is what you meant", "gate": True},
     {"id": "understand", "phase": "write", "name": "Understanding the paper",
@@ -62,7 +62,7 @@ STAGES: list[dict] = [
      "desc": "You choose the title from the suggestions, approve the introduction and choose the papers it cites", "gate": True},
 ]
 STAGE_IDS = [s["id"] for s in STAGES]
-LAYOUT = 5                      # bumped whenever the list of stages changes
+LAYOUT = 6                      # bumped whenever the list of stages, or what a stage makes, changes
 
 # What each stage writes. Redoing a stage removes its own files and those of every later stage.
 ARTIFACTS: dict[str, list[str]] = {
@@ -76,7 +76,7 @@ ARTIFACTS: dict[str, list[str]] = {
     "figures": ["figures"],
     "review": ["approved"],
     "understand": ["dossier"],
-    "assess": ["assessment"],
+    "assess": ["assessment", "novelty"],
     "scope": ["scope"],
     "intro": ["intro"],
     "structure": ["plan", "body", "audit", "structure_partial", "outline"],
@@ -242,6 +242,7 @@ def migrate(p: Project) -> None:
         st = p.state
         if not st or st.get("layout") == LAYOUT:
             return
+        before = st.get("layout") or 0
 
         def f(s):
             for sid in list(s["stages"]):
@@ -270,6 +271,13 @@ def migrate(p: Project) -> None:
                 except OSError:
                     pass
             p.reset_from(STAGE_IDS[first + 1])
+        st = p.state
+        if before < 6 and st["stages"].get("review", {}).get("status") != "done" \
+                and any(not f.get("judged") for f in (p.load("figures") or {}).get("items") or []):
+            # figures made before each drawing was judged (for the paper, or only an explanation): while the transcript
+            # is not yet approved, the Figures step is done again from the start, and its old drawings are discarded
+            p.reset_from("figures")
+            shutil.rmtree(p.dir / "figures", ignore_errors=True)
 
 
 def list_projects() -> list[dict]:
@@ -293,7 +301,13 @@ def list_projects() -> list[dict]:
         waiting = next((sid for sid in STAGE_IDS if st["stages"].get(sid, {}).get("status") == "waiting"), None)
         paused = next((s.get("resume_at") for s in st["stages"].values() if s.get("status") == "paused"), None)
         now = next((sid for sid in STAGE_IDS if st["stages"].get(sid, {}).get("status") != "done"), None)
-        out.append({"current": now, "current_name": next((x["name"] for x in STAGES if x["id"] == now), ""),
+        meta = st.get("meta", {})
+        first = next((pg.get("n") for pg in st.get("pages", []) if isinstance(pg, dict) and not pg.get("skip")), None)
+        out.append({"stages": [st["stages"].get(sid, {}).get("status", "pending") for sid in STAGE_IDS],
+                    "imported": bool(meta.get("imported")), "test": (meta.get("test") or {}).get("before") or None,
+                    "authors": [a.get("name") for a in meta.get("authors") or [] if isinstance(a, dict) and a.get("name")][:6],
+                    "first_page": first, "record": (d / "proof" / "record.json").exists(),
+                    "current": now, "current_name": next((x["name"] for x in STAGES if x["id"] == now), ""),
                     "completed": st["stages"].get("finish", {}).get("status") == "done",
                     "stopped": next((s.get("error") for s in st["stages"].values() if s.get("status") == "error"), None),
                     "paused": paused, "id": st["id"], "name": st.get("meta", {}).get("name") or "Untitled notes",

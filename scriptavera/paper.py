@@ -53,6 +53,79 @@ MACROS = {
 }
 _BLOCK_ENVS = set(THEOREM_ENVS) | {"proof", "figurenote"}
 
+# Commands that come from a package the paper does not load by default: using one loads the package. (Without
+# this, \cancel was an "undefined control sequence" and ended up printed as the word "cancel".)
+PACKAGE_OF = {
+    "cancel": ("", "cancel"), "bcancel": ("", "cancel"), "xcancel": ("", "cancel"), "cancelto": ("", "cancel"),
+    "mathscr": ("", "mathrsfs"), "bm": ("", "bm"), "mathbbm": ("", "bbm"), "mathds": ("", "dsfont"),
+    "llbracket": ("", "stmaryrd"), "rrbracket": ("", "stmaryrd"), "lightning": ("", "stmaryrd"),
+    "sout": ("normalem", "ulem"), "uwave": ("normalem", "ulem"), "xout": ("normalem", "ulem"),
+    "nicefrac": ("", "nicefrac"), "num": ("", "siunitx"), "SI": ("", "siunitx"), "qty": ("", "siunitx"),
+}
+
+
+# Commands LaTeX and amsmath always define, which an old build could have redeclared from an error message
+KNOWN_COMMANDS = set("""begin end left right frac dfrac tfrac sqrt sum prod int oint lim sup inf max min log ln exp sin
+cos tan phi varphi psi pi alpha beta gamma delta epsilon varepsilon theta lambda mu sigma tau omega Gamma Delta Lambda
+Sigma Omega mathbb mathcal mathfrak mathrm mathbf mathit text textbf textit emph operatorname underbrace overbrace
+overline underline hat bar tilde vec dot ddot cdot cdots ldots dots times div pm mp le leq ge geq ne neq equiv approx sim
+in notin subset subseteq cup cap setminus emptyset varnothing infty partial nabla forall exists mid nmid binom choose
+boxed quad qquad label ref eqref cite mathop limits nolimits displaystyle textstyle big Big bigg Bigg bigl bigr Bigl
+Bigr langle rangle lfloor rfloor lceil rceil vert Vert lvert rvert circ ast star prime""".split())
+
+
+def needed_packages(text: str) -> list[str]:
+    """\\usepackage lines for the commands of PACKAGE_OF that the text uses."""
+    out: list[str] = []
+    for name in sorted(set(re.findall(r"\\([A-Za-z]+)", re.sub(r"(?<!\\)%.*", "", text or "")))):
+        pk = PACKAGE_OF.get(name)
+        if pk:
+            line = f"\\usepackage[{pk[0]}]{{{pk[1]}}}" if pk[0] else f"\\usepackage{{{pk[1]}}}"
+            if line not in out:
+                out.append(line)
+    return out
+
+
+def math_commands(tex: str) -> list[str]:
+    """The control words used inside mathematics in the body of a LaTeX file (not in its preamble)."""
+    b = tex.find("\\begin{document}")
+    body = tex[b:] if b >= 0 else tex
+    names: set[str] = set()
+    for kind, part in split_math(re.sub(r"(?<!\\)%.*", "", body)):
+        if kind != "text":
+            names.update(re.findall(r"\\([A-Za-z]+)", part))
+    return sorted(names - {"begin", "end", "label", "tag", "nonumber", "notag"})
+
+
+def undefined_commands(tex: str, timeout: int = 120) -> list[str] | None:
+    """The control words used in the mathematics of `tex` that LaTeX, with the paper's own preamble, does not
+    define. Asked of TeX itself (\\ifdefined after \\begin{document}), not guessed from an error message: the
+    line TeX shows with an error inside an amsmath display ends with \\end{align*}, which once had \\end
+    declared as an operator. None when no LaTeX is installed."""
+    engine = find_engine()
+    if engine not in ("pdflatex", "xelatex", "lualatex"):
+        return None
+    b = tex.find("\\begin{document}")
+    if b < 0:
+        return []
+    names = [n for n in math_commands(tex) if n.isalpha()]
+    if not names:
+        return []
+    probe = tex[:b] + "\\begin{document}\n" + "".join(
+        f"\\ifdefined\\{n}\\else\\typeout{{SCVUNDEF:{n}}}\\fi\n" for n in names) + "\\end{document}\n"
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+        (Path(d) / "probe.tex").write_text(probe, encoding="utf-8")
+        try:
+            r = subprocess.run([engine, *engine_flags(engine), "-interaction=nonstopmode", "-draftmode", "probe.tex"],
+                               cwd=d, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        out = (r.stdout or b"").decode("utf-8", "ignore") + (Path(d) / "probe.log").read_text("utf-8", "ignore") \
+            if (Path(d) / "probe.log").exists() else (r.stdout or b"").decode("utf-8", "ignore")
+    if "SCVUNDEF" not in out and r.returncode != 0 and "! " in out:
+        return None                                  # the preamble itself failed: nothing can be concluded
+    return sorted(set(re.findall(r"SCVUNDEF:([A-Za-z]+)", out)))
+
 
 # ------------------------------------------------------------- parsing
 
@@ -299,6 +372,7 @@ def _math_span(tex: str, display: bool, ctx: dict) -> str:
                else "\\begin{equation}" + m.group(1) + "\\end{equation}", t, flags=re.S)
     t = t.replace("eqnarray*", "align*").replace("eqnarray", "align")
     t = re.sub(r"\\(begin|end)\{(flalign|multline)\*?\}", r"\\\1{gather*}", t)
+    t = re.sub(r"\\(begin|end)\{multlined\}", r"\\\1{gathered}", t)        # KaTeX has no multlined
     cls = "math display" if display else "math"
     anchor = f' id="eq-{html.escape(lab.group(1))}"' if lab else ""
     return f'<span class="{cls}"{anchor} data-tex="{html.escape(t.strip(), quote=True)}"></span>'
@@ -694,6 +768,11 @@ def build_tex(paper: dict, refs: list[dict], profile: dict | str | None = None, 
         "\\IfFileExists{lmodern.sty}{\\usepackage{lmodern}}{}",
         "\\usepackage{amsmath,amssymb,amsthm,mathtools}", "\\usepackage{enumitem}", "\\usepackage{xcolor}",
         "\\PassOptionsToPackage{hyphens}{url}",
+    ]
+    everything = "\n".join([paper.get("abstract") or "", paper.get("intro") or ""]
+                           + [(b.get("text") or "") + " " + (b.get("title") or "") for b in paper.get("blocks", [])])
+    L += needed_packages(everything)            # \cancel needs the package cancel, \mathscr needs mathrsfs, …
+    L += [
         "\\usepackage[colorlinks=true,linkcolor=blue!55!black,citecolor=blue!55!black,urlcolor=blue!55!black]{hyperref}",
     ]
     figs = paper.get("figures") or {}
@@ -720,6 +799,7 @@ def build_tex(paper: dict, refs: list[dict], profile: dict | str | None = None, 
     if extra:                                    # an environment the writer used that LaTeX would not know
         L.append("\\theoremstyle{definition}")
         L += [f"\\newtheorem{{{e}}}[theorem]{{{e.capitalize()}}}" for e in extra]
+    L += list(paper.get("source_preamble") or [])        # typed notes: the author's own macros and packages
     L += [f"\\providecommand{{{k}}}{{{v}}}" for k, v in {**MACROS, **(paper.get("macros") or {})}.items()]
     L += ["\\newenvironment{figurenote}{\\par\\smallskip\\noindent\\textit{Figure in the notes.}\\ }{\\par\\smallskip}", ""]
 
@@ -929,6 +1009,11 @@ def compile_pdf(tex: str, timeout: int = 300, files: dict | None = None) -> dict
             if names and names[-1] not in undefined:
                 undefined.append(names[-1])
         missing = list(dict.fromkeys(re.findall(r"File `([^']+)' not found", log)))
+        # lines wider than the page: "detected at line N" is a displayed formula, "in paragraph" running text
+        overfull = [{"line": int(m.group(3)), "pt": float(m.group(1)), "too_wide": f"{float(m.group(1)):.1f}pt",
+                     "math": m.group(2).startswith("detected")}
+                    for m in re.finditer(r"Overfull \\hbox \((\d+(?:\.\d+)?)pt too wide\) (detected at line|in paragraph "
+                                         r"at lines) (\d+)", log) if float(m.group(1)) >= 1.0]
         pages = None
         if pdf:
             try:
@@ -939,7 +1024,237 @@ def compile_pdf(tex: str, timeout: int = 300, files: dict | None = None) -> dict
             except Exception:  # noqa: BLE001
                 pages = None
         return {"ok": pdf is not None and not errors, "engine": engine, "errors": errors[:12], "pdf": pdf,
-                "undefined": undefined, "missing": missing, "pages": pages}
+                "undefined": undefined, "missing": missing, "pages": pages, "overfull": overfull}
+
+
+# ------------------------------------------------- formulas wider than the page
+
+_REL_CMDS = {"leqslant", "geqslant", "Longleftrightarrow", "Leftrightarrow", "Longrightarrow", "Rightarrow", "implies",
+             "iff", "coloneqq", "subseteq", "supseteq", "subsetneq", "approx", "equiv", "simeq", "cong", "leq", "geq",
+             "neq", "le", "ge", "ne", "sim", "subset", "supset", "to", "mapsto", "in", "ll", "gg", "propto"}
+_OPERATOR_CMDS = {"cdot", "times", "pm", "mp", "quad", "qquad", "colon", "mid", "setminus", "cup", "cap", "circ"}
+
+
+def _break_points(body: str) -> list[tuple[int, str, int]]:
+    """Where a one-line formula may be broken: (position, 'rel' or 'bin', level). Level 0 is the top level of the
+    formula; level 1 is directly inside one \\left…\\right at the top level, which is broken as \\right. … \\left.
+    Nothing inside braces or a nested environment is a break point."""
+    out: list[tuple[int, str, int]] = []
+    i, n = 0, len(body)
+    brace, env, paren = 0, 0, 0                    # paren: plain ( ) and [ ], never broken inside
+    lr: list[int] = []
+    prev = ""                                      # 'operand' when a + or - here would be binary
+    while i < n:
+        c = body[i]
+        if c == "\\":
+            m = re.match(r"\\([A-Za-z]+)|\\.", body[i:])
+            tok, name = m.group(0), m.group(1)
+            if name in ("left", "right"):
+                d = re.match(r"\s*(\\[A-Za-z]+|\\.|.)", body[i + len(tok):])
+                if name == "left":
+                    lr.append(brace)
+                elif lr:
+                    lr.pop()
+                i += len(tok) + (len(d.group(0)) if d else 0)
+                prev = "op" if name == "left" else "operand"
+                continue
+            if name in ("begin", "end"):
+                g = re.match(r"\{[^{}]*\}", body[i + len(tok):])
+                env += 1 if name == "begin" else -1
+                i += len(tok) + (len(g.group(0)) if g else 0)
+                prev = "op" if name == "begin" else "operand"
+                continue
+            if name in _REL_CMDS:
+                if brace == 0 and env == 0 and paren == 0 and len(lr) <= 1:
+                    out.append((i, "rel", len(lr)))
+                prev = "op"
+            else:
+                prev = "op" if (name in _OPERATOR_CMDS or not name) else "operand"
+            i += len(tok)
+            continue
+        if c == "{":
+            brace += 1
+            prev = "op"
+        elif c == "}":
+            brace -= 1
+            prev = "operand"
+        elif c in "=<>":
+            if brace == 0 and env == 0 and paren == 0 and len(lr) <= 1 and not (c == "=" and i and body[i - 1] == ":"):
+                out.append((i - 1 if (c == "=" and i and body[i - 1] == ":") else i, "rel", len(lr)))
+            prev = "op"
+        elif c == ":" and i + 1 < n and body[i + 1] == "=":
+            if brace == 0 and env == 0 and paren == 0 and len(lr) <= 1:
+                out.append((i, "rel", len(lr)))
+            i += 2
+            prev = "op"
+            continue
+        elif c in "+-":
+            if brace == 0 and env == 0 and paren == 0 and len(lr) <= 1 and prev == "operand":
+                out.append((i, "bin", len(lr)))
+            prev = "op"
+        elif c in "([":
+            paren += 1
+            prev = "op"
+        elif c in ")]":
+            paren = max(0, paren - 1)
+            prev = "operand"
+        elif c in ",^_&":
+            prev = "op"
+        elif c in "|!'" or c.isalnum():
+            prev = "operand"
+        i += 1
+    return out
+
+
+def _top_level(body: str, s: str) -> bool:
+    """Whether `s` (such as '\\\\' or '&') occurs outside braces and nested environments."""
+    depth, env = 0, 0
+    for m in re.finditer(r"\\begin\{[^{}]*\}|\\end\{[^{}]*\}|\\\\|\\.|[{}&]", body):
+        t = m.group(0)
+        if t.startswith("\\begin"):
+            env += 1
+        elif t.startswith("\\end"):
+            env -= 1
+        elif t == "{":
+            depth += 1
+        elif t == "}":
+            depth -= 1
+        elif t == s and depth == 0 and env == 0:
+            return True
+    return False
+
+
+def _weight(tex: str) -> int:
+    """Roughly how much of a formula is printed: command names, braces and spaces take no room."""
+    return len(re.sub(r"\\[A-Za-z]+|[{}\s&]|\\[,;:!]", "", tex))
+
+
+def _split_line(line: str, aligned: bool) -> tuple[str, str] | None:
+    """One line of a formula broken in two near its middle, at a relation if possible, else at a + or -."""
+    amp = -1
+    if aligned:
+        depth = 0
+        for m in re.finditer(r"\\.|[{}&]", line):
+            if m.group(0) == "{":
+                depth += 1
+            elif m.group(0) == "}":
+                depth -= 1
+            elif m.group(0) == "&" and depth == 0:
+                amp = m.start()
+                break
+    head, body = (line[:amp + 1], line[amp + 1:]) if amp >= 0 else ("", line)
+    pts = _break_points(body)
+    rels = [p for p in pts if p[1] == "rel" and p[2] == 0]
+    first = rels[0][0] if rels else None
+    after = first if aligned else None             # aligned lines break after their first relation; multlined anywhere
+    cands = [p for p in pts if (after is None or p[0] > after) and not (p[1] == "rel" and p[2] == 1)
+             and min(_weight(body[:p[0]]), _weight(body[p[0]:])) >= max(5, 0.25 * _weight(body))]
+    if _weight(body) < 20:                         # a formula this short is not what overflows a page
+        return None
+    if not cands:                                  # only breaks that leave a scrap on one line: better left as it is
+        return None
+    total = max(1, _weight(body))
+    penalty = {("rel", 0): 0.0, ("bin", 0): 0.08, ("bin", 1): 0.16}
+    q, kind, level = min(cands, key=lambda p: abs(_weight(body[:p[0]]) - total / 2) / total + penalty.get((p[1], p[2]), 1))
+    left, right = body[:q].rstrip(), body[q:].lstrip()
+    if level == 1:
+        left, right = left + r" \right.", r"\left. " + right
+    if aligned and amp < 0 and first is not None:          # first break of a one-line formula: align at its relation
+        left = body[:first].rstrip() + " &" + body[first:q].rstrip() + (r" \right." if level == 1 else "")
+    if aligned:
+        return head + left, ("&" if kind == "rel" else r"&\quad ") + right
+    return head + left, right
+
+
+def break_display(content: str) -> str | None:
+    """A displayed formula too wide for the page, broken over lines the way it is done by hand: aligned at its
+    first relation (split), or for a formula without one, multlined. A formula broken before is broken again at its
+    longest line. None when it cannot be broken by rule (a single long term, or a formula already in several lines
+    of the author's own)."""
+    labels = "".join(re.findall(r"\\label\{[^{}]*\}|\\tag\*?\{[^{}]*\}", content))
+    c = re.sub(r"\\label\{[^{}]*\}|\\tag\*?\{[^{}]*\}", "", content).strip()
+    m = re.fullmatch(r"\\begin\{(split|multlined)\}(.*)\\end\{\1\}", c, re.S)
+    if m:
+        env = m.group(1)
+        lines = [x.strip() for x in re.split(r"\\\\", m.group(2)) if x.strip()]
+        k = max(range(len(lines)), key=lambda i: len(lines[i]))
+        r = _split_line(lines[k], env == "split")
+        if not r:
+            return None
+        lines[k:k + 1] = [r[0].strip(), r[1].strip()]
+    else:
+        if _top_level(c, "\\\\") or _top_level(c, "&"):
+            return None
+        pts = _break_points(c)
+        env, r = "split", None
+        if any(p[1] == "rel" and p[2] == 0 for p in pts):
+            r = _split_line(c, True)
+        if r is None:                              # no relation, or nothing to break after it: a long left side
+            env, r = "multlined", _split_line(c, False)
+        if not r:
+            return None
+        lines = [r[0].strip(), r[1].strip()]
+    return (labels + "\n" if labels else "\n") + f"\\begin{{{env}}}\n" + " \\\\\n".join(lines) + f"\n\\end{{{env}}}\n"
+
+
+_DISPLAY = re.compile(r"\\\[(.+?)\\\]|\$\$(.+?)\$\$|\\begin\{(equation\*?)\}(.+?)\\end\{\3\}", re.S)
+
+
+def break_in_text(text: str, line: int) -> str | None:
+    """The text with the displayed formula that ends on (0-based) `line` broken over lines; None if there is none
+    there, or it cannot be broken by rule."""
+    for m in _DISPLAY.finditer(text):
+        a, b = text.count("\n", 0, m.start()), text.count("\n", 0, m.end())
+        if not (a <= line <= b + 1):
+            continue
+        if m.group(1) is not None:
+            inner, s, e = m.group(1), m.start(1), m.end(1)
+        elif m.group(2) is not None:
+            inner, s, e = m.group(2), m.start(2), m.end(2)
+        else:
+            inner, s, e = m.group(4), m.start(4), m.end(4)
+        new = break_display(inner)
+        if new is None:
+            return None
+        return text[:s] + new + text[e:]
+    return None
+
+
+def break_overfull(paper: dict, marked: str, overfull: list[dict]) -> bool:
+    """Break the displayed formulas that LaTeX reported as wider than the page (`marked` is the file with
+    %@block markers it compiled). Returns whether anything changed."""
+    lines = marked.split("\n")
+    starts = {m.group(1): n for n, l in enumerate(lines, 1) for m in [re.match(r"^%@block (\S+)", l)] if m}
+    blocks = {b.get("id"): b for b in paper.get("blocks", [])}
+    changed = False
+    done: set[tuple[str, int]] = set()
+    for o in overfull:
+        if not o.get("math"):
+            continue
+        bid = block_at_line(marked, o["line"])
+        if bid == "intro" and paper.get("intro"):
+            key, text, offset = "intro", paper["intro"], starts["intro"] + 3
+        elif bid in blocks and blocks[bid].get("text") and blocks[bid]["type"] not in ("section", "subsection"):
+            b = blocks[bid]
+            key, text = bid, b["text"]
+            offset = starts[bid] + (2 if b["type"] in ("env", "proof", "figure") else 1)
+        else:
+            continue
+        lead = text[:len(text) - len(text.lstrip())].count("\n")
+        rel = o["line"] - offset + lead
+        if (key, rel) in done:
+            continue
+        done.add((key, rel))
+        new = break_in_text(text, rel)
+        if not new:
+            o["unbroken"] = True
+            continue
+        if key == "intro":
+            paper["intro"] = new
+        else:
+            blocks[key]["text"] = new
+        changed = True
+    return changed
 
 
 def block_at_line(tex: str, line: int) -> str | None:
@@ -983,7 +1298,7 @@ p{{margin:.55rem 0;text-align:justify;hyphens:auto}}
 .thm-note{{font-weight:400}} .proof-head{{font-style:italic}} .proof .qed{{float:right;margin-top:-1.6rem}}
 .p-fig{{margin:1.2rem 0;text-align:center}} .p-fig img{{max-width:86%;height:auto}} .p-fig figcaption{{font-size:.9rem;margin-top:.4rem}}
 .fignote{{font-size:.9rem;color:#444;border-left:3px solid #ccc;padding-left:.8rem;margin:.8rem 0}} .fig-head{{font-style:italic}}
-.math.display{{display:block;margin:.8rem 0;overflow-x:auto;text-align:center}}
+.math.display{{display:block;margin:.8rem 0;overflow:visible;text-align:center}}
 a{{color:#1d3f8f;text-decoration:none}} a:hover{{text-decoration:underline}}
 .p-refs{{font-size:.9rem;list-style:none;padding-left:0}} .p-refs li{{margin:.35rem 0;padding-left:3.4em;text-indent:-3.4em}}
 .ref-label{{display:inline-block;min-width:3em;text-indent:0}} .sc{{font-variant:small-caps}} .center{{text-align:center}}
@@ -994,11 +1309,24 @@ a{{color:#1d3f8f;text-decoration:none}} a:hover{{text-decoration:underline}}
 <script>
 var M={macros};
 window.addEventListener("DOMContentLoaded",function(){{
+  var known=function(n){{try{{katex.renderToString(n+"{{x}}{{y}}",{{throwOnError:true,strict:"ignore"}});return true;}}
+    catch(e){{return !/Undefined control sequence/i.test(String(e&&e.message));}}}};
+  Object.keys(M).forEach(function(k){{if(/^\\\\operatorname\\{{/.test(M[k])&&known(k))delete M[k];}});
   document.querySelectorAll(".math").forEach(function(el){{
     try{{katex.render(el.dataset.tex,el,{{displayMode:el.classList.contains("display"),throwOnError:false,strict:"ignore",macros:Object.assign({{}},M)}});}}
     catch(e){{el.textContent=el.dataset.tex;}}
   }});
+  fit();
+  if(document.fonts&&document.fonts.ready)document.fonts.ready.then(fit);
 }});
+/* a formula wider than the column is scaled to fit, as it fits the printed page: never a scrollbar */
+function fit(){{
+  document.querySelectorAll(".math.display").forEach(function(el){{
+    el.style.fontSize="";var w=el.clientWidth,k=el.firstElementChild,need=k?k.scrollWidth:el.scrollWidth;
+    if(w&&need>w+1)el.style.fontSize=Math.max(0.45,(w-2)/need).toFixed(3)+"em";
+  }});
+}}
+window.addEventListener("resize",fit);
 </script></body></html>
 """
 
@@ -1007,4 +1335,4 @@ def standalone_html(paper: dict, refs: list[dict], fig_url=None) -> str:
     import json
     return STANDALONE.format(title=html.escape(re.sub(r"[\\${}]", "", paper.get("title") or "Paper")),
                              body=render_html(paper, refs, fig_url),
-                             macros=json.dumps({**MACROS, **(paper.get("macros") or {})}))
+                             macros=json.dumps({**MACROS, **(paper.get("macros") or {}), **(paper.get("katex_macros") or {})}))

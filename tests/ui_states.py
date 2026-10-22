@@ -19,6 +19,7 @@ import sys, os, pathlib; sys.path.insert(0, {str(ROOT)!r})
 from scriptavera import config
 w = pathlib.Path(os.environ['SCRIPTAVERA_WORK'])
 config.PROJECTS_DIR = w / 'projects'; config.SETTINGS_PATH = w / 'settings.json'; config.ENV_PATH = w / '.env'
+config.MEMORY_DIR = w / 'memory'; config.PHONE_DIR = w / 'phone_uploads'; config.IDENTITY_DIR = w / 'identity'
 import uvicorn; from scriptavera.server import create_app
 uvicorn.run(create_app(), host='127.0.0.1', port={PORT}, log_level='warning')
 """
@@ -32,11 +33,13 @@ try:
         pg = b.new_page(viewport={"width": 1440, "height": 900})
         pg.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
         pg.on("pageerror", lambda e: errors.append("PAGEERROR " + str(e)))
-        pg.goto(U); pg.wait_for_selector(".dom")
+        pg.goto(U); pg.click('.home-acts [data-act="newpaper"]'); pg.wait_for_selector(".dom")
         pg.click('.dom[data-id="math.NT"]'); time.sleep(0.2)
         pg.set_input_files("#fileInput", str(PDF)); pg.wait_for_selector(".file")
         pg.fill("#fproblem", "Bounds for sums of reciprocal powers by integral comparison.")
         pg.fill("#fkeywords", "partial sums, integral comparison")
+        pg.fill('[data-bind="authors.0.name"]', "A. N. Author")      # the record of the notes names its author
+        pg.check("#fdeclare")
         pg.click('[data-act="create"]')
         pg.wait_for_selector('[data-act="topicok"]', timeout=120000); time.sleep(0.3)
         pg.click('[data-act="topicok"]')
@@ -62,7 +65,12 @@ try:
         banner = pg.inner_text(".banner")
         print("banner:", banner[:300].replace("\n", " "))
         assert "waiting for the strongest model" in banner and "sim-small" in banner and "continue by itself" in banner, banner
-        assert pg.locator('#topbar [data-act="resume"]').count() == 1 and pg.locator('#topbar [data-act="startover"]').count() == 1
+        assert pg.locator('#topbar [data-act="resume"]').count() == 1
+        pg.click('#topbar [data-act="menu"]'); assert pg.locator('#topbar .menu [data-act="startover"]').count() == 1
+        pg.keyboard.press("Escape"); time.sleep(0.2); assert pg.locator(".menu").count() == 0
+        assert pg.locator('#rail [data-act="newpaper"], #rail [data-act="importpaper"], #rail [data-act="testmode"]').count() == 0, \
+            "inside a paper the rail has the way home and the steps only"
+        assert pg.locator('#rail .home-btn').count() == 1
         assert "Paused until" in pg.inner_text(".step.paused")
         pg.click('[data-act="relax"]')                                  # the author allows the next best model for this one step
         pg.wait_for_selector("#deccount", timeout=120000)               # ... and the next step restarts by itself when the strong model is back
@@ -102,20 +110,21 @@ try:
         pg.goto(f"{U}#p/{pid}/verify"); pg.reload(); pg.wait_for_selector(".steps"); time.sleep(0.6)
         assert "Proofs checked" in pg.inner_text("#main"), pg.inner_text("#main")[:200]
         pg.goto(f"{U}#p/{pid}/frontmatter"); pg.reload(); pg.wait_for_selector("#paperHost", timeout=20000)       # a step that no longer exists
-        pg.click(".brand"); pg.wait_for_selector(".proj"); pg.wait_for_selector(".pcard"); time.sleep(0.3)
-        assert "completed" in pg.inner_text(".proj") and "A new title" in pg.inner_text(".proj")
-        assert "Completed" in pg.inner_text(".pgroup") and "All steps done" in pg.inner_text(".pcard")    # the home page: your papers
+        pg.click("#rail .home-btn"); pg.wait_for_selector(".pcard"); time.sleep(0.3)               # the home page: your papers
+        assert "Completed" in pg.inner_text(".pgroup") and "Paper ready" in pg.inner_text(".pcard") and "A new title" in pg.inner_text(".pcard")
+        assert "20 of 20" in pg.inner_text(".pcard") and pg.locator(".pcard .tk.done").count() == 20
         pg.screenshot(path=str(OUT / "43_home_with_paper.png"))
-        pg.click('[data-act="newpaper"]'); pg.wait_for_selector(".domain-search, .dom"); time.sleep(0.2)
-        assert pg.locator('[data-act="papers"]').count() >= 1, "from the new-paper form, back to the papers"
-        pg.click('.wrap [data-act="papers"]'); pg.wait_for_selector(".pcard"); time.sleep(0.2)
-        pg.click('.pcard [data-act="rename"]'); pg.fill("#renamebox", "Partial sums notes"); pg.click('[data-act="renamesave"]'); time.sleep(0.6)
+        pg.click('.home-acts [data-act="newpaper"]'); pg.wait_for_selector(".domain-search, .dom"); time.sleep(0.2)
+        pg.click('.crumbs [data-act="home"]'); pg.wait_for_selector(".pcard"); time.sleep(0.2)     # from the new-paper form, back home
+        pg.click('.pcard [data-act="menu"]'); pg.click('.menu [data-act="rename"]')
+        pg.fill("#renamebox", "Partial sums notes"); pg.click('[data-act="renamesave"]'); time.sleep(0.6)
         assert "Partial sums notes" in pg.inner_text(".pcard")
-        pg.click(".proj"); pg.wait_for_selector("#paperHost")
+        box = pg.locator(".pcard").bounding_box()                                              # the whole card opens the paper
+        pg.mouse.click(box["x"] + 40, box["y"] + box["height"] - 50); pg.wait_for_selector("#paperHost")
 
         # a project that was started with an earlier version says what was kept
         (work / "projects" / pid / "out_before_update").mkdir()
-        pg.once("dialog", lambda d: d.accept()); pg.click('[data-act="redo"][data-stage="understand"]')
+        pg.click('[data-act="redo"][data-stage="understand"]'); pg.click('[data-act="cfyes"]')
         pg.wait_for_selector(".kinds", timeout=120000); time.sleep(0.3)
         pg.click('[data-act="scopesubmit"]')
         pg.wait_for_selector("#deccount", timeout=120000)
@@ -124,12 +133,20 @@ try:
         pg.screenshot(path=str(OUT / "44_earlier_version.png"))
 
         # start over, then delete
-        pg.once("dialog", lambda d: d.accept()); pg.click('#topbar [data-act="startover"]')
+        pg.click('#topbar [data-act="menu"]'); pg.click('.menu [data-act="startover"]')
+        pg.wait_for_selector('[data-act="cfyes"]'); pg.keyboard.press("Escape"); time.sleep(0.3)             # Escape: nothing is discarded
+        assert pg.evaluate("S.b.dossier") is not None and pg.evaluate("S.b.state.stages.scout.status") == "done", "a cancelled start over keeps every result"
+        pg.click('#topbar [data-act="menu"]'); pg.click('.menu [data-act="startover"]'); pg.click('[data-act="cfyes"]')
         pg.wait_for_selector(".gatebar", timeout=120000)
         assert pg.evaluate("S.b.paper") is None and pg.evaluate("S.b.transcript") is None and pg.evaluate("S.b.dossier") is None, "start over must clear results"
         print("start over ran from the first step to the confirmation step")
-        pg.once("dialog", lambda d: d.accept()); pg.click('[data-act="delete"]'); time.sleep(1.0)
-        assert pg.locator(".head h1").inner_text().startswith("Which area"), "not back home after delete"
+        pg.click('#topbar [data-act="menu"]'); pg.click('.menu [data-act="delete"]'); pg.wait_for_selector('[data-act="cfyes"]')
+        txt = pg.inner_text("#overlay")
+        assert "cannot be undone" in txt and "record of your notes" in txt, txt          # the warning names what is lost
+        assert pg.evaluate("document.activeElement.dataset.act") == "cfno", "Cancel has the focus"
+        pg.click('[data-act="cfno"]'); time.sleep(0.3); assert (work / "projects" / pid).exists(), "Cancel deletes nothing"
+        pg.click('#topbar [data-act="menu"]'); pg.click('.menu [data-act="delete"]'); pg.click('[data-act="cfyes"]'); time.sleep(1.2)
+        pg.wait_for_selector(".home-empty"); assert pg.evaluate("location.hash") in ("", "#"), "not back home after delete"
         assert not (work / "projects" / pid).exists()
         b.close()
 finally:

@@ -16,9 +16,10 @@ import re
 import time
 
 from . import audit as fidelity
-from . import paper as paperlib, prompts
+from . import config, literature, paper as paperlib, prompts, relevance
 from .llm import LLMError, router
-from .pipeline import Run, _PAGE_MARK, _room, audit_pages, emit, find_figures, notation_text, page_gaps, page_marks, passing, writing_pages
+from .pipeline import (Run, _PAGE_MARK, _json, _room, _topic_text, audit_pages, emit, find_explanations, find_figures, notation_text,
+                       page_gaps, page_marks, passing, strip_explanations, writing_pages)
 from .store import Project
 from .texutil import check_balance, clean_fragment, find_group, leaks, split_math
 from .util import parse_rows, est_tokens, extract_tag, fit, parse_lines
@@ -420,6 +421,97 @@ def assessment_is_clean(a: dict) -> bool:
         and all(r["proof"] == "complete" and r["known"] == "new" for r in (a.get("results") or {}).values())
 
 
+class _Skip(Exception):
+    pass
+
+
+def novelty_search(run: Run, d: dict, pages: list[dict]) -> dict:
+    """Before the assessment: search by each main result's statement, score every paper by citation overlap with the
+    papers the notes rest on and by vector similarity to each result, and look in OEIS and on MathOverflow."""
+    p = run.p
+    results = [{"id": r["id"], "statement": r["statement"]} for r in d.get("results", []) if r.get("statement")]
+    if not results:
+        return {}
+    library: list[dict] = p.load("library", [])
+    problem, keywords = _topic_text(p)
+    doms = run.meta.get("domains", [])
+    mains = [r for r in d.get("results", []) if str(r.get("role", "")).lower() in ("main", "key", "principal")] or d.get("results", [])[:4]
+    queries: list[str] = []
+    private = bool(run.settings.get("private"))
+    run.progress(0, 3, "searching for each main result by its statement")
+    try:
+        if private:
+            raise _Skip
+
+        data = _json(run, "fast", prompts.NOVELTY_QUERIES.format(field=run.field),
+                     "\n".join(f"{r['id']}: {fit(r['statement'], 500, 'head')}" for r in mains[:6]), "Search queries for the main results", 900)
+        for item in data.get("queries", []) if isinstance(data.get("queries"), list) else []:
+            if isinstance(item, dict):
+                queries += [str(q).strip() for q in (item.get("queries") or [])[:2] if str(q).strip()]
+    except _Skip:
+        run.log("Private mode: your results are not searched for by their statements (that would send descriptions of them "
+                "to public search engines); the closest work is ranked among the papers already found.")
+    except LLMError as e:
+        if passing(e):
+            raise
+    queries = list(dict.fromkeys(queries))[:10]
+    before = {id(x) for x in library}
+    if queries and not config.mock_mode():
+        found, _ = literature.search(queries, doms, log=run.log, cancelled=run.cancelled)
+        literature.add_papers(library, found)
+    fresh = [x for x in library if id(x) not in before]
+    for x in fresh:
+        x["lex"] = literature.lexical_score(x, keywords, doms)
+        x["origin"] = "statement"
+        x["state"] = x.get("state") or "candidate"
+    literature.assign_keys(library)
+    run.progress(1, 3, "measuring citation overlap and similarity")
+    seeds = [x for x in library if x.get("pinned") or (x.get("read") and x.get("verdict") == "core")][:8]
+    try:
+        g = relevance.graph(library, seeds)
+    except Exception:  # noqa: BLE001 - the network is a help; similarity alone still ranks
+        g = {"papers": {}, "edges": [], "seeds": []}
+    close, how = relevance.closest(results, library, g)
+    keep = {row["key"] for rows in close.values() for row in rows}
+    library[:] = [x for x in library if id(x) in before or x.get("key") in keep]
+    run.progress(2, 3, "looking in OEIS and on MathOverflow")
+    best = {}
+    for rows in close.values():
+        for row in rows:
+            best[row["key"]] = max(best.get(row["key"], 0), row["score"])
+    nodes = [{"id": x["openalex"], "key": x.get("key", ""), "title": fit(x.get("title", ""), 120, "head"), "year": x.get("year"),
+              "cited_by": x.get("cited_by") or 0, "seed": x.get("openalex") in g.get("seeds", []), "score": best.get(x.get("key"), 0)}
+             for x in library if x.get("openalex") and x.get("openalex") in g.get("papers", {})]
+    novelty = {"queries": queries, "closest": close, "how": how, "threads": [] if private else relevance.threads(queries),
+               "oeis": [] if private else relevance.oeis("\n".join(pg["text"] for pg in pages)),
+               "graph": {"nodes": nodes, "edges": g.get("edges", [])}, "private": private,
+               "added": len([x for x in fresh if x.get("key") in keep])}
+    p.save("library", library)
+    p.save("novelty", novelty)
+    run.log(f"Novelty search: {len(queries)} statement queries; closest work ranked by {how}"
+            + (f", citation overlap with {len(g.get('seeds', []))} key papers" if g.get("seeds") else "") + ".")
+    return novelty
+
+
+def novelty_text(nv: dict, library: list[dict], room: int) -> str:
+    if not nv or not nv.get("closest"):
+        return ""
+    by_key = {x.get("key"): x for x in library}
+    lines = []
+    for rid, rows in nv["closest"].items():
+        lines.append(f"{rid}:")
+        for row in rows[:3]:
+            x = by_key.get(row["key"]) or {}
+            lines.append(f"  [{row['key']}] {row['title']} ({row.get('year') or 'n.d.'}); similarity {row['sim']:.2f}, shared references "
+                         f"{row['coupling']:.2f}: {fit(x.get('abstract') or 'no abstract', 350, 'head')}")
+    for t in nv.get("threads", [])[:6]:
+        lines.append(f"Q&A: {t['site']}: \"{t['title']}\" {t['url']}")
+    for o in nv.get("oeis", [])[:4]:
+        lines.append(f"OEIS {o['id']} matches the sequence {o['sequence']}: {o['name']}")
+    return fit("CLOSEST WORK FOUND FOR EACH RESULT (search by statement, citation overlap and vector similarity; abstracts "
+               "only, not read in full: a match here is a lead to weigh, not proof that the result is known)\n" + "\n".join(lines), room, "head")
+
+
 def stage_assess(run: Run) -> None:
     """Before anything is written: how much of a paper the notes actually support. A research article is the usual
     case, but notes can also repeat known results, leave proofs unfinished, or stop before the main claim. The
@@ -431,9 +523,18 @@ def stage_assess(run: Run) -> None:
     out = min(8000, 900 + 260 * len(d.get("results", [])))
     room = _room("reason", system, out)
     dos = dossier_text(d, max(1500, room // 4))
+    try:
+        nv = novelty_search(run, d, pages)
+    except LLMError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the extra search is a help; the assessment runs without it
+        run.log(f"The search by statement could not be done ({type(e).__name__}); the assessment uses the papers already read.", "warn")
+        nv = {}
     sources = fit(sources_text(p), max(800, room // 4), "head")
+    extra = novelty_text(nv, p.load("library", []), max(600, room // 6))
     user = (f"DOSSIER\n{dos}\n\nREADING NOTES ON THE RELATED PAPERS (with citation KEYs)\n{sources or '(none were read)'}\n\n"
-            f"TRANSCRIPT OF THE NOTES\n\n{_view(pages, max(1500, room - len(dos) - len(sources) - 500))}")
+            + (extra + "\n\n" if extra else "") +
+            f"TRANSCRIPT OF THE NOTES\n\n{_view(pages, max(1500, room - len(dos) - len(sources) - len(extra) - 500))}")
     run.progress(0, 1, "assessing what the notes prove and what is already known")
     keys = {x["key"] for x in p.load("library", [])}
     for attempt in range(2):
@@ -738,7 +839,21 @@ def shape_fragment(frag: str, title: str, first: bool, figs: dict, unit_pages: l
                 frag = frag[:at] + f"\\insertfigure{{{fid}}}\n\n" + frag[at:]
             else:
                 frag += f"\n\n\\insertfigure{{{fid}}}"
-    return re.sub(r"\[FIGURE\s+f\d+\s*:[^\]]*\]", "", frag).strip()
+    frag = re.sub(r"\[FIGURE\s+f\d+\s*:[^\]]*\]", "", frag)
+    # a drawing that only explains the argument is never printed: a marker the writer copied goes, and so does a
+    # figure note the writer made of it against the rules
+    shown = [_letters(d) for pg in unit_pages for _, _, d, _ in find_explanations(pg["text"])]
+    frag = strip_explanations(frag)
+    if shown:
+        def drop(mm: re.Match) -> str:
+            body = _letters(mm.group(1))
+            return "" if any(difflib.SequenceMatcher(a=body, b=d, autojunk=False).ratio() >= 0.75 for d in shown) else mm.group(0)
+        frag = re.sub(r"\\begin\{figurenote\}(.*?)\\end\{figurenote\}[ \t]*\n?", drop, frag, flags=re.S)
+    return frag.strip()
+
+
+def _letters(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
 
 def skeleton(text: str) -> dict:
@@ -806,6 +921,12 @@ def cut_point(raw: str, nums: list[int], k: int) -> tuple[int, int]:
     if k == 0 or len((raw or "")[:marks[nums[k]]].strip()) < 80:
         return 0, 0
     return marks[nums[k]], k
+
+
+def _unit_key(upages: list[dict], u: dict) -> str:
+    """What a piece of the draft is written from: its pages, exactly as transcribed, and its place in its section."""
+    text = "\n".join(f"{pg['n']}\n{pg['text']}" for pg in upages)
+    return hashlib.sha256(f"{u.get('part', 0)}|{u.get('parts', 1)}|{text}".encode("utf-8")).hexdigest()[:24]
 
 
 def stage_structure(run: Run) -> None:
@@ -924,9 +1045,15 @@ def stage_structure(run: Run) -> None:
                 f"FIGURES ON THESE PAGES\n" + ("\n".join(f"- {fid}: {figs[fid]['caption']}" for fid in mine if fid in figs) or "(none)")
                 + f"\n\nWRITE THIS SECTION\n{what}\n\n{cont}"
                 f"NOTES FOR THIS SECTION (pages {u['pages'][0]} to {u['pages'][-1]})\n\n{chunk}")
+        key = _unit_key(upages, u)
+        if p.state.get("incremental") and key in write_cache:
+            run.log(f"Pages {span(u['pages'])}: unchanged since the last version, so the text written for them is kept.")
+            return write_cache[key]
         return run.ask("writer", system, user, max_out=int(est_tokens(chunk) * 1.8) + 1500, effort="high", temperature=0.2,
                        label=f"Write section {u['sec'] + 2}" + (f", part {u['part'] + 1}" if u["parts"] > 1 else "")
                        + f" (pages {span(u['pages'])})").text
+
+    write_cache: dict = p.load("write_cache", {}) or {}
 
     def write_pending() -> None:
         ui = 0
@@ -946,6 +1073,8 @@ def stage_structure(run: Run) -> None:
             stop = None if u.get("tries", 0) >= 2 else stops_short([by_a[n] for n in u["pages"]], shaped, omitted)
             if stop is None:
                 frags[ui] = shaped
+                write_cache[_unit_key(upages, u)] = raw
+                p.save("write_cache", dict(list(write_cache.items())[-400:]))
                 ui += 1
                 save()
                 continue

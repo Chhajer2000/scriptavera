@@ -9,9 +9,10 @@ import pathlib, subprocess, sys, time
 
 HERE = pathlib.Path(__file__).resolve().parent
 TESTS = ["lint_names", "test_util", "test_audit", "test_typography", "test_paper", "test_templates", "test_regressions", "test_literature",
-         "test_journals", "test_router_http", "test_revision", "test_pipeline", "test_server", "test_migrate", "test_pages_figures", "test_terms", "test_leaks", "test_complete", "test_many"]
+         "test_journals", "test_router_http", "test_revision", "test_pipeline", "test_server", "test_migrate", "test_pages_figures", "test_terms", "test_leaks", "test_complete", "test_completion", "test_drawings", "test_keys_models", "test_many",
+         "test_editor", "test_provenance", "test_latex_checks", "test_compute", "test_sources", "test_relevance", "test_reviews", "test_typed", "test_testmode", "test_costs", "test_phone", "test_refs_arxiv_memory"]
 if "--ui" in sys.argv:
-    TESTS += ["ui_walk", "ui_states"]
+    TESTS += ["ui_walk", "ui_states", "ui_drawings"]
 failed = []
 for name in TESTS:
     t0 = time.time()

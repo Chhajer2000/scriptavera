@@ -3,4 +3,4 @@
 """Scriptavera: a staged, human-confirmed pipeline that turns handwritten
 mathematical notes into a research paper without altering the mathematics."""
 
-__version__ = "1.0"
+__version__ = "1.4"

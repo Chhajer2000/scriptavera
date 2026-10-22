@@ -17,6 +17,9 @@ def isolate(prefix: str = "scriptavera_test_") -> pathlib.Path:
     config.PROJECTS_DIR.mkdir()
     config.SETTINGS_PATH = tmp / "settings.json"
     config.ENV_PATH = tmp / ".env"
+    config.IDENTITY_DIR = tmp / "identity"
+    config.MEMORY_DIR = tmp / "memory"
+    config.PHONE_DIR = tmp / "phone_uploads"
     return tmp
 
 

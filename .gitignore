@@ -5,3 +5,6 @@ input_notes/
 __pycache__/
 *.pyc
 *.log
+identity/
+phone_uploads/
+memory/

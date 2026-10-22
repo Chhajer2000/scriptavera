@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import io
+import re
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -60,11 +61,12 @@ def _save(img: Image.Image, out_dir: Path, n: int) -> dict:
     }
 
 
-def ingest(files: list[tuple[str, bytes]], out_dir: Path) -> list[dict]:
-    """Render every page of every file, in upload order. Returns page records."""
+def ingest(files: list[tuple[str, bytes]], out_dir: Path, start: int = 0) -> list[dict]:
+    """Render every page of every file, in upload order, numbered from start + 1. Returns page records."""
     out_dir.mkdir(parents=True, exist_ok=True)
     pages: list[dict] = []
-    n = 0
+    layers: dict[str, str] = {}
+    n = start
     for name, data in files:
         ext = Path(name).suffix.lower()
         if ext == ".pdf" or data[:5] == b"%PDF-":
@@ -80,6 +82,12 @@ def ingest(files: list[tuple[str, bytes]], out_dir: Path) -> list[dict]:
                     rec = _save(img, out_dir, n)
                     rec["source"] = f"{name} p.{i + 1}"
                     pages.append(rec)
+                    try:
+                        layer = page.get_textpage().get_text_range()
+                    except Exception:  # noqa: BLE001 - a page without a usable text layer is read from its image
+                        layer = ""
+                    if len(re.sub(r"\s", "", layer)) >= 60:
+                        layers[str(n)] = layer[:8000]
                     page.close()
             finally:
                 pdf.close()
@@ -91,9 +99,14 @@ def ingest(files: list[tuple[str, bytes]], out_dir: Path) -> list[dict]:
             rec["source"] = name
             pages.append(rec)
         else:
-            raise ValueError(f"Unsupported file type: {name}. Upload a PDF or page images.")
+            raise ValueError(f"Unsupported file type: {name}. Upload a PDF, page images, or typed notes (.tex, an Overleaf .zip, .md, .txt).")
     if not pages:
         raise ValueError("No pages found in the upload.")
+    if layers:                                  # the words of a computer-made PDF, given to the reader beside each page image
+        import json
+        f = out_dir.parent / "textlayer.json"
+        old = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+        f.write_text(json.dumps({**old, **layers}, ensure_ascii=False), encoding="utf-8")
     for p in pages:
         if p["blank"]:
             p["skip"], p["kind"] = True, "blank"

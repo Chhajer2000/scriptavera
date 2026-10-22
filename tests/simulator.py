@@ -151,8 +151,21 @@ def _page_no(label: str) -> int:
     return int(m.group(1)) if m else 1
 
 
+# With SCRIPTAVERA_MOCK_DRAWINGS=1 the proof on page 3 has a drawing of its own: the author's picture of the comparison
+# step, which only explains the argument (the judge of drawings finds it inside the proof).
+PROOF_DRAWING = (r"[FIGURE: The graph of $1/x$ over the interval $[k-1, k]$, with the rectangle of height $1/k$ lying under "
+                 r"the curve.]")
+AFTER = "\\int_{k-1}^{k} \\frac{dx}{x}$$\n"
+
+
 def _page_text(n: int) -> str:
-    return PAGES[(n - 1) % len(PAGES)]
+    t = PAGES[(n - 1) % len(PAGES)]
+    if os.environ.get("SCRIPTAVERA_MOCK_DRAWINGS") and (n - 1) % len(PAGES) == 2:
+        t = t.replace(AFTER, AFTER + PROOF_DRAWING + "\n", 1)
+    return t
+
+
+SEEN: dict[str, str] = {}           # the last prompt sent with each label, for the tests to inspect
 
 
 def _displays(text: str) -> str:
@@ -232,6 +245,7 @@ def respond(label: str, system: str, user: str, vision: bool, model: Model | Non
         os.environ["SCRIPTAVERA_MOCK_FAIL"] = ""          # fail once, so that Continue succeeds
         raise RuntimeError("simulated failure")
     n = _page_no(label)
+    SEEN[label] = user
 
     # ---- reading the notes
     if label.startswith("Locate"):
@@ -383,6 +397,22 @@ page 5 || Does the last display of the proof end with $\log n$ or with $\log(n+1
                 # suggestion described in the explanation column
                 "page 0 || The argument of the logarithm is written n here but n+1 everywhere else in the notes, which suggests a misreading. "
                 "|| suggested reading: replace \u201c\\log n\u201d by \u201c\\log(n+1)\u201d (so the line reads $\\int_{1}^{n+1} \\frac{dx}{x} = \\log(n+1)$). ||\n</flags>")
+    if label.startswith("Decide which drawings are for the paper"):
+        # as a careful reader would: a drawing inside a proof that pictures a step the text states is an explanation;
+        # the picture of the method next to the problem is for the paper. SCRIPTAVERA_MOCK_DRAWINGS=relies makes the
+        # reader say the proof takes something from the drawing, so that the code asks the author instead.
+        out = []
+        for fid, where in re.findall(r"DRAWING (f\d+): .*?\nWhere it sits: ([^\n]*)", user, flags=re.S):
+            if where.startswith("inside a proof"):
+                relies = os.environ.get("SCRIPTAVERA_MOCK_DRAWINGS") == "relies"
+                out.append({"id": fid, "use": "explanation", "sure": True,
+                            "why": "It sits in the proof and pictures the comparison that the text states in formulas.",
+                            "illustrates": "the step of the proof where a term is compared with an integral over an interval of length $1$",
+                            "needed": "the rectangle that the inequality compares" if relies else "none"})
+            else:
+                out.append({"id": fid, "use": "paper", "sure": True, "illustrates": "", "needed": "none",
+                            "why": "It shows the comparison of the sum with an integral, the method the notes announce with the problem."})
+        return json.dumps({"drawings": out})
     if label.startswith("Draw figure") or label.startswith("Repair figure"):
         return ("<box>240, 90, 520, 900</box>\n<caption>Rectangles of width $1$ under the graph of a decreasing function.</caption>\n"
                 "<tikz>\n\\begin{tikzpicture}[scale=1.05]\n\\draw[->] (0,0) -- (6.5,0) node[right] {$x$};\n"
@@ -465,8 +495,9 @@ page: 1
             blocks = "".join(f"<result>\nid: R{i}\nproof: complete\nwhere: none\nknown: new\nevidence: none\n</result>\n" for i in range(1, 6))
             return blocks + ("<main>established</main>\n<main_note>The main theorem is proved in full.</main_note>\n"
                              "<unfinished>none</unfinished>\n<recommend>article</recommend>\n<recommend_note>Every result is proved.</recommend_note>")
+        r2 = "sketch" if os.environ.get("SCRIPTAVERA_MOCK_SKETCH") == "1" else "complete"
         return ("<result>\nid: R1\nproof: complete\nwhere: none\nknown: new\nevidence: none\n</result>\n"
-                "<result>\nid: R2\nproof: complete\nwhere: none\nknown: known Example2015Simulated\n"
+                f"<result>\nid: R2\nproof: {r2}\nwhere: none\nknown: known Example2015Simulated\n"
                 "evidence: The upper bound for the harmonic sums is stated there.\n</result>\n"
                 "<result>\nid: R3\nproof: complete\nwhere: none\nknown: new\nevidence: none\n</result>\n"
                 "<result>\nid: R4\nproof: gap\nwhere: On page 5 the last display gives $\\log n$, not the bound $\\log(n+1)$ that is claimed.\n"
@@ -634,6 +665,26 @@ where: Introduction
 comment: The comparison of a sum with an integral is classical, yet it is used in the body without a reference.
 action: Cite a standard source where the comparison is first used.
 </point>"""
+    # ---- completing a sketched proof (R2, when SCRIPTAVERA_MOCK_SKETCH=1)
+    if label.startswith("Divide the sketch of"):
+        return json.dumps({"steps": [
+            {"quote": r"The function $x^{-1}$ is decreasing on $[k-1, k]$, so its smallest value on this interval is $k^{-1}$, and the interval has length $1$.",
+             "claim": r"On $[k-1, k]$ the function $1/x$ is at least $1/k$.", "missing": r"why the smallest value is at $x = k$"},
+            {"quote": r"Summing over $k = 2, \dots, n$ gives \[ \sum_{k=2}^{n} \frac{1}{k} \le \int_{1}^{n} \frac{dx}{x} = \log n \]",
+             "claim": "The sum is at most the integral, which is $\\log n$.", "missing": "the value of the integral"},
+            {"quote": r"Adding the term $k = 1$, which is $1$, gives the claim.", "claim": "The bound follows.", "missing": "none"}]})
+    if label.startswith("Complete the sketch of"):
+        first = "WHAT THE CHECKS FOUND" not in user
+        extra = r" This is classical \cite{Unknown2020Invented}." if first else ""      # refused by the screen; the second try drops it
+        return (r'<step n="1">Indeed, for $x \in [k-1, k]$ we have $x \le k$, hence $\frac{1}{x} \ge \frac{1}{k}$; integrating over an interval of length $1$ gives the inequality below.' + extra + "</step>\n"
+                r'<step n="2">Here $\int_{1}^{n} \frac{dx}{x} = \log n - \log 1 = \log n$, since $\log 1 = 0$.</step>' + "\n"
+                '<step n="3">NONE</step>')
+    if label.startswith("Check the completion of"):
+        n = re.findall(r"Addition (\d+) \(inserted", user)
+        return "".join(f'<addition n="{k}">\nverdict: faithful\nreason: none\n</addition>\n' for k in n) + \
+            "<proves>yes</proves>\n<reason>Each addition justifies its own step; together they prove the statement.</reason>"
+    if label.startswith("Check the completed proof of"):
+        return "<verdict>correct</verdict>\n<summary>Every step follows, including the added justifications.</summary>"
     if label.startswith("Apply correction"):
         return _passage(user, "PROOF\n").replace(*SLIP)
     if label.startswith("Apply your instruction"):
@@ -668,8 +719,87 @@ action: Cite a standard source where the comparison is first used.
                 "Explicit bounds for partial sums of reciprocal powers\nHow large are the harmonic sums?\n"
                 "Integral comparison and the partial sums of the zeta series\n"
                 "Elementary bounds for $H_n^{(s)}$\n</titles>")
+    if label.startswith("Write the plain-language summary"):
+        return ("The question\nHow large is the sum of the reciprocal powers $1 + 2^{-s} + \\dots + n^{-s}$?\n\nWhat was known\nThe infinite sum is classical.\n\n"
+                "What this paper shows\nThe paper proves explicit bounds for every $n$.\n\nWhy it matters\nExplicit bounds are needed in estimates.")
+    if label.startswith("Write the slides"):
+        return ("\\begin{frame}{The question}\n\\begin{itemize}\n\\item Partial sums of reciprocal powers.\n\\end{itemize}\n\\end{frame}\n"
+                "\\begin{frame}{A formula}\n\\[ x^{17} = 42 \\]\n\\end{frame}")
+    if label.startswith("Write the poster"):
+        return "\\section*{The question}\nPartial sums of reciprocal powers.\n\\section*{Results}\nExplicit bounds for every $n$."
+    if label.startswith("Split the report into points"):
+        if "PROOF CORRECTIONS" in user:
+            return json.dumps({"points": [
+                {"quote": "AQ1: Please confirm the affiliation of the author.", "request": "Confirm the affiliation.", "where": "", "type": "query"},
+                {"quote": "Page 2: clarify the wording of the first sentence of the introduction.", "request": "clarify the wording", "where": "Section 1", "type": "language"}]})
+        return json.dumps({"points": [
+            {"quote": "The first sentence of Section 1 should be clarified.", "request": "clarify the wording", "where": "Section 1", "type": "language"},
+            {"quote": "In the main lemma, the bound should read x+ instead.", "request": "change a formula in the main lemma", "where": "Lemma 2.1", "type": "mathematics"},
+            {"quote": "Is the constant optimal?", "request": "Say whether the constant is optimal.", "where": "", "type": "query"}]})
+    if label.startswith("Write the letter"):
+        pts = re.findall(r"^(P\d+) \[(\w+)\] COMMENT: (.*)$", user, re.M)
+        return "Response to the referee\n\nWe thank the referee for the careful reading.\n\n" + "\n".join(
+            f"{pid}. {c}\nResponse: done as described." for pid, _, c in pts)
+    if label.startswith("Editor command"):
+        return _editor_command(user, second="(second try)" in label)
     if label.startswith("Fix LaTeX"):
         return _passage(user, "FRAGMENT:\n")
     if label.startswith("Revise"):
         return _passage(user, "PASSAGE\n") + " (Revised as requested.)"
     return "<kind>content</kind>"
+
+
+EDITOR_LOG: list[str] = []          # the instructions the editor's AI received, for the tests to inspect
+
+
+def _editor_command(user: str, second: bool = False) -> str:
+    """The editor's AI: a few instructions the tests give, answered as the real model would, with the operations of
+    the format in prompts.EDIT_COMMAND (item operations and exact text replacements)."""
+    instr = re.search(r"THE AUTHOR'S INSTRUCTION\n(.*?)\n\nOUTLINE", user, re.S).group(1).strip()
+    EDITOR_LOG.append(instr)
+    files = dict(re.findall(r"=== (\S+) ===\n(.*?)(?=\n\n=== |\n\n\(Not shown|\Z)", user.split("\nFILES\n", 1)[1], re.S))
+    low = instr.lower()
+    outline = re.search(r"OUTLINE \(numbers as printed in the PDF\)\n(.*?)\n\nWHERE", user, re.S).group(1)
+    if low.endswith("?"):
+        used = re.findall(r"(Theorem|Lemma|Definition|Corollary) ([\d.]+)", outline)
+        return f"<answer>The paper has {len(used)} numbered statements; Lemma 2.3 is used in the proof of Theorem 3.1.</answer>"
+    if "fix the latex error" in low:
+        m = re.search(r"reported at (\S+) line (\d+)", instr)
+        path, line = m.group(1), int(m.group(2))
+        bad = files[path].split("\n")[line - 1]
+        cmd = re.search(r"\\(notacommand)\b", bad)
+        fixed = bad.replace("\\notacommand", "\\mathbb{Z}") if cmd else bad
+        return (f"<summary>Replaced the undefined command \\notacommand by \\mathbb{{Z}}.</summary>\n<edit file=\"{path}\">\n<find>{bad}</find>\n"
+                f"<replace>{fixed}</replace>\n</edit>\n<note>Check that $\\mathbb{{Z}}$ is what you meant.</note>")
+    if "more detailed" in low:
+        m = re.search(r"proof of (\w+ [\d.]+)", instr, re.I)
+        target = m.group(1)
+        if not second and "bad find" in low:
+            return "<summary>x</summary>\n<edit file=\"main.tex\">\n<find>text that is nowhere</find>\n<replace>y</replace>\n</edit>"
+        return (f"<summary>Wrote the proof of {target} in more detail.</summary>\n<replace item=\"the proof of {target}\">\\begin{{proof}}\n"
+                "We argue step by step. First, every term is positive, so the sum increases with $n$.\n"
+                "Second, each term is at most the integral over the interval before it, and adding these gives the claim.\n"
+                "\\end{proof}</replace>")
+    if "rewrite the sentences that refer to it" in low:
+        m = re.search(r"remove (\w+ [\d.]+)", instr, re.I)
+        target = m.group(1)
+        lab = re.search(re.escape(target) + r"[^\n]*\[label ([^\]]+)\]", outline)
+        ops = [f"<delete item=\"{target}\"/>"]
+        if lab:
+            for path, text in files.items():
+                for line in text.split("\n"):
+                    if "\\ref{" + lab.group(1) + "}" in line:
+                        new = re.sub(r"[^.]*\\ref\{" + re.escape(lab.group(1)) + r"\}[^.]*\.\s*", "", line)
+                        ops.append(f"<edit file=\"{path}\">\n<find>{line}</find>\n<replace>{new}</replace>\n</edit>")
+        return f"<summary>Removed {target} and the sentence that referred to it.</summary>\n" + "\n".join(ops)
+    if "clarify the wording" in low:
+        path = next(k for k in sorted(files) if k.startswith("sections/"))
+        line = next(l for l in files[path].split("\n") if l.strip() and "$" not in l and not l.lstrip().startswith("\\"))
+        return (f"<summary>Clarified the wording of a sentence.</summary>\n<edit file=\"{path}\">\n<find>{line}</find>\n"
+                f"<replace>{line.rstrip()} Here we make this precise.</replace>\n</edit>")
+    if "change a formula" in low:
+        path = next(k for k in files if k.startswith("sections/") and "$" in files[k])
+        line = next(l for l in files[path].split("\n") if "$" in l)
+        return (f"<summary>Changed a formula.</summary>\n<edit file=\"{path}\">\n<find>{line}</find>\n"
+                f"<replace>{line.replace('$', '$x+', 1)}</replace>\n</edit>")
+    return "<question>Which statement do you mean? Give its number as printed in the PDF.</question>"

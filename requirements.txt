@@ -4,3 +4,5 @@ python-multipart>=0.0.9
 requests>=2.31
 pypdfium2>=4.30
 pillow>=10.0
+cryptography>=42.0
+sympy>=1.12

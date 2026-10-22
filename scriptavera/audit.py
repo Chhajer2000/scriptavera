@@ -33,6 +33,7 @@ _DROP = re.compile(r"\\(?:left|right|big|Big|bigg|Bigg|bigl|bigr|Bigl|Bigr|displ
 def normalize(eq: str) -> str:
     s = drop_brace_labels(eq or "")
     s = re.sub(r"\\label\{[^{}]*\}|\\tag\{[^{}]*\}", "", s)
+    s = re.sub(r"\\(?:left|right)\.", "", s)          # null delimiters, as in a formula broken over lines
     s = re.sub(r"\\begin\{[a-z*]+\}(\{[^{}]*\})?|\\end\{[a-z*]+\}", "", s)
     s = _DROP.sub("", s)
     for pat, rep in _SYNONYMS:
@@ -48,8 +49,8 @@ def normalize(eq: str) -> str:
 
 def _lines(tex: str) -> list[str]:
     """Split a displayed formula into its lines."""
-    body = re.sub(r"\\begin\{(aligned|align\*?|gathered|gather\*?|split|equation\*?|multline\*?|eqnarray\*?)\}", "", tex)
-    body = re.sub(r"\\end\{(aligned|align\*?|gathered|gather\*?|split|equation\*?|multline\*?|eqnarray\*?)\}", "", body)
+    body = re.sub(r"\\begin\{(aligned|align\*?|gathered|gather\*?|split|equation\*?|multline\*?|multlined|eqnarray\*?)\}", "", tex)
+    body = re.sub(r"\\end\{(aligned|align\*?|gathered|gather\*?|split|equation\*?|multline\*?|multlined|eqnarray\*?)\}", "", body)
     if re.search(r"\\begin\{(cases|pmatrix|bmatrix|matrix|array|vmatrix)", body):
         return [body]                                     # a matrix or case split is one object
     return [l for l in re.split(r"\\\\(?:\[[^\]]*\])?", body) if l.strip()]
@@ -138,6 +139,11 @@ class _Index:
                     self.items.append({"tex": l.strip(), "norm": n, "display": kind != "inline"})
         self.wholes = [(it["norm"], _tok(it["norm"])) for it in self.items]
         strings = {n for n, _ in self.wholes}
+        for kind, c in split_math(text or ""):       # a display broken over lines is also the one formula it was
+            if kind in ("display", "env") and len(_lines(c)) > 1:
+                joined = normalize(c)
+                if joined:
+                    strings.add(joined)
         for n, _ in self.wholes:
             strings.update(_pieces(n))
         self.strings = strings

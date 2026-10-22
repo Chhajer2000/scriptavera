@@ -6,7 +6,7 @@ abstract: "Scriptavera turns handwritten research notes into a LaTeX research pa
 authors:
   - family-names: "Chhajer"
     given-names: "Vaibhav"
-version: 1.0
+version: 1.1
 date-released: 2026-10-10
 license: AGPL-3.0-only
 keywords:

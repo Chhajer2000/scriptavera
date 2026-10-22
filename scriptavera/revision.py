@@ -20,12 +20,12 @@ import hashlib
 import re
 import time
 
-from . import paper as paperlib, prompts
+from . import completion, compute, paper as paperlib, prompts
 from .llm import LLMError
 from .pipeline import Run, _room, emit, notation_text, passing
 from .store import Project
 from .texutil import check_balance, clean_fragment
-from .util import est_tokens, extract_tag, fit
+from .util import est_tokens, extract_tag, fit, loads_lenient
 from .writing import fields, skeleton
 
 RESULT_ENVS = ("theorem", "lemma", "proposition", "corollary", "claim")
@@ -262,6 +262,61 @@ def _norm_space(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
 
 
+def _translator(run: Run, notation: str):
+    """The model as translator only: formulas the code cannot read, into a plain syntax the code checks."""
+    def translate(items: list[dict], ctx) -> dict:
+        listing = "\n".join(f"{it['id']}: {it['tex']}" for it in items)
+        res = run.ask("fast", prompts.COMPUTE_TRANSLATE.format(), f"NOTATION OF THE PAPER\n{notation}\n\nFORMULAS\n{listing}",
+                      json_mode=True, max_out=2000, effort="low", label="Translate formulas for the computer check")
+        data = loads_lenient(res.text)
+        out = {}
+        for item in (data.get("steps") if isinstance(data, dict) else data) or []:
+            if isinstance(item, dict) and item.get("id"):
+                original = next((it["tex"] for it in items if it["id"] == item["id"]), "")
+                try:
+                    out[str(item["id"])] = compute.from_translation(item, ctx, original)
+                except (compute.Unreadable, TypeError, ValueError, AttributeError) as e:
+                    out[str(item["id"])] = str(e)
+        return out
+    return translate
+
+
+def computer_checks(run: Run, u: dict, glossary: list[dict], notation: str) -> list[dict]:
+    try:
+        return compute.check_passage(u["statement"], u["proof"] or "", glossary, translate=_translator(run, notation))
+    except LLMError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the computer check is an aid; the proof check runs without it
+        run.log(f"The computer check of {u['name']} could not be done ({type(e).__name__}); the proof check runs without it.", "warn")
+        return []
+
+
+def check_proof(run: Run, u: dict, env: dict, label_prefix: str = "") -> list[dict]:
+    """The proof check of one proof, as in stage_verify: a step-by-step reading, then a second opinion on every
+    claim. Returns the claims the second opinion upheld."""
+    sys_v = prompts.VERIFY.format(field=run.field)
+    room = _room("reason", sys_v, 2200)
+    context = (f"SETTING AND DEFINITIONS\n{fit(env['setting'], max(800, room // 5), 'head') or '(none stated)'}\n\n"
+               f"RESULTS STATED EARLIER (they may be used)\n{fit(_statements(env['units'], upto=u['at']), max(800, room // 3), 'tail')}\n\n"
+               f"THE RESULT TO CHECK\n{u['name']} [{u['label']}]\nStatement: {u['statement']}\n\nProof:\n{u['proof']}")
+    res = run.ask("reason", sys_v, context, max_out=2200, effort="high", label=f"Check the {label_prefix}{u['name']}")
+    claims = [{"severity": next((s for s in ("error", "gap", "slip") if s in f.get("severity", "").lower()), "gap"),
+               "quote": f.get("quote", "").strip(), "problem": _norm_space(f["problem"])}
+              for f in fields(res.text, "issue", ("severity", "quote", "problem", "correction")) if f.get("problem")]
+    if not claims:
+        return []
+    listing = "\n\n".join(f"{n}. [{c['severity']}] At: {c['quote'] or '(no passage quoted)'}\n   Claim: {c['problem']}\n   Proposed correction: none"
+                          for n, c in enumerate(claims, 1))
+    adj = run.ask("reason", prompts.ADJUDICATE.format(field=run.field), context + "\n\nCLAIMS OF THE FIRST READER\n" + listing,
+                  max_out=1800, effort="high", label=f"Second opinion on the {label_prefix}{u['name']}")
+    upheld = set()
+    for f in fields(adj.text, "ruling", ("n", "decision", "reason", "correction")):
+        m = re.search(r"\d+", f.get("n", ""))
+        if m and "upheld" in f.get("decision", "").lower():
+            upheld.add(int(m.group(0)))
+    return [c for n, c in enumerate(claims, 1) if n in upheld]
+
+
 def stage_verify(run: Run) -> None:
     p = run.p
     blocks = (p.load("body") or {}).get("blocks", [])
@@ -276,8 +331,19 @@ def stage_verify(run: Run) -> None:
     sys_v = prompts.VERIFY.format(field=run.field)
     sys_a = prompts.ADJUDICATE.format(field=run.field)
     todo = [u for u in units if u["label"]]
+    glossary = (p.load("confirmed", {}) or {}).get("glossary", [])
+    notation = notation_text(p.load("confirmed", {}), 1500)
+    if not compute.AVAILABLE:
+        run.log("SymPy is not installed, so no step is checked by computation; run_app.bat installs it on the next start.", "warn")
+    cache = p.load("verify_cache", {}) or {}
     for i, u in enumerate(todo):
         if u["label"] in state["results"]:
+            continue
+        ukey = hashlib.sha256(f"{u['statement']}\n{u['proof']}".encode("utf-8")).hexdigest()[:24]
+        if p.state.get("incremental") and ukey in cache:
+            state["results"][u["label"]] = {**cache[ukey], "label": u["label"], "name": u["name"], "kept": True}
+            p.save("verify", state)
+            run.log(f"{u['name']}: the proof is unchanged since the last version, so its check is kept.")
             continue
         run.progress(i, len(todo), f"checking the proof of {u['name']}")
         rec = {"label": u["label"], "name": u["name"], "env": u["env"], "issues": [], "summary": "", "verdict": "correct"}
@@ -286,10 +352,14 @@ def stage_verify(run: Run) -> None:
             state["results"][u["label"]] = rec
             p.save("verify", state)
             continue
+        comp = computer_checks(run, u, glossary, notation) if compute.AVAILABLE else []
+        rec["computed"] = comp
         room = _room("reason", sys_v, 2200)
         context = (f"SETTING AND DEFINITIONS\n{fit(setting, max(800, room // 5), 'head') or '(none stated)'}\n\n"
                    f"RESULTS STATED EARLIER (they may be used)\n{fit(_statements(units, upto=u['at']), max(800, room // 3), 'tail')}\n\n"
                    f"THE RESULT TO CHECK\n{u['name']} [{u['label']}]\nStatement: {u['statement']}\n\nProof:\n{u['proof']}")
+        if compute.for_model(comp):
+            context += "\n\n" + fit(compute.for_model(comp), max(800, room // 4), "head")
         res = run.ask("reason", sys_v, context, max_out=2200, effort="high", label=f"Check proof of {u['name']}")
         rec["model"] = res.model
         rec["summary"] = _norm_space(extract_tag(res.text, "summary"))
@@ -301,6 +371,11 @@ def stage_verify(run: Run) -> None:
             corr = f.get("correction", "").strip()
             claims.append({"severity": sev, "quote": f.get("quote", "").strip(), "problem": _norm_space(f["problem"]),
                            "correction": "" if corr.lower().strip(".") in ("none", "", "n/a") else clean_fragment(corr)})
+        said = " ".join(c["quote"] for c in claims).replace(" ", "")
+        for c in comp:
+            if c["status"] == "counterexample" and c["tex"].replace(" ", "")[:40] not in said:
+                claims.append({"severity": "error", "quote": c["tex"], "by": "computer", "correction": "",
+                               "problem": f"Exact computation shows that this step is false: {c['detail']}."})
         if claims:
             # a second, independent opinion on every claim; only what it upholds reaches the author
             listing = "\n\n".join(f"{n}. [{c['severity']}] At: {c['quote'] or '(no passage quoted)'}\n   Claim: {c['problem']}\n"
@@ -329,6 +404,9 @@ def stage_verify(run: Run) -> None:
             rec["verdict"] = "problems"
         state["results"][u["label"]] = rec
         p.save("verify", state)
+        cache[ukey] = rec
+        p.save("verify_cache", dict(list(cache.items())[-300:]))
+    completion.stage(run, blocks, units, sig)          # sketched proofs: completed by their own steps, for the author to decide
     state["done"] = True
     p.save("verify", state)
     upheld = sum(1 for r in state["results"].values() for c in r["issues"] if c["status"] == "upheld")
@@ -454,16 +532,22 @@ def decision_items(p: Project) -> dict:
             w = [_where(ctx, l) for l in labs]
             pr["context"] = {**w[0], "pages": sorted({n for x in w for n in x["pages"]})[:8],
                              "others": [x["label"] for x in w[1:]]}
+    complete, failed = completion.items(p)
+    for c in complete:
+        c["context"] = _where(ctx, c["label"])
+    for r in failed:
+        r["context"] = _where(ctx, r["where"]) if r["where"] in ctx["units"] else None
+    remarks = failed + remarks
     for n, c in enumerate((p.load("dossier") or {}).get("concerns", []), 1):
         remarks.append({"id": f"N{n}", "source": "first reading of your notes", "where": "", "comment": c, "action": ""})
-    return {"simplify": simplify, "issues": issues, "remarks": remarks}
+    return {"simplify": simplify, "complete": complete, "issues": issues, "remarks": remarks}
 
 
 def settle_if_nothing_to_decide(p: Project) -> bool:
     items = decision_items(p)
-    if items["simplify"] or items["issues"] or items["remarks"]:
+    if items["simplify"] or items["complete"] or items["issues"] or items["remarks"]:
         return False
-    p.save("decisions", {"simplify": {}, "issues": {}, "remarks": {}, "at": time.time(), "auto": True})
+    p.save("decisions", {"simplify": {}, "complete": {}, "issues": {}, "remarks": {}, "at": time.time(), "auto": True})
     return True
 
 
@@ -477,6 +561,15 @@ def submit_decisions(p: Project, data: dict) -> None:
         if choice not in ("accept", "reject"):
             missing.append(pr["id"])
         simplify[pr["id"]] = choice
+    complete = {}
+    for c in items["complete"]:
+        got = (data.get("complete") or {}).get(c["id"]) or {}
+        choice, note, text = got.get("choice"), (got.get("note") or "").strip()[:2000], (got.get("text") or "").strip()
+        if (choice == "instruct" and not note) or (choice == "edit" and (not text or check_balance(text))):
+            choice = None
+        if choice not in ("accept", "edit", "instruct", "keep"):
+            missing.append(c["id"])
+        complete[c["id"]] = {"choice": choice, "note": note, "text": text if choice == "edit" else ""}
     for c in items["issues"]:
         got = (data.get("issues") or {}).get(c["id"]) or {}
         choice, note = got.get("choice"), (got.get("note") or "").strip()
@@ -493,10 +586,10 @@ def submit_decisions(p: Project, data: dict) -> None:
     for rid, note in (data.get("remarks") or {}).items():
         if rid in known and str(note).strip():
             remarks[rid] = str(note).strip()[:1500]
-    p.save("decisions", {"simplify": simplify, "issues": issues, "remarks": remarks, "at": time.time()})
+    p.save("decisions", {"simplify": simplify, "complete": complete, "issues": issues, "remarks": remarks, "at": time.time()})
     p.set_stage("decide", status="done", finished=time.time())
     acc = sum(1 for v in simplify.values() if v == "accept")
-    fix = sum(1 for v in issues.values() if v["choice"] != "keep")
+    fix = sum(1 for v in issues.values() if v["choice"] != "keep") + sum(1 for v in complete.values() if v["choice"] != "keep")
     emit(p.id, "log", stage="decide", level="done",
          message=f"Your decisions: {acc} simplification(s) accepted, {fix} correction(s) to make, {len(remarks)} remark(s) with instructions.")
 
@@ -534,7 +627,7 @@ def apply_decisions(run: Run, blocks: list[dict], intro: str = "") -> tuple[list
     blocks = [dict(b) for b in blocks]
     waived: list[str] = []
     approved: list[str] = []
-    report = {"simplified": [], "corrected": [], "instructed": [], "remarks": [], "unapplied": []}
+    report = {"simplified": [], "completed": [], "corrected": [], "instructed": [], "remarks": [], "unapplied": []}
 
     rewritten: set[str] = set()                # proofs replaced by an accepted simplification
 
@@ -562,10 +655,49 @@ def apply_decisions(run: Run, blocks: list[dict], intro: str = "") -> tuple[list
         report["simplified"].append({"id": pr["id"], "names": list(pr["names"].values()), "labels": list(pr["affects"]),
                                      "idea": pr["idea"], "new": pr["new"]["label"] if pr.get("new") else ""})
 
-    # 2. corrections to proofs: the suggested one, or the author's own instruction
+    # 2. sketched proofs the author chose to complete: as offered, as the author edited it, or done again as told
+    completed: set[str] = set()
+    for c in items["complete"]:
+        d = (dec.get("complete") or {}).get(c["id"]) or {}
+        if d.get("choice") not in ("accept", "edit", "instruct"):
+            continue
+        if c["label"] in rewritten:
+            report["unapplied"].append({"id": c["id"], "why": f"the proof of {c['name']} was replaced by a shorter one that you accepted; "
+                                                               "the completion of the sketch was not applied on top of it."})
+            continue
+        units = result_units(blocks)
+        u = _unit(units, c["label"])
+        if not u or u["proof_at"] is None:
+            report["unapplied"].append({"id": c["id"], "why": f"the proof of {c['name']} could not be found."})
+            continue
+        new = c["proof"] if d["choice"] == "accept" else d.get("text", "") if d["choice"] == "edit" else ""
+        if d["choice"] == "instruct":
+            prev = ((p.load("completion") or {}).get("items") or {}).get(c["label"]) or {}
+            env = completion.environment(p, blocks, units)
+            rec = completion.complete_one(run, {**u, "proof": c["sketch"]}, env, note=d.get("note", ""),
+                                          previous={"steps": prev.get("steps"), "additions": prev.get("additions")})
+            if rec["status"] != "ready":
+                report["unapplied"].append({"id": c["id"], "why": f"the completion of {c['name']} done again as you asked did not pass "
+                                                                   f"the checks ({rec['reason']}); the sketch is kept."})
+                continue
+            new = rec["proof"]
+        if not new.strip() or check_balance(new):
+            report["unapplied"].append({"id": c["id"], "why": f"the completed proof of {c['name']} could not be used; the sketch is kept."})
+            continue
+        waived.append(blocks[u["proof_at"]]["text"])
+        approved.append(new)
+        blocks[u["proof_at"]]["text"] = new
+        completed.add(c["label"])
+        report["completed"].append({"id": c["id"], "name": c["name"], "label": c["label"], "how": d["choice"], "note": d.get("note", "")})
+
+    # 3. corrections to proofs: the suggested one, or the author's own instruction
     for c in items["issues"]:
         d = (dec.get("issues") or {}).get(c["id"]) or {}
         if d.get("choice") not in ("fix", "instruct"):
+            continue
+        if c["label"] in completed:
+            report["unapplied"].append({"id": c["id"], "why": f"the sketch of {c['name']} was replaced by the completed proof you chose; "
+                                                               "check in the paper view whether this point still applies."})
             continue
         u = _unit(result_units(blocks), c["label"])
         if not u or u["proof_at"] is None:
@@ -602,7 +734,7 @@ def apply_decisions(run: Run, blocks: list[dict], intro: str = "") -> tuple[list
         report["corrected" if d["choice"] == "fix" else "instructed"].append(
             {"id": c["id"], "name": c["name"], "label": c["label"], "problem": c["problem"], "note": d.get("note", "")})
 
-    # 3. remarks the author gave an instruction for
+    # 4. remarks the author gave an instruction for
     for r in items["remarks"]:
         note = (dec.get("remarks") or {}).get(r["id"])
         if not note:
@@ -649,5 +781,5 @@ def apply_decisions(run: Run, blocks: list[dict], intro: str = "") -> tuple[list
 
 def state_json(p: Project) -> dict:
     """What the interface needs from the three readings."""
-    return {"simplify": p.load("simplify"), "verify": p.load("verify"), "referee": p.load("referee"),
+    return {"simplify": p.load("simplify"), "verify": p.load("verify"), "referee": p.load("referee"), "completion": p.load("completion"),
             "decisions": p.load("decisions"), "items": decision_items(p)}

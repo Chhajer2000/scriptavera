@@ -59,7 +59,7 @@ print("an earlier finished project: reading, notation and transcript kept; the o
 n0 = len(q.calls(2000))
 pipeline.start(q); wait(q, "review")
 labels = [c["label"] for c in q.calls(2000)[n0:]]
-assert labels and all(l.startswith("Draw figure") for l in labels), labels            # only the figure is drawn; no page is read again
+assert labels and all(l.startswith(("Draw figure", "Decide which drawings are for the paper")) for l in labels), labels   # no page is read again
 pipeline.submit_review(q, {"figures": {"f1": "orig"}})
 pipeline.start(q); wait(q, "scope")
 from scriptavera import writing

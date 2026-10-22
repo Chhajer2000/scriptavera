@@ -13,6 +13,9 @@ ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_DIR = ROOT / "projects"
 ENV_PATH = ROOT / ".env"
 SETTINGS_PATH = ROOT / "settings.json"
+MEMORY_DIR = ROOT / "memory"              # what is learned about the author from paper to paper (this computer only)
+PHONE_DIR = ROOT / "phone_uploads"        # photos sent from a phone, until they become notes
+IDENTITY_DIR = ROOT / "identity"          # the author's signing key for the records of their notes; never shared
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 _lock = threading.Lock()
@@ -43,6 +46,15 @@ DEFAULT_SETTINGS = {
     "parallel_pages": 2,       # simultaneous page calls in the survey pass
     "ref_order": "alphabetical",  # or "appearance"
     "document_class": "amsart",   # or "article"
+    "proof_timestamps": True,     # timestamp the fingerprint of uploaded notes with independent services
+    "proof_tsa": [],              # RFC 3161 authorities; empty means the defaults (FreeTSA, DigiCert)
+    "proof_calendars": [],        # OpenTimestamps calendars; empty means the defaults
+    "private": False,             # Private mode: only paid-tier (or local) models; nothing that describes results is searched for
+    "private_models": [],         # further models allowed in Private mode, e.g. "gemini:gemini-4-argon" once Google prices it
+    # Test mode: papers created while it is on search only literature published before `before`, never the papers in
+    # `exclude` (arXiv ids, DOIs or titles), and never OEIS; the limits are kept with each test paper.
+    "test_mode": {"on": False, "before": "", "exclude": []},
+    "prices": {},                 # model -> [input, output] in dollars per million tokens, overriding the built-in table
 }
 
 

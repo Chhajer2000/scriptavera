@@ -41,11 +41,13 @@ class H(BaseHTTPRequestHandler):
             if "reasoning_effort" in body: return self._send(400, {"error": {"message": "unknown parameter reasoning_effort"}})
             if body["max_tokens"] > 8192: return self._send(400, {"error": {"message": "max_tokens must be less than or equal to 8192"}})
             return self._send(200, {"choices": [{"message": {"content": "fine"}, "finish_reason": "stop"}], "usage": {}})
-        if m == "strong-a":
-            return self._send(429, {"error": {"message": "Quota exceeded for requests per day. Please try again in 5h0m0s."}})
-        if m == "strong-b":
+        if m == "strong":
+            if self.headers.get("Authorization") == "Bearer sk-test":
+                return self._send(429, {"error": {"message": "Quota exceeded for requests per day. Please try again in 5h0m0s."}})
             if calls.get("b") == "busy": return self._send(503, {"error": {"message": "The model is overloaded. Please try again later."}})
-            return self._send(200, {"choices": [{"message": {"content": "from the equivalent model"}, "finish_reason": "stop"}], "usage": {}})
+            return self._send(200, {"choices": [{"message": {"content": "from the second key"}, "finish_reason": "stop"}], "usage": {}})
+        if m == "next":
+            return self._send(200, {"choices": [{"message": {"content": "from the next model"}, "finish_reason": "stop"}], "usage": {}})
         if m == "weak":
             return self._send(200, {"choices": [{"message": {"content": "from the weaker model"}, "finish_reason": "stop"}], "usage": {}})
         if m == "thinker":
@@ -124,44 +126,44 @@ except LLMError as e:
     print("limits error:", str(e)[:110])
 for m in router.models: m.cooldown_until = 0
 
-# ---- quality-critical jobs: only the strongest model or one equivalent to it; otherwise wait, and name the stand-in
+# ---- quality-critical jobs: only the strongest model, on one key after the other; never a lesser model by itself
 from scriptavera.llm import Model, ROLES
 keep = router.models
-def mk(mid, score):
-    m = Model(provider="custom", id=mid, key="sk-test", req_tokens=24000, out_cap=6000, interval=0.0)
+def mk(mid, score, key="sk-test", ki=0):
+    m = Model(provider="custom", id=mid, key=key, key_index=ki, req_tokens=24000, out_cap=6000, interval=0.0)
     m.scores = {r: score for r in ROLES if not r.startswith("vision")}
     return m
-router.models = [mk("strong-a", 90), mk("strong-b", 88), mk("weak", 70)]
+router.models = [mk("strong", 90), mk("strong", 90, "sk-two", 1), mk("next", 88), mk("weak", 70)]
 config.save_settings({"routing": {}})
 assert ROLES["writer"]["strict"] and not ROLES["fast"]["strict"]
-assert [m.id for m in router.peers("writer")] == ["strong-a", "strong-b"] and router.best("writer").id == "strong-a"
+assert [m.ref for m in router.peers("writer")] == ["custom:strong", "custom:strong#2"] and router.best("writer").ref == "custom:strong"
 plan = router.plan()
-assert plan["writer"]["chain"] == ["custom:strong-a", "custom:strong-b"] and plan["writer"]["weaker"] == ["custom:weak"], plan["writer"]
-assert plan["fast"]["chain"] == ["custom:strong-a", "custom:strong-b", "custom:weak"] and plan["fast"]["weaker"] == []
+assert plan["writer"]["chain"] == ["custom:strong", "custom:strong#2"] and plan["writer"]["weaker"] == ["custom:next", "custom:weak"], plan["writer"]
+assert plan["fast"]["chain"] == ["custom:strong", "custom:strong#2", "custom:next", "custom:weak"] and plan["fast"]["weaker"] == []
 class Quick(Hk):
     def sleep(self, seconds): pass                 # the waits between retries are not what is tested here
 recs.clear()
 res = router.chat("writer", "s", "u", hooks=Quick(), label="strict-1")
-a, b_, w = router.models
-assert res.model == "strong-b" and res.text == "from the equivalent model", res        # the best one is out for the day: its equal answers
-assert a.note == "daily limit reached" and 3 * 3600 < a.cooldown_until - time.time() < 6 * 3600, (a.note, a.cooldown_until - time.time())
+s1, s2, nx, w = router.models
+assert res.model == "strong" and res.text == "from the second key", res        # the first key is out for the day: the second takes over
+assert s1.note == "daily limit reached" and 3 * 3600 < s1.cooldown_until - time.time() < 6 * 3600, (s1.note, s1.cooldown_until - time.time())
 calls["b"] = "busy"; n0 = len(calls["log"])
 try:
-    router.chat("writer", "s", "u", hooks=Quick(), label="strict-2"); raise SystemExit("a weaker model must not answer a strict job")
+    router.chat("writer", "s", "u", hooks=Quick(), label="strict-2"); raise SystemExit("a lesser model must not answer a strict job")
 except LLMError as e:
-    assert e.kind == "limits" and e.weaker == "weak" and "not free right now" in str(e) and "strong-b (overloaded at the provider" in str(e), str(e)
-    assert 250 < e.retry_at - time.time() < 320, e.retry_at - time.time()               # the first of them to come back
+    assert e.kind == "limits" and e.weaker == "next" and "not free right now" in str(e) and "strong (overloaded at the provider" in str(e), str(e)
+    assert 250 < e.retry_at - time.time() < 320, e.retry_at - time.time()               # the first of its keys to come back
 tried = [m for m, _ in calls["log"][n0:]]
-assert tried == ["strong-b"] * 4 and "weak" not in tried, tried                         # patient with the equal model, never the weaker one
-assert router.candidates("writer") == [] and [m.id for m in router.candidates("writer", strict=False)] == ["weak"]
-assert router.chat("writer", "s", "u", hooks=Quick(), label="allowed", strict=False).model == "weak"     # only when the author allows it
-assert router.chat("fast", "s", "u", hooks=Quick(), label="small job").model == "weak"                   # other jobs fall back freely
-config.save_settings({"routing": {"writer": ["custom:weak"]}})                         # a model the author pins belongs to the top class
-assert [m.id for m in router.peers("writer")] == ["weak", "strong-a", "strong-b"] and router.chat("writer", "s", "u", hooks=Quick()).model == "weak"
+assert tried == ["strong"] * 4 and "next" not in tried, tried                           # patient with the second key, never the next model
+assert router.candidates("writer") == [] and [m.id for m in router.candidates("writer", strict=False)] == ["next", "weak"]
+assert router.chat("writer", "s", "u", hooks=Quick(), label="allowed", strict=False).model == "next"    # only when the author allows it
+assert router.chat("fast", "s", "u", hooks=Quick(), label="small job").model == "next"                  # other jobs fall back freely
+config.save_settings({"routing": {"writer": ["custom:weak"]}})                         # a model the author pins comes first
+assert [m.id for m in router.peers("writer")] == ["weak", "strong", "strong"] and router.chat("writer", "s", "u", hooks=Quick()).model == "weak"
 config.save_settings({"routing": {}})
 for m in router.models: m.cooldown_until = 0
 calls["b"] = "ok"
-print("strict roles: equivalent model used, weaker model refused, wait time and stand-in reported")
+print("strict roles: the same model on the next key, a lesser model refused, wait time and stand-in reported")
 router.models = keep
 
 os.environ["CUSTOM_API_KEY"] = "sk-wrong"

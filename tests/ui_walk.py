@@ -18,6 +18,7 @@ import sys, os, pathlib; sys.path.insert(0, {str(ROOT)!r})
 from scriptavera import config
 w = pathlib.Path(os.environ['SCRIPTAVERA_WORK'])
 config.PROJECTS_DIR = w / 'projects'; config.SETTINGS_PATH = w / 'settings.json'; config.ENV_PATH = w / '.env'
+config.MEMORY_DIR = w / 'memory'; config.PHONE_DIR = w / 'phone_uploads'; config.IDENTITY_DIR = w / 'identity'
 import uvicorn; from scriptavera.server import create_app
 uvicorn.run(create_app(), host='127.0.0.1', port={PORT}, log_level='warning')
 """
@@ -44,7 +45,13 @@ try:
         pg.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
         pg.on("pageerror", lambda e: errors.append("PAGEERROR " + str(e)))
         pg.goto(U)
+        pg.wait_for_selector(".home-empty")                       # no papers yet: the home page offers the two ways in
+        shot(pg, "00_home_empty")
+        hs = [pg.locator(f'.home-acts [data-act="{a}"]').bounding_box()["height"] for a in ("newpaper", "importpaper")]
+        assert hs[0] == hs[1], f"the two buttons on the home page differ in height: {hs}"
+        pg.click('.home-acts [data-act="newpaper"]')
         pg.wait_for_selector(".dom")
+        assert pg.evaluate("location.hash") == "#new" and pg.locator('.crumbs [data-act="home"]').count() == 1
         shot(pg, "01_home")
         pg.click('.dom[data-id="math.CA"]')
         pg.fill('[data-bind="subarea"]', "explicit bounds for sums")
@@ -61,8 +68,15 @@ try:
         pg.locator(".jr-item").first.click()
         assert "Simulated Journal of Analysis" in pg.inner_text(".sheet")
         pg.locator("details.more summary").first.click()
+        pg.click('[data-act="create"]'); time.sleep(0.3)                   # refused: the record names its authors
+        assert "Name at least one author" in pg.inner_text("#toast")
         pg.fill('[data-bind="authors.0.name"]', "A. N. Author")
         pg.fill('[data-bind="authors.0.affiliation"]', "Department of Mathematics, Example University")
+        pg.fill('[data-bind="authors.0.orcid"]', "0000-0002-1825-0097")
+        assert "I, A. N. Author, am the author of these notes." in pg.inner_text("#fdeclareText"), "the declaration is shown word for word"
+        pg.click('[data-act="create"]'); time.sleep(0.3)                   # refused: the declaration is not ticked
+        assert "Tick the declaration" in pg.inner_text("#toast")
+        pg.check("#fdeclare")
         shot(pg, "03_home_filled", full=True)
         pg.click('[data-act="create"]')
         pg.wait_for_selector(".steps", timeout=30000)
@@ -278,7 +292,7 @@ try:
             shot(pg, f"20_{sid}", full=sid in ("understand", "assess", "scope", "structure", "simplify", "verify", "referee", "decide", "figures", "intro", "finish"))
             assert pg.evaluate("document.querySelectorAll('.katex-error').length") == 0, f"KaTeX error on {sid}"
         pg.click('[data-act="settings"]'); time.sleep(0.4); shot(pg, "30_settings", full=True)
-        assert "Only the strongest class is used" in pg.inner_text(".dialog") and "used only if you allow it" in pg.inner_text(".dialog")
+        assert "Only the strongest model is used" in pg.inner_text(".dialog") and "used only if you allow it" in pg.inner_text(".dialog")
         pg.keyboard.press("Escape")
         pg.click('.step[data-view="scout"]'); time.sleep(0.2)
         pg.click('[data-act="journal"]'); pg.wait_for_selector("#jrdialog"); time.sleep(0.3); shot(pg, "31_journal_dialog")
