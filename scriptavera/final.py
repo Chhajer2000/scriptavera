@@ -68,6 +68,7 @@ def build_outputs(p: Project, paper: dict, compile_now: bool = True) -> dict:
     paper["profile"] = prof
     paper["journal"] = meta.get("journal")
     paper["statements"] = meta.get("statements") or {}
+    paper["cite_software"] = bool(meta.get("cite_software"))    # the declaration of Scriptavera, and its reference
     library = {x["key"]: x for x in p.load("library", [])}
 
     full = paper.get("keywords_full") or paper.get("keywords") or []
@@ -77,10 +78,12 @@ def build_outputs(p: Project, paper: dict, compile_now: bool = True) -> dict:
     cited = [k for k in cited_keys([paper.get("intro", "")] + [b.get("text", "") + " " + (b.get("title") or "") for b in paper["blocks"]])
              if k in library]
     refs = [library[k] for k in cited]
+    if paper["cite_software"]:
+        refs.append(paperlib.software_reference())             # cited last, in the declaration before the references
     if prof.get("ref_order") == "alphabetical":
         refs.sort(key=lambda x: ((x["authors"][0]["family"] if x.get("authors") else "zzz").lower(), x.get("year") or 0))
     paper["refs"] = [{k: x.get(k) for k in ("key", "title", "authors", "year", "venue", "journal_ref", "volume", "issue", "pages",
-                                            "doi", "arxiv", "zbl", "url", "fulltext", "verdict")} for x in refs]
+                                            "doi", "arxiv", "zbl", "url", "fulltext", "verdict", "kind")} for x in refs]
     paper["uncited"] = [{"key": x["key"], "title": x["title"], "year": x.get("year"), "verdict": x.get("verdict")}
                         for x in library.values() if x.get("read") and x["key"] not in cited]
     paper["html"] = paperlib.render_html(paper, refs, fig_url_for(p, False))
@@ -709,12 +712,15 @@ def revise_block(p: Project, target: str, instruction: str) -> dict:
     return build_outputs(p, paper)
 
 
-def set_journal(p: Project, journal: dict | None, statements: dict | None = None) -> dict | None:
+def set_journal(p: Project, journal: dict | None, statements: dict | None = None,
+                cite_software: bool | None = None) -> dict | None:
     """Choose, change or clear the target journal. If a paper exists it is refitted and rebuilt at once."""
     clean = journals.clean_journal(journal)
 
     def f(st):
         st["meta"]["journal"] = clean
+        if cite_software is not None:
+            st["meta"]["cite_software"] = bool(cite_software)
         if statements is not None:
             st["meta"]["statements"] = {k: re.sub(r"\s+", " ", str(statements.get(k) or "")).strip()[:1500]
                                         for k, _ in paperlib.STATEMENTS}

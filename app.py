@@ -3,6 +3,9 @@
 """Scriptavera: start the local app and open it in the browser.
 
     python app.py            (or double-click run_app.bat on Windows)
+
+On Google Cloud Run (SCRIPTAVERA_PUBLIC=1, set in the Dockerfile) the same command starts the hosted service,
+listening on 0.0.0.0 at the port in PORT.
 """
 
 from __future__ import annotations
@@ -42,15 +45,15 @@ def _free_port(preferred: int) -> int:
 
 
 def _replace_running(port: int) -> None:
-    """If Scriptavera is already running (an older copy, still open in another window), stop it, so that only
-    this one runs and the browser never talks to an old program. Its work is saved after every step."""
+    """If Scriptavera is already running (a copy still open in another window), stop it, so that only this one runs
+    and the browser never talks to a program started from other files. Its work is saved after every step."""
     import json
     import time
     import urllib.request
     base = f"http://127.0.0.1:{port}"
     try:
         with urllib.request.urlopen(base + "/api/meta", timeout=1.5) as r:
-            old = json.loads(r.read().decode("utf-8")).get("version", "?")
+            json.loads(r.read().decode("utf-8"))["version"]
     except Exception:
         return                                          # nothing of ours is running there
     try:
@@ -60,11 +63,11 @@ def _replace_running(port: int) -> None:
         pass
     for _ in range(30):
         if not _listening(port):
-            print(f"  The copy of Scriptavera that was already running (version {old}) was closed.")
+            print("  The copy of Scriptavera that was already running was closed.")
             time.sleep(0.5)
             return
         time.sleep(0.2)
-    print(f"\n  Scriptavera (version {old}) is already running in another window and could not be closed.")
+    print("\n  Scriptavera is already running in another window and could not be closed.")
     print("  Close that window first, then start this again.\n")
     input("  Press Enter to close this window.")
     sys.exit(1)
@@ -76,6 +79,11 @@ def main() -> None:
         print("\nSome required packages are not installed:\n  " + ", ".join(missing))
         print("\nInstall them with:\n  python -m pip install -r requirements.txt\n")
         sys.exit(1)
+    from scriptavera import hosting
+    if hosting.public():                # Google Cloud Run (scriptavera.com): 0.0.0.0, at the port given in PORT
+        from scriptavera.server import serve
+        serve()
+        return
     import uvicorn
     from scriptavera.server import create_app
 

@@ -29,7 +29,7 @@ const ICON = {
 function newForm() {
   return { domains: [], subarea: "", hints: "", problem: "", keywords: "", keypapers: "", title: "", refs: "", files: [],
     authors: [{ name: "", affiliation: "", email: "", orcid: "" }], recorder: "0", recorderName: "", declare: false,
-    journal: null, jq: "", jresults: null, jmsg: "" };
+    journal: null, jq: "", jresults: null, jmsg: "", optIn: false };
 }
 function newJr() { return { q: "", results: null, message: "", searching: false, guide: null, guideBusy: false, saving: "" }; }
 
@@ -40,9 +40,16 @@ async function api(path, opts = {}) {
   let res;
   try { res = await fetch(path, init); }
   catch (e) { throw new Error("The app is not responding. Check that the Scriptavera window is still open."); }
+  const build = res.headers.get("x-scriptavera-build");      /* the program was started again with other files: */
+  if (build && S.build && build !== S.build) { location.reload(); return new Promise(() => {}); }   /* load the page anew */
+  if (build) S.build = build;
   let data = null;
   try { data = await res.json(); } catch (e) { /* not JSON */ }
-  if (!res.ok || !data || data.ok === false) throw new Error((data && data.error) || `Request failed (${res.status})`);
+  if (!res.ok || !data || data.ok === false) {
+    const err = new Error((data && data.error) || `Request failed (${res.status})`);
+    err.status = res.status; err.code = data && data.code;     /* e.g. guest_limit, paywall (scriptavera.com) */
+    throw err;
+  }
   return data;
 }
 
@@ -53,8 +60,8 @@ function toast(msg, bad) {
 }
 
 /* ------------------------------------------------------------ mathematics */
-/* A shorthand is given to KaTeX only if KaTeX does not know the command itself. (A paper built by an earlier version
-   could carry \cancel or \phi declared as plain words, which the preview then printed as "cancel" and "phi".) */
+/* A shorthand is given to KaTeX only if KaTeX does not know the command itself. (A paper can carry \cancel or \phi
+   declared as plain words, which the preview would then print as "cancel" and "phi".) */
 const KATEX_KNOWS = {};
 function katexKnows(name) {
   if (!(name in KATEX_KNOWS)) {
@@ -101,11 +108,28 @@ function renderMath(root) {
 }
 const squash = (s) => String(s || "").replace(/\$/g, "").replace(/\s+/g, "");
 
+function holdMarkers(text, held) {
+  /* [FIGURE ...: ...] and [MARGIN: ...] notes, found with their brackets matched (a description may hold formulas and
+     brackets of its own) and set aside before the formulas of the page are typeset. */
+  let out = "", pos = 0, m;
+  const re = /\[(FIGURE(?:\s+f\d+)?|MARGIN|EXPLANATORY DRAWING)\s*:/g;
+  while ((m = re.exec(text))) {
+    let depth = 1, j = m.index + m[0].length;
+    while (j < text.length && depth) { if (text[j] === "[") depth++; else if (text[j] === "]") depth--; j++; }
+    if (depth) break;                                   /* unmatched: left as it is */
+    const desc = text.slice(m.index + m[0].length, j - 1).trim();
+    held.push(`<span class="fig">${m[1].startsWith("MARGIN") ? "Margin note" : "Figure"}: ${inner(mixed(desc))}</span>`);
+    out += text.slice(pos, m.index) + `\u0002${held.length - 1}\u0002`;
+    pos = j; re.lastIndex = j;
+  }
+  return out + text.slice(pos);
+}
 /* Text with $...$ and $$...$$ (a transcript, a definition) to HTML. */
 function mixed(text, marks) {
   marks = (marks || []).filter(Boolean);
   const sq = marks.map(squash).filter((m) => m.length > 2);
-  const parts = String(text || "").split(/(\$\$[\s\S]+?\$\$|\$[^$\n]+?\$)/g);
+  const held = [];
+  const parts = holdMarkers(String(text || ""), held).split(/(\$\$[\s\S]+?\$\$|\$[^$\n]+?\$)/g);
   let out = "";
   for (const part of parts) {
     if (!part) continue;
@@ -121,7 +145,8 @@ function mixed(text, marks) {
         const em = esc(m);
         if (em.length > 2 && h.includes(em)) h = h.split(em).join(`<mark>${em}</mark>`);
       }
-      h = h.replace(/\[FIGURE(?:\s+f\d+)?:\s*([\s\S]*?)\]/g, '<span class="fig">Figure: $1</span>')
+      h = h.replace(/&lt;\/?(?:u|b|i|em|strong|mark|span|br|p)\b[^&]{0,80}?&gt;/gi, (t) => /^&lt;br/i.test(t) ? "<br>" : "")   /* markup a model added */
+        .replace(/\[FIGURE(?:\s+f\d+)?:\s*([\s\S]*?)\]/g, '<span class="fig">Figure: $1</span>')
         .replace(/\[MARGIN:\s*([\s\S]*?)\]/g, '<span class="fig">Margin note: $1</span>')
         .replace(/\[\?([^\]|]*)\|([^\]]*)\?\]/g, "<mark>$1</mark>")
         .replace(/\[\?\]/g, "<mark>[unreadable]</mark>")
@@ -129,7 +154,7 @@ function mixed(text, marks) {
       out += h;
     }
   }
-  return `<p>${out}</p>`;
+  return `<p>${out.replace(/\u0002(\d+)\u0002/g, (m0, i) => held[+i] || "")}</p>`;
 }
 
 /* A LaTeX passage as the writer produces it (a statement, a proof, the introduction) to HTML. */
@@ -197,6 +222,10 @@ function proseLite(t) {
 }
 /* Text written by a model (a summary, a remark, a title): shown with its mathematics typeset. */
 const rich = (s) => inner(latexLite(String(s || "")));
+/* A paper's name is what a person typed or the name of the uploaded file: plain text, never mathematics ("A_B_C" is
+   not A with subscripts). A file-like name gets its spaces. */
+function plainName(n) { n = String(n || "").trim(); return n.includes("_") && !/\s/.test(n) ? n.replace(/_+/g, " ").trim() : n; }
+function nameHtml(title, name) { return title ? inner(latexLite(title)) : esc(plainName(name)); }
 function latexLite(src) {
   const s = String(src || "");
   const re = /\\\[[\s\S]+?\\\]|\$\$[\s\S]+?\$\$|\\begin\{(align\*?|equation\*?|gather\*?|multline\*?|eqnarray\*?|flalign\*?|alignat\*?)\}[\s\S]+?\\end\{\1\}|\\\([\s\S]+?\\\)|\$[^$\n]+?\$/g;
@@ -271,6 +300,15 @@ async function refresh() {
     }
     if (S.view !== before) { S.edit = null; }
     render();
+    if (S.b.state.restart && !running() && !(S.restarted = S.restarted || {})[pid]) {
+      /* steps opened again by a repair (figures to be made again, a broken reading of a page): they carry on by
+         themselves when the paper is opened */
+      S.restarted[pid] = true;
+      const next = S.meta.stages.find((x) => st(x.id).status !== "done");
+      api(`/api/projects/${pid}/run`, { method: "POST", body: {} })
+        .then(() => { S.follow = true; history.replaceState(null, "", `#p/${pid}`); toast(`Carrying on from “${next ? next.name : "the next step"}”.`); refreshSoon(300); })
+        .catch((e) => toast(e.message, true));
+    }
   } catch (e) { toast(e.message, true); }
 }
 
@@ -313,14 +351,13 @@ async function openProject(pid, view) {
   if (view) { S.view = view; render(); }
 }
 
-const APP_VERSION = "1.4";         /* must equal scriptavera/__init__.py; checked against the running program */
 async function loadMeta() {
   S.meta = await api("/api/meta");
-  /* The page is read from disk on every load, the program only when it starts. After an update the page can be
-     new while an older program is still running: say so, plainly, instead of behaving oddly. */
+  /* The page is read from disk on every load, the program only when it starts. If the program's files were changed
+     while it runs, say so, plainly, instead of behaving oddly. */
   const el = $("#stale");
-  if (el && S.meta.version !== APP_VERSION) {
-    el.innerHTML = `<b>Scriptavera has been updated, but the old version is still running.</b> Close the black Scriptavera window
+  if (el && S.meta.stale) {
+    el.innerHTML = `<b>Scriptavera was changed while it was running.</b> Close the black Scriptavera window
       (or every one, if there are several), then start <code>run_app.bat</code> again. Your work is saved.`;
     el.hidden = false;
   }
@@ -387,8 +424,9 @@ function drawRail() {
     h += `</div>`;
   }
   const okKeys = S.meta.providers.filter((p) => p.ok).length;
-  h += `<div class="rail-foot"><button data-act="settings"><span>Settings and API keys</span>
+  if (HOSTED.admin()) h += `<div class="rail-foot"><button data-act="settings"><span>Settings and API keys</span>
     <span class="key-dot ${S.meta.has_vision ? "ok" : ""}" title="${okKeys ? okKeys + " provider(s) connected" : "No key connected"}"></span></button></div>`;
+  else h += `<div class="rail-foot"><button data-act="svkeys"><span>Your AI keys</span><span class="key-dot ${S.meta.has_vision ? "ok" : ""}"></span></button></div>`;
   rail.innerHTML = h;
 }
 
@@ -406,9 +444,9 @@ function redrawMenus() { if (S.pid) drawTop(); else render(); }
 function homeBar() {
   const okKeys = S.meta.providers.filter((p) => p.ok).length;
   return `<button class="brand" data-act="home" aria-label="Scriptavera: your papers"><img class="brand-mark" src="/static/mark-rail.svg" alt=""><span class="brand-name">Scripta<i>vera</i></span></button>
-    <span class="tb-space"></span>
-    <button class="hb-btn ${testOn() ? "on" : ""}" data-act="testmode" aria-pressed="${testOn()}" title="Test Scriptavera on papers that are already published: their own paper, and anything after it, is never searched for">${testOn() ? "Test mode is on" : "Test mode"}</button>
-    <button class="hb-btn" data-act="settings" title="${okKeys ? plural(okKeys, "AI provider") + " connected" : "No AI key connected yet"}">${ICON.sliders}<span class="hb-label">Settings</span><i class="key-dot ${S.meta.has_vision ? "ok" : ""}"></i></button>`;
+    <span class="tb-space"></span>${HOSTED.bar()}
+    ${HOSTED.admin() ? `<button class="hb-btn ${testOn() ? "on" : ""}" data-act="testmode" aria-pressed="${testOn()}" title="Test Scriptavera on papers that are already published: their own paper, and anything after it, is never searched for">${testOn() ? "Test mode is on" : "Test mode"}</button>
+    <button class="hb-btn" data-act="settings" title="${okKeys ? plural(okKeys, "AI provider") + " connected" : "No AI key connected yet"}">${ICON.sliders}<span class="hb-label">Settings</span><i class="key-dot ${S.meta.has_vision ? "ok" : ""}"></i></button>` : ""}`;
 }
 
 function drawTop() {
@@ -422,7 +460,7 @@ function drawTop() {
   const unfinished = ids.some((i) => st(i).status !== "done");
   const started = ids.some((i) => st(i).status !== "pending");
   const rec = proofSummary(S.b.proof);
-  let h = `<span class="tb-title">${inner(latexLite((S.b.paper && S.b.paper.title) || m.title || m.name))}</span>
+  let h = `<span class="tb-title">${nameHtml((S.b.paper && S.b.paper.title) || m.title, m.name)}</span>
     <span class="tb-dom">${esc(domainNames(m.domains).join(", "))}</span>
     ${m.imported ? "" : `<button class="chip ${S.b.journal ? "blue" : ""} tb-journal" data-act="journal" title="The journal the final paper is prepared for">${S.b.journal ? "For: " + esc(S.b.journal.name) : "Choose a target journal"}</button>
     <button class="chip ${rec.cls} tb-proof" data-act="proof" title="The signed, timestamped record of your notes: evidence of when they existed">${esc(rec.chip)}</button>`}
@@ -483,7 +521,7 @@ function paperTicks(p) {
 }
 function paperCard(p) {
   const [label, tone] = paperStatus(p);
-  const name = p.title || p.name;
+  const name = p.title || plainName(p.name);
   const href = p.imported ? `/editor/${encodeURIComponent(p.id)}` : `#p/${encodeURIComponent(p.id)}`;
   const thumb = p.imported ? `<span class="pc-thumb tex" aria-hidden="true">T<span>E</span>X</span>`
     : p.first_page ? `<img class="pc-thumb" loading="lazy" src="/api/projects/${encodeURIComponent(p.id)}/page/${p.first_page}?thumb=1" alt="">`
@@ -494,8 +532,8 @@ function paperCard(p) {
     <div class="pc-top"><span class="pc-status ${tone}">${p.running ? '<span class="spinner"></span>' : '<i class="pc-dot"></i>'}${esc(label)}</span>
       ${moreMenu("card:" + p.id, [["rename", "Rename…", { id: p.id, name: p.name }], ["delete", "Delete…", { id: p.id }, "danger"]], `More actions for ${name}`)}</div>
     <div class="pc-body">${thumb}<div class="pc-text">
-      <h3 class="pc-title"><a class="pc-link" href="${href}">${rich(name)}</a></h3>
-      ${p.title && p.name && p.title !== p.name ? `<div class="pc-name">${esc(p.name)}</div>` : ""}
+      <h3 class="pc-title"><a class="pc-link" href="${href}">${nameHtml(p.title, p.name)}</a></h3>
+      ${p.title && p.name && p.title !== p.name ? `<div class="pc-name">${esc(plainName(p.name))}</div>` : ""}
       ${p.authors && p.authors.length ? `<div class="pc-authors">${esc(p.authors.join(", "))}</div>` : ""}
       <div class="pc-meta">${facts.length ? esc(facts.join(", ")) + "<br>" : ""}Updated ${esc(ago(p.updated))}</div></div></div>
     ${p.imported ? `<div class="pc-steps"><span class="pc-count">Opens in the editor</span></div>` : paperTicks(p)}
@@ -523,8 +561,8 @@ function papersBoard() {
 function viewHome() {
   const P = S.projects || [];
   const noKey = !S.meta.has_vision;
-  const key = noKey ? `<div class="banner"><div class="grow"><b>Connect an AI key first.</b> Reading handwriting needs a model that accepts images; a free Google Gemini key is enough to start.</div>
-      <button class="btn" data-act="settings">Open settings</button></div>` : "";
+  const key = (noKey ? (HOSTED.admin() ? `<div class="banner"><div class="grow"><b>Connect an AI key first.</b> Reading handwriting needs a model that accepts images; a free Google Gemini key is enough to start.</div>
+      <button class="btn" data-act="settings">Open settings</button></div>` : HOSTED.noKeyBanner()) : "") + HOSTED.guestNotice(true);
   if (!P.length) {
     return `<div class="home">${key}<div class="home-empty">
       <h1>Your papers</h1>
@@ -553,13 +591,21 @@ function testBanner() {
 }
 function viewImported() {
   const m = S.b.state.meta;
-  return `<div class="wrap"><div class="sheet"><div class="sec"><h2>${inner(latexLite(m.title || m.name))}</h2>
+  return `<div class="wrap"><div class="sheet"><div class="sec"><h2>${nameHtml(m.title, m.name)}</h2>
     <p>This paper was imported from LaTeX, exactly as it was written; Scriptavera reads no notes for it. Open it in the editor to work on it with the PDF beside the code.</p>
     <p>For a referee's report or the journal's proofs, use <b>Review &amp; proofs</b> in the editor: language and layout points are made by themselves, every point about the mathematics waits for you, and the letter is written from what was done.</p>
     <a class="btn primary" href="/editor/${encodeURIComponent(S.pid)}">Open in the editor</a></div></div></div>`;
 }
+/* A key on a provider's free tier: what is sent with it may be used to train models and read by people. */
+function freeTierNotice() {
+  if (!S.meta || !S.meta.free_tier_keys) return "";
+  return HOSTED.on
+    ? `<div class="flag hl" style="margin:10px 0">Data protection: this service is reading notes with free-tier AI keys at the moment. With a free-tier key the provider may use what is sent to improve its models, and people may review it, so unpublished work can leak. Do not upload notes you need kept confidential until this notice is gone.</div>`
+    : `<div class="flag hl" style="margin:10px 0"><b>Data protection: you are using a free-tier API key.</b> With a free-tier key the provider may use what is sent to improve its models, and people may review it, so your unpublished notes can leak. Use a paid-tier key for data protection (for Gemini, a key from a Google Cloud project with billing turned on), and turn on Private mode in Settings.</div>`;
+}
 function viewNew() {
   const f = S.form;
+  HOSTED.prefill(f);
   const q = S.domQuery.trim().toLowerCase();
   const groups = {};
   for (const d of S.meta.domains) {
@@ -584,7 +630,7 @@ function viewNew() {
   const files = f.files.map((x, i) => `<div class="file"><span>${esc(x.name)} <span class="muted small">${(x.size / 1048576).toFixed(1)} MB</span></span>
     <button class="btn small quiet" data-act="rmfile" data-i="${i}">Remove</button></div>`).join("");
   const authors = f.authors.map((a, i) => `<div class="grid-auth">
-      <label class="field"><span>${i ? "" : "Author name"}</span><input type="text" data-bind="authors.${i}.name" value="${esc(a.name)}" placeholder="Full name"></label>
+      <label class="field"><span>${i ? "" : "Author name"}</span><input type="text" data-bind="authors.${i}.name" value="${esc(a.name)}" placeholder="Full name"${HOSTED.authorAttrs()}></label>
       <label class="field"><span>${i ? "" : "Affiliation"}</span><input type="text" data-bind="authors.${i}.affiliation" value="${esc(a.affiliation)}" placeholder="Department, university, city, country, or Independent"></label>
       <label class="field"><span>${i ? "" : "E-mail"}</span><input type="email" data-bind="authors.${i}.email" value="${esc(a.email)}" placeholder="name@university.edu"></label>
       <label class="field"><span>${i ? "" : "ORCID iD"}</span><input type="text" data-bind="authors.${i}.orcid" value="${esc(a.orcid || "")}" placeholder="0000-0000-0000-0000 (optional)"></label>
@@ -599,8 +645,9 @@ function viewNew() {
         ${journalResults(f.jresults, f.jmsg, "formjpick")}
         ${f.jresults && f.jq.trim().length > 2 ? `<button class="btn small quiet" data-act="formjtyped" style="margin-top:6px">Use “${esc(f.jq.trim())}” as typed</button>` : ""}`;
   return `<div class="wrap">
-    ${noKey ? `<div class="banner"><div class="grow"><b>Connect an AI key first.</b> Reading handwriting needs a model that accepts images.
-      A free Google Gemini key is enough to start.</div><button class="btn" data-act="settings">Open settings</button></div>` : ""}
+    ${noKey && HOSTED.admin() ? `<div class="banner"><div class="grow"><b>Connect an AI key first.</b> Reading handwriting needs a model that accepts images.
+      A free Google Gemini key is enough to start.</div><button class="btn" data-act="settings">Open settings</button></div>` : noKey ? HOSTED.noKeyBanner() : ""}
+    ${HOSTED.formNotices(f)}
     <div class="crumbs"><button class="btn small" data-act="home">${ICON.back}Home</button><span class="muted small">New paper from notes</span></div>
     <div class="head"><h1>Which area of mathematics are these notes in?</h1>
       <p>Your answer limits the literature search to that area and tells every model which conventions to expect. Nothing is read until you choose.</p></div>
@@ -628,7 +675,8 @@ function viewNew() {
           <span class="muted">or click to choose a PDF, images, or typed notes (.tex, .zip, .md, .txt)</span></div>
         <input type="file" id="fileInput" hidden multiple accept=".pdf,image/*,.tex,.ltx,.zip,.md,.markdown,.txt">
         <div class="files">${files}</div>
-        <p class="muted small" style="margin-top:10px">Before anything else is done with them, your files are kept unchanged and a record of them is made: their fingerprints, signed with your key${S.meta && S.meta.settings && S.meta.settings.proof_timestamps === false ? "" : " and timestamped by independent services"}. It is evidence of when your notes existed. Only the fingerprints leave this computer for that, never the notes.</p></div>
+        ${freeTierNotice()}
+        ${HOSTED.recordLine() !== null ? `<p class="muted small" style="margin-top:10px">${esc(HOSTED.recordLine())}</p>` : `<p class="muted small" style="margin-top:10px">Before anything else is done with them, your files are kept unchanged and a record of them is made: their fingerprints, signed with your key${S.meta && S.meta.settings && S.meta.settings.proof_timestamps === false ? "" : " and timestamped by independent services"}. It is evidence of when your notes existed. Only the fingerprints leave this computer for that, never the notes.</p>`}</div>
       <div class="sec"><h2>Authors, and your declaration</h2><p>As arXiv asks with every submission, the record of your notes says who wrote them, who makes the record, and that the details are correct. All of it is signed and timestamped with the record. The authors also appear on the paper.</p>
         ${authors}<button class="btn small" data-act="addauthor">Add another author</button>
         <div class="declare">${declarationBlock(f)}</div></div>
@@ -640,6 +688,7 @@ function viewNew() {
             <small>If you give none, titles are proposed once the paper is finished, and you choose.</small></label>
           <label class="field"><span>Papers you already know are relevant</span><textarea rows="3" data-bind="refs" placeholder="One per line: a DOI, an arXiv number, or a link">${esc(f.refs)}</textarea></label>
         </div></details></div>
+      ${HOSTED.optIn(f)}
       <div class="startbar"><button class="btn primary big" data-act="create" ${ready && !S.busy ? "" : "disabled"}>${S.busy === "create" ? "Preparing pages…" : "Start reading my notes"}</button>
         <span class="muted">${!f.domains.length ? "Choose an area first." : (!f.files.length ? "Add your notes to continue." : "A few pages are read first, without equations; then you confirm the topic and the papers found.")}</span></div>
       ${aboutLine()}
@@ -758,7 +807,8 @@ function drawLog() {
     : `<p class="muted" style="padding:8px 0">Nothing logged in this session yet.</p>`;
 }
 function callsTable(stage, limit) {
-  const calls = (S.b.calls || []).filter((c) => !stage || c.stage === stage).slice(-(limit || 60)).reverse();
+  const since = stage ? (st(stage).reset || 0) : 0;            /* a step done again shows its own calls, not the old ones */
+  const calls = (S.b.calls || []).filter((c) => !stage || (c.stage === stage && (c.t || 0) >= since)).slice(-(limit || 60)).reverse();
   if (!calls.length) return `<p class="muted">No AI calls yet.</p>`;
   return `<table class="calls"><thead><tr><th>Task</th><th>Model</th><th class="num">Tokens in</th><th class="num">out</th><th class="num">Seconds</th></tr></thead><tbody>` +
     calls.map((c) => `<tr class="${c.ok ? "" : "bad"}"><td>${esc(c.label || c.role)}${c.ok ? "" : ` <span class="small">(${esc(c.note || "failed")})</span>`}</td>
@@ -873,6 +923,34 @@ function issueCard(c, form) {
 /* ---------------------------------------------------------- stage screen */
 const STAGE_ROLE = { scout: "vision_fast", survey: "vision_best", transcribe: "vision_best", figures: "vision_best", search1: "fast", reading: "reader",
   understand: "reason", intro: "writer", structure: "writer", simplify: "reason", verify: "reason", referee: "reason", assemble: "writer" };
+
+function figCheck(f) {
+  /* What the two checks of a redrawn figure found: the program's overlay of the redrawing on the drawing, and the
+     model's side-by-side comparison; what was corrected after them, and what was tidied when it was redrawn. */
+  if (!f.drawn || !f.tikz_ok) return "";
+  const c = f.check || {}, loc = f.local || {}, v = Math.round(f.drawn || 0);
+  const probs = (c.problems || []).map((x) => (typeof x === "string" ? x : [x.what, x.where ? `(${x.where})` : ""].filter(Boolean).join(" ")));
+  const fixed = c.corrected || [];
+  const ov = loc.covered != null ? `<a href="/api/projects/${S.pid}/figure/${f.id}?kind=check&v=${v}" target="_blank" rel="noopener">See the overlay</a>` : "";
+  const part = loc.covered != null && loc.covered < 0.97 ? ` Only ${Math.round(100 * loc.covered)}% of your lines are in the redrawing.` : "";
+  const partial = loc.covered != null && (loc.covered < 0.95 || loc.precise < 0.95);
+  let cls = "info", head = "Compare it with your drawing: the model could not check it.";
+  if (probs.length) {
+    cls = "warn";
+    head = `${probs.length === 1 ? "One difference" : probs.length + " differences"} from your drawing remain${probs.length === 1 ? "s" : ""}:`;
+  } else if (partial) {
+    cls = "warn";
+    head = "The redrawing matches your drawing only in part: compare the two before you use it.";
+  } else if (c.same === true) {
+    cls = "ok";
+    head = fixed.length ? "Checked against your drawing after a correction: no difference left." : "Checked against your drawing: no difference found.";
+  }
+  const list = probs.length ? `<ul>${probs.map((t) => `<li>${inner(latexLite(t))}</li>`).join("")}</ul>` : "";
+  const corr = fixed.length ? `<div class="muted small">Corrected: ${fixed.map((t) => inner(latexLite(t))).join("; ")}</div>` : "";
+  const notes = (f.notes || []).map((n) => `<div class="muted small">${esc(n)}</div>`).join("");
+  const tidy = (f.changes || []).length ? `<details class="more"><summary>What was tidied</summary><div class="muted small">${f.changes.map(esc).join("; ")}.</div></details>` : "";
+  return `<div class="figcheck c-${cls}"><div>${esc(head)}${esc(part)} ${ov}</div>${list}${corr}${notes}${tidy}</div>`;
+}
 
 function figurePair(f) {
   const v = Math.round(f.drawn || 0);
@@ -1005,28 +1083,25 @@ function viewStage(id) {
   const status = { pending: "Not started", running: "In progress", done: "Finished", error: "Stopped", waiting: "Waiting for you", paused: "Paused" }[x.status];
   let h = `<div class="wrap"><div class="head head-row"><div class="grow"><h1>${esc(info.name)}</h1><p>${esc(info.desc)}.</p></div>
     <div class="row">${x.status === "done" && !running() ? `<button class="btn small" data-act="redo" data-stage="${id}">Redo from this step</button>` : ""}</div></div>`;
-  if (S.b.kept && !S.b.paper) h += `<div class="banner blue"><div class="grow"><b>This paper was started with an earlier version of the app.</b> Your reading, the notation you confirmed and your transcript are kept.
-      The paper itself is written again by the new steps; the one built earlier is still in the folder <code>out_before_update</code> of this project.</div></div>`;
   if (x.status === "error") h += `<div class="banner red"><div class="grow"><b>This step stopped.</b> ${esc(x.error || "")}
       <div class="small" style="margin-top:4px">Everything finished before this point is saved. Continue picks up from here, not from the beginning.</div></div>
       <button class="btn primary" data-act="resume">Continue</button></div>`;
   if (x.status === "paused") {
-    const head = x.reason === "limits" ? (x.weaker ? "Paused: waiting for the strongest model." : "Paused: free-tier limit reached.")
+    const head = x.reason === "limits" ? "Paused: waiting for the strongest models."
       : x.reason === "network" ? "Paused: could not reach the AI providers." : "Paused: the model did not give a usable answer.";
     h += `<div class="banner"><div class="grow"><b>${head}</b> ${esc(x.error || "")}
       <div style="margin-top:6px">Progress is saved. This will continue by itself at <b>${clock(x.resume_at)}</b> <span class="muted" data-until="${x.resume_at}">${until(x.resume_at)}</span>, from this point. Keep the Scriptavera window open.</div>
-      ${x.weaker ? `<div class="small" style="margin-top:6px">If you would rather not wait, the next best model (<b>${esc(x.weaker)}</b>) can do this one step. It is weaker, so the result may be poorer; the step can be redone later with the strongest model.</div>` : ""}</div>
+      ${x.reason === "limits" ? `<div class="small" style="margin-top:6px">A weaker model is never used for this step.</div>` : ""}</div>
       <div class="banner-acts"><button class="btn primary" data-act="resume">Try again now</button>
-        ${x.weaker ? `<button class="btn" data-act="relax">Use ${esc(x.weaker)} for this step</button>` : ""}
         <button class="btn" data-act="autostop">Do not restart automatically</button></div></div>`;
   }
   if (x.stand_in) {
     const used = Object.entries(x.stand_in.used || {}).map(([m, n]) => `${m} (${plural(n, "call")})`).join(", ");
-    h += `<div class="banner blue"><div class="grow"><b>Part of this step was done by a weaker model, with your permission.</b> ${esc(used)} stood in while ${esc((x.stand_in.wanted || []).join(", "))} was not free.
+    h += `<div class="banner blue"><div class="grow"><b>Part of this step was done by a weaker model.</b> ${esc(used)} stood in while ${esc((x.stand_in.wanted || []).join(", "))} was not free.
       To have the step done by the strongest model, use “Redo from this step” when it is free again.</div></div>`;
   }
   h += `<div class="sheet"><div class="sec"><div class="row"><span class="chip ${x.status === "done" ? "green" : (x.status === "error" ? "red" : (x.status === "paused" ? "hl" : (x.status === "running" ? "blue" : "")))}">${status}</span>
-    ${x.model ? `<span class="muted small">Model: ${esc(x.model)}</span>` : (plan && plan.primary ? `<span class="muted small">Will use ${esc(plan.primary)} (${esc(plan.name)})${plan.strict ? "; no weaker model unless you allow it" : ""}</span>` : "")}</div>
+    ${x.model ? `<span class="muted small">Model: ${esc(x.model)}</span>` : (plan && plan.primary ? `<span class="muted small">Will use ${esc(plan.primary)} (${esc(plan.name)})${plan.strict ? "; never a weaker model" : ""}</span>` : "")}</div>
     ${x.status === "running" || p ? `<div class="bar" id="bar"><i style="width:${p && p.total ? Math.round(100 * p.done / p.total) : 0}%"></i></div>
       <div class="muted small" id="barnote">${p ? esc(p.note || "") + (p.total ? ` (${p.done} of ${p.total})` : "") : ""}</div>` : ""}</div>`;
   h += stageBody(id);
@@ -1311,8 +1386,8 @@ function figureCard(f) {
   return `<div class="qcard figcard" id="fig-${f.id}" data-page="${f.page}">
     <div class="qcard-h"><b>${drawn ? "Figure" : "Drawing"}${f.of > 1 ? ` ${f.k + 1} of ${f.of}` : ""}</b><span class="muted small">${drawn ? "Is it for the paper, and is the redrawn version what you drew?" : "Is it for the paper, or does it only explain your argument?"}</span></div>
     ${figVerdict(f)}
-    ${drawn ? figurePair(f) : `<div class="figdesc">${inner(mixed(f.desc))}<div class="muted small">Your drawing is on page ${f.page}, shown on the left.</div></div>`}
-    ${drawn && f.weak ? `<div class="figweak">Redrawn by ${esc(f.model || "a weaker model")}, a weaker model you allowed for this step. Compare it closely with your drawing: your own drawing may be the safer choice, or draw it again once the strongest model is back.</div>` : ""}
+    ${drawn ? figurePair(f) + figCheck(f) : `<div class="figdesc">${inner(mixed(f.desc))}<div class="muted small">Your drawing is on page ${f.page}, shown on the left.</div></div>`}
+    ${drawn && f.weak ? `<div class="figweak">Redrawn by ${esc(f.model || "a weaker model")}, a weaker model. Compare it closely with your drawing, or draw it again.</div>` : ""}
     <div class="figlbl" style="margin-top:4px">Your answer</div>
     <div class="choices" role="radiogroup" aria-label="Your answer for this drawing">
       ${order.join("")}${opt("none", "Leave it out completely", "for a doodle or an abandoned attempt; the writers do not see it")}
@@ -1382,6 +1457,8 @@ function approveTab(open, done) {
 }
 function viewReview() {
   if (!S.b.transcript || !Object.keys(S.b.transcript.pages).length) return `<div class="wrap"><div class="empty"><strong>Not reached yet</strong>This step opens once the final transcription has finished.</div></div>`;
+  if (st("review").status === "pending" && !st("review").since && !S.b.adding)
+    return `<div class="wrap"><div class="empty"><strong>Not reached yet</strong>This step opens once the steps before it have finished: ${esc(((S.meta.stages.find((x) => st(x.id).status !== "done") || {}).name || "").toLowerCase())} comes first.</div></div>`;
   if (!S.review || S.review.pid !== S.pid) initReview();
   const R = S.review, pages = reviewPages();
   /* a page that was being read has arrived: show it */
@@ -1910,6 +1987,8 @@ function journalPanel() {
   const stm = R.stmDraft || S.b.statements || {};
   h += `<div class="sec"><h2>Your statements</h2><p>Acknowledgements and declarations are yours alone to make, so they are never written by a model. What you enter is added to the paper as it is.${prof.anonymous ? " In the anonymous version, acknowledgements and funding are left out." : ""}</p>
     ${S.meta.statements.map((x) => `<label class="field" style="margin-bottom:10px"><span>${esc(x.name)}</span><textarea rows="2" data-stm="${x.id}" placeholder="Leave empty to omit">${esc(stm[x.id] || "")}</textarea></label>`).join("")}
+    <label class="check" style="margin:4px 0 14px"><input type="checkbox" data-citesw ${((S.b.state || {}).meta || {}).cite_software ? "checked" : ""} ${R.saving ? "disabled" : ""}>
+      <span><b>Declare and cite Scriptavera</b> (recommended). A short statement is added just before the references, saying what Scriptavera did for this paper (headed “${prof.template === "elsarticle" ? "Declaration of generative AI and AI-assisted technologies in the writing process" : "Use of AI-assisted tools"}”), and Scriptavera is added to the references. Most journals require authors to declare AI-assisted tools; you can untick this at any time.</span></label>
     <button class="btn" data-act="jrstatements" ${R.saving ? "disabled" : ""}>${R.saving === "statements" ? "Saving…" : "Save statements"}</button></div></div>`;
   return h;
 }
@@ -1973,6 +2052,7 @@ function stamp(t) {
   return t ? new Date(t * 1000).toLocaleString([], { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
 }
 function proofSummary(pr) {
+  if (pr && pr.locked) return { cls: "", chip: "Notes not signed", line: pr.error };
   if (!pr || pr.missing) {
     return { cls: "", chip: "Notes not recorded",
       line: pr && pr.error ? pr.error : "These notes were uploaded before Scriptavera kept records of notes." };
@@ -1989,7 +2069,7 @@ function proofSheet() {
   const pr = S.b.proof || {}, s = proofSummary(pr), o = pr.ots || {};
   const btc = o.status === "bitcoin" ? ` Anchored in Bitcoin block ${esc(String(o.height))}.` : o.status === "pending" ? " The Bitcoin confirmation follows within hours." : "";
   return `<div class="sheet"><h3>Record of your notes</h3><p class="small" style="margin:4px 0 10px">${esc(s.line)}${pr.missing ? "" : btc}</p>
-    <div class="dl">${pr.missing ? `<button class="btn" data-act="proof"><span>Record them now</span></button>`
+    <div class="dl">${pr.locked && HOSTED.lockedActions() ? HOSTED.lockedActions() : pr.missing ? `<button class="btn" data-act="proof"><span>Record them now</span></button>`
       : `<a class="btn" href="/api/projects/${S.pid}/proof/certificate" target="_blank" rel="noopener"><span>Certificate</span><span class="small">html</span></a>
          <a class="btn" href="/api/projects/${S.pid}/proof/bundle?files=1"><span>Proof, with your notes</span><span class="small">zip</span></a>
          <button class="btn" data-act="proof"><span>Details, and checking a file</span></button>`}</div></div>`;
@@ -2158,7 +2238,8 @@ function sidePanel(P, a, auditIssues, badCites, texIssues, openReq) {
   const rv = P.revision || {};
   const agreed = (a.agreed || []).length;
   return `<div class="sheet"><h3>Download</h3><div class="dl">${dl("paper.zip", "Overleaf package", true)}${dl("paper.pdf", "PDF")}${dl("main.tex", "LaTeX source")}${dl("references.bib", "BibTeX file")}${dl("paper.html", "Web page")}</div>
-      ${(S.b.downloads || []).includes("paper.pdf") ? "" : `<p class="muted small" style="margin-top:8px">For a PDF, upload the package to Overleaf, or install a LaTeX distribution and rebuild.</p>`}</div>
+      ${(S.b.downloads || []).includes("paper.pdf") ? "" : `<p class="muted small" style="margin-top:8px">For a PDF, upload the package to Overleaf, or install a LaTeX distribution and rebuild.</p>`}
+      ${HOSTED.driveButton(S.pid)}</div>
     <div class="sheet"><h3>From this paper</h3><div class="dl">
       <button class="btn" data-act="extra" data-kind="summary" ${S.busy ? "disabled" : ""}><span>${S.busy === "summary" ? "Writing…" : "Plain-language summary"}</span><span class="small">1 page</span></button>
       <button class="btn" data-act="extra" data-kind="slides" ${S.busy ? "disabled" : ""}><span>${S.busy === "slides" ? "Making…" : "Seminar slides"}</span><span class="small">Beamer</span></button>
@@ -2167,6 +2248,7 @@ function sidePanel(P, a, auditIssues, badCites, texIssues, openReq) {
       <a class="btn" href="/api/projects/${S.pid}/review_pack" title="One HTML file for a co-author: the paper, each passage beside the page of your notes it came from, and a box for comments they send back as a file. In the editor, Review &amp; proofs reads that file."><span>Review pack for a co-author</span><span class="small">html</span></a></div>
       ${["summary.txt", "slides.pdf", "slides.tex", "poster.pdf", "poster.tex"].filter((n) => (S.b.downloads || []).includes(n)).map((n) => `<a class="small" style="margin-right:10px" href="/api/projects/${S.pid}/download/${n}">${n}</a>`).join("")}</div>
     ${proofSheet()}
+    ${citeSheet()}
     <div class="sheet"><h3>Journal</h3>
       <div class="stat"><span>${S.b.journal ? esc(S.b.journal.name) : "No journal chosen"}</span></div>
       <div class="stat"><span>Template</span><b>${esc((S.meta.templates[P.profile.template] || {}).label || P.profile.template)}</b></div>
@@ -2185,6 +2267,25 @@ function sidePanel(P, a, auditIssues, badCites, texIssues, openReq) {
       <div class="stat"><span>Abstract</span><b>${{ author: "yours", generated: "written" }[P.abstract_source] || ""}</b></div>
       <div class="stat"><span>Introduction</span><b>${{ author: "yours", generated: "suggested", "rewritten for your citations": "rewritten for your citations" }[P.intro_source] || ""}</b></div>
       <p class="muted small" style="margin-top:8px">The body is your mathematics in rewritten, corrected English, arranged as statements and proofs. Click the title to choose another proposal or write your own.</p></div>`;
+}
+/* Citing Scriptavera, as GAP and SageMath ask to be cited: what the paper says, and the forms to paste elsewhere. */
+function citeSheet() {
+  const C = S.meta.cite || {}, on = !!(((S.b || {}).state || {}).meta || {}).cite_software;
+  return `<div class="sheet"><h3>Citing Scriptavera</h3>
+    <p class="small" style="margin:4px 0 8px">${on ? "Your paper declares and cites Scriptavera, in a short statement just before the references. Thank you. You can remove it under Journal, Your statements."
+      : "If Scriptavera helped you with this paper, we would be grateful if you cited it, wherever you use its results, as you would cite GAP or SageMath."}</p>
+    <div class="tex-block plain small" style="margin-bottom:8px">${esc(C.text || "")}</div>
+    <div class="dl"><button class="btn small" data-act="copycite" data-what="text"><span>Copy citation</span></button>
+      <button class="btn small" data-act="copycite" data-what="bibtex"><span>Copy BibTeX</span></button></div></div>`;
+}
+function citeDialog() {
+  const C = S.meta.cite || {};
+  return `<div class="dialog" role="dialog" aria-modal="true" aria-label="How to cite Scriptavera"><div class="dlg-h"><h2>How to cite Scriptavera</h2><button class="btn small quiet" data-act="closedlg">Close</button></div>
+    <div class="dlg-b"><p>If you used Scriptavera in preparing a paper, a talk or a thesis, we would be grateful if you cited it. Papers made with it declare and cite it by default; the author can remove that.</p>
+    <div class="tex-block plain small" style="margin:10px 0">${esc(C.text || "")}</div>
+    <pre class="tex-block small" style="white-space:pre-wrap">${esc(C.bibtex || "")}</pre>
+    <div class="row" style="margin-top:10px"><button class="btn small" data-act="copycite" data-what="text">Copy citation</button><button class="btn small" data-act="copycite" data-what="bibtex">Copy BibTeX</button>
+      ${C.repository ? `<a class="btn small quiet" href="${esc(C.repository)}" target="_blank" rel="noopener">Source code</a>` : ""}</div></div></div>`;
 }
 function editorPanel() {
   const E = S.edit, P = S.b.paper;
@@ -2212,13 +2313,16 @@ function settingsDialog() {
     else if (p.id === "custom") input = `<input type="text" data-env="CUSTOM_BASE_URL" placeholder="${ph("CUSTOM_BASE_URL", "Base URL, e.g. https://example.com/v1")}" autocomplete="off">
       <div class="prov-extra"><input type="password" data-env="CUSTOM_API_KEY" placeholder="${ph("CUSTOM_API_KEY", "Key")}" autocomplete="off">
       <input type="text" data-env="CUSTOM_MODELS" placeholder="${ph("CUSTOM_MODELS", "Model names, comma separated")}" autocomplete="off"></div>`;
-    else input = `<input type="password" data-env="${p.env}" placeholder="${ph(p.env, "Paste key")}" autocomplete="off">`;
-    const keys = p.keys || [];
+    else input = `<input type="password" data-env="${p.env}" placeholder="${ph(p.env, "Paste key (several keys: separate them with commas)")}" autocomplete="off">`;
+    const keys = p.keys || [], tier = (k) => (k && k.tier ? `, ${k.tier === "paid" ? "paid plan" : "free plan"}` : "");
     const state = !p.configured ? link : keys.length > 1
-      ? keys.map((k) => k.ok ? `<span class="chip green">key ${k.n}: ${plural(k.count, "model")}</span>` : `<span class="chip red" title="${esc(k.message)}">key ${k.n}: ${esc(k.message || "not working")}</span>`).join(" ")
-      : (p.ok ? `<span class="chip green">${plural(p.count, "model")}</span>` : `<span class="chip red" title="${esc(p.message)}">${esc(p.message || "not working")}</span>`);
+      ? keys.map((k) => k.ok ? `<span class="chip green">key ${k.n}: ${plural(k.count, "model")}${tier(k)}</span>` : `<span class="chip red" title="${esc(k.message)}">key ${k.n}: ${esc(k.message || "not working")}</span>`).join(" ")
+      : (p.ok ? `<span class="chip green">${plural(p.count, "model")}${tier(keys[0])}</span>` : `<span class="chip red" title="${esc(p.message)}">${esc(p.message || "not working")}</span>`);
+    const privacy = keys.filter((k) => k.ok && k.privacy).map((k) => `<div class="small ${k.leak ? "sv-leak" : "muted"}">${keys.length > 1 ? "Key " + k.n + ": " : ""}${esc(k.privacy)}</div>`).join("");
+    const steps = (p.steps || []).length ? `<div class="sv-steps"><b>How to get a ${esc(p.label)} key</b><ol>${p.steps.map((x) => `<li>${esc(x)}</li>`).join("")}</ol>
+      ${p.signup ? `<a href="${esc(p.signup)}" target="_blank" rel="noopener">Open ${esc(p.label)} to create a key ↗</a>` : ""}</div>` : "";
     return `<div class="prov"><div class="prov-name">${esc(p.label)}</div>${p.id === "custom" ? `<div>${input}</div>` : input}
-      <div class="prov-st">${state}</div><div class="prov-why">${explained(p.why)}</div></div>`;
+      <div class="prov-st">${state}</div><div class="prov-why">${explained(p.why)}${privacy}${steps}</div></div>`;
   }).join("");
   const short = (ref) => ref.replace(/^[a-z]+:/, "");
   const roles = Object.entries(M.roles).map(([id, r]) => {
@@ -2228,8 +2332,7 @@ function settingsDialog() {
     const seen = new Set();
     const chain = plan.chain || [];
     const policy = r.strict
-      ? (chain.length ? `Only the strongest model is used: ${esc(chain.map(short).join(", "))}${chain.length > 1 ? " (one key after the other)" : ""}. If none of its keys is free, the work waits and restarts by itself.`
-          + ((plan.weaker || []).length ? ` Weaker, used only if you allow it for a step: ${esc(plan.weaker.map(short).join(", "))}.` : "") : "No model is available for this job.")
+      ? (chain.length ? `Only the strongest models are used, best first, each on one key after the other: ${esc(chain.map(short).join(", "))}. If none of them is free, the work waits and restarts by itself; a weaker model is never used.` : "No model is available for this job.")
       : (chain.length > 1 ? `Falls back freely to: ${esc(chain.slice(1, 4).map(short).join(", "))}.` : "");
     return `<div class="role"><div><div class="role-name">${esc(r.name)}</div>${r.strict ? '<span class="chip blue">decides the quality of the paper</span>' : '<span class="chip">small tasks</span>'}</div><div>
       <div class="role-job">${esc(r.job)}</div>
@@ -2241,11 +2344,11 @@ function settingsDialog() {
   return `<div class="dialog wide" role="dialog" aria-modal="true" aria-label="Settings"><div class="dlg-h"><h2>Settings</h2><button class="btn small quiet" data-act="closedlg">Close</button></div>
     <div class="dlg-b">
       <h3>AI providers</h3><p>Keys are stored in the .env file in the app folder on this computer and are sent only to the provider they belong to. Use keys from different providers: several keys from one account share the same limits.</p>
-      <div class="flag" style="margin:8px 0 12px">Your notes are sent to the provider whose model reads them. Check its terms for unpublished work. Google's <a href="https://ai.google.dev/gemini-api/terms" target="_blank" rel="noopener">Gemini API terms</a>, for example, let Google use what is sent with a free key to improve its products, and let people review it; with a key from a Google Cloud project that has billing turned on, prompts are not used that way.</div>
+      <div class="flag" style="margin:8px 0 12px">Your notes are sent to the provider whose model reads them. Check its terms for unpublished work. Google's <a href="https://ai.google.dev/gemini-api/terms" target="_blank" rel="noopener">Gemini API terms</a>, for example, let Google use what is sent with a free key to improve its products, and let people review it; with a key from a Google Cloud project that has billing turned on, prompts are not used that way. <b>Data can leak from free-tier API keys: use a paid-tier key for data protection.</b></div>
       ${prov}
       <div class="row" style="margin-top:12px"><button class="btn primary" data-act="savekeys">${S.busy === "keys" ? "Checking keys…" : "Save and check keys"}</button>
         <span class="muted small">${M.mock ? "Developer mode: simulated models." : ""}</span></div>
-      <h3>Which model does which job</h3><p>Chosen automatically from the models your keys can use. Gemini models rank by tier first (4 Argon, then Pro, then Flash, then Flash-Lite), then by version; a model your key cannot use (Pro and Argon are not on Google's free tier) is found out on its first request and skipped on that key. For the jobs that decide the quality of the paper, only the strongest model is used: with several keys, one after the other, so when a key reaches its limit the same model continues on the next key. A lesser model never steps in by itself. A model you pin here is used first.</p>
+      <h3>Which model does which job</h3><p>Chosen automatically from the models your keys can use. First each Gemini key is checked: on Google's free tier it cannot use Pro or 4 Argon, so it goes straight to the best model it can use. Gemini models rank by tier first (4 Argon, then Pro, then Flash, then Flash-Lite), then by version. For the jobs that decide the quality of the paper, the best model is used on one key after the other; when every key has reached its limit, the next best model takes over, but only a model almost as good (the same tier, a version at most 0.25 lower: 3.8, 3.7 and 3.6 Flash on free keys). A weaker model is never used: if none of them is free, the work waits and continues by itself. Each job chooses its own model; with free keys 3.8 Flash is the strongest at reading and at reasoning alike, so it does both. A model you pin here is used first.</p>
       ${M.models.length ? roles : `<p class="muted">Connect a provider to see the assignment.</p>`}
       <h3>Literature and layout</h3><p>Optional identifiers raise the limits of the scholarly databases. The layout settings apply when no target journal is chosen for a paper.</p>
       <div class="grid2">
@@ -2270,7 +2373,7 @@ function aboutLine() {
   /* The AGPL asks that people using the program over a network can get its source: the link serves this very copy. */
   return `<p class="muted small about">Scriptavera ${esc((S.meta || {}).version || "")} · © 2026 Vaibhav Chhajer · free software under the
     <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">GNU AGPL v3</a> ·
-    <a href="/api/source" download>Source code of this copy</a> · no warranty · a commercial licence is available for use without the AGPL's conditions (see LICENSING.md)</p>`;
+    <a href="/api/source" download>Source code of this copy</a> · <a href="#" data-act="howtocite">How to cite</a> · no warranty · a commercial licence is available for use without the AGPL's conditions (see LICENSING.md)</p>`;
 }
 function showDialog(html) { const o = $("#overlay"); const keep = o.scrollTop; o.innerHTML = html; o.hidden = false; o.scrollTop = keep; renderMath(o); }
 function closeDialog() {
@@ -2293,7 +2396,7 @@ function askConfirm({ title, body, yes, danger = true }) {
 /* ---------------------------------------------------------------- render */
 function render() {
   if (!S.meta) return;
-  if (S.b && S.view !== "home" && !stageInfo(S.view)) S.view = autoView();       // an address from an earlier version of the app
+  if (S.b && S.view !== "home" && !stageInfo(S.view)) S.view = autoView();       // an address of a step that does not exist
   captureJournalForm();
   $("#app").classList.toggle("bare", !S.pid);              // the home page and the new-paper form have no list of steps
   drawRail(); drawTop();
@@ -2318,6 +2421,7 @@ function render() {
   main.dataset.view = S.view + "|" + S.pid + "|" + S.tab;
   main.scrollTop = same ? keep : 0;
   const again = $(".rv-right", main); if (again && same) again.scrollTop = keepInner;
+  if (HOSTED.on) HOSTED.paintButtons();             // Google's sign-in buttons, where the page has room for one
   renderMath(main);
   drawLog();
   if (S.view === "assemble" && S.tab === "latex" && S.b && S.b.paper) loadTex();
@@ -2443,6 +2547,12 @@ const ACT = {
   formjpick(el) { S.form.journal = S.form.jresults[+el.dataset.i]; S.form.jresults = null; render(); },
   formjtyped() { S.form.journal = { name: S.form.jq.trim(), publisher: "" }; S.form.jresults = null; render(); },
   formjclear() { S.form.journal = null; S.form.jq = ""; S.form.jresults = null; S.form.jmsg = ""; render(); },
+  howtocite() { showDialog(citeDialog()); },
+  async copycite(el) {
+    const v = (S.meta.cite || {})[el.dataset.what] || "";
+    try { await navigator.clipboard.writeText(v); toast(el.dataset.what === "bibtex" ? "BibTeX copied." : "Citation copied."); }
+    catch (e) { toast("Copying is not allowed here; select the text and copy it.", true); }
+  },
   async create() {
     const f = S.form;
     const kws = f.keywords.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
@@ -2459,14 +2569,16 @@ const ACT = {
     S.busy = "create"; render();
     const fd = new FormData();
     f.files.forEach((x) => fd.append("files", x, x.name));
-    fd.append("meta", JSON.stringify({ name: f.files[0].name.replace(/\.[^.]+$/, ""), domains: f.domains, subarea: f.subarea, hints: f.hints, title: f.title,
+    fd.append("meta", JSON.stringify({ name: plainName(f.files[0].name.replace(/\.[^.]+$/, "")), domains: f.domains, subarea: f.subarea, hints: f.hints, title: f.title,
       authors: named, declaration, known_refs: f.refs.split(/\n/).map((s) => s.trim()).filter(Boolean), journal: f.journal,
-      problem: f.problem.trim(), keywords: kws, key_papers: f.keypapers.split(/\n/).map((s) => s.trim()).filter(Boolean) }));
+      problem: f.problem.trim(), keywords: kws, key_papers: f.keypapers.split(/\n/).map((s) => s.trim()).filter(Boolean),
+      dataset_opt_in: !!f.optIn }));
     try {
       const r = await api("/api/projects", { method: "POST", form: fd });
+      HOSTED.counted();
       await api(`/api/projects/${r.id}/run`, { method: "POST", body: {} });
       S.form = newForm(); S.busy = ""; location.hash = `p/${r.id}`;
-    } catch (e) { S.busy = ""; render(); toast(e.message, true); }
+    } catch (e) { S.busy = ""; render(); if (!HOSTED.refusal(e)) toast(e.message, true); }
   },
   async stop() { try { await api(`/api/projects/${S.pid}/stop`, { method: "POST" }); toast("Stopping after the current call."); } catch (e) { toast(e.message, true); } },
   async startover() {
@@ -2478,10 +2590,7 @@ const ACT = {
   },
   async autostop() { try { await api(`/api/projects/${S.pid}/autostop`, { method: "POST" }); toast("Automatic restart cancelled. Press Continue when you want to carry on."); await refresh(); } catch (e) { toast(e.message, true); } },
   async resume() { try { await api(`/api/projects/${S.pid}/run`, { method: "POST", body: {} }); S.follow = true; await refresh(); } catch (e) { toast(e.message, true); } },
-  async relax() {
-    try { await api(`/api/projects/${S.pid}/run`, { method: "POST", body: { relax: true } }); S.follow = true; toast("Continuing this step with the next best model."); await refresh(); }
-    catch (e) { toast(e.message, true); }
-  },
+
   async redo(el) {
     const s = stageInfo(el.dataset.stage);
     if (!await askConfirm({ title: `Redo “${esc(s.name)}”?`, yes: "Redo from this step", danger: false,
@@ -2494,14 +2603,14 @@ const ACT = {
     const here = S.pid === id && S.b;
     const p = (S.projects || []).find((x) => x.id === id) || {};
     const m = here ? S.b.state.meta : {};
-    const name = (here ? (S.b.paper && S.b.paper.title) || m.title || m.name : p.title || p.name) || "this paper";
+    const name = (here ? nameHtml((S.b.paper && S.b.paper.title) || m.title, m.name) : nameHtml(p.title, p.name)) || "this paper";
     const done = here ? st("finish").status === "done" : p.completed;
     const working = here ? running() : p.running;
     const imported = here ? !!m.imported : p.imported;
     const record = here ? !(S.b.proof || {}).missing : p.record;
     const lost = imported ? "the LaTeX files you imported, their history and the editor's files"
       : `the notes you uploaded, the transcription, every draft${done ? ", the finished paper" : ""} and the editor's files`;
-    const ok = await askConfirm({ title: `Delete “${inner(latexLite(name))}”?`, yes: "Delete permanently", body:
+    const ok = await askConfirm({ title: `Delete “${name}”?`, yes: "Delete permanently", body:
       `<p>This removes the paper from this computer for good: ${lost}. It cannot be undone.</p>
        ${working ? `<p>It is working now; it is stopped first.</p>` : ""}
        ${record ? `<div class="flag">The signed, timestamped record of your notes is deleted with it. It is your evidence of when the notes existed.
@@ -2509,7 +2618,7 @@ const ACT = {
     if (!ok) return;
     try {
       await api(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
-      toast(`Deleted “${String(name).replace(/\$/g, "")}”.`);
+      toast(`Deleted “${plainName((here ? (S.b.paper && S.b.paper.title) || m.title : p.title) || m.name || p.name || "the paper").replace(/\$/g, "")}”.`);
       if (S.pid === id) ACT.home(); else { await loadProjects(); render(); }
     } catch (e) { toast(e.message, true); }
   },
@@ -3032,6 +3141,7 @@ document.addEventListener("input", (ev) => {
   if (el.dataset.fdeclare !== undefined || el.dataset.frecorder !== undefined) return;     // handled on "change"
   if (el.dataset.bind) {
     bindPath(S.form, el.dataset.bind, el.value);
+    if (/^authors\.\d+\.name$/.test(el.dataset.bind)) HOSTED.authorInput(+el.dataset.bind.split(".")[1], el.value);   // collaborators
     if (/^authors\.\d+\.name$/.test(el.dataset.bind)) refreshDeclaration(true);       // the names offered and the text
     else if (el.dataset.bind === "recorderName") refreshDeclaration(false);
   } else if (el.dataset.rname !== undefined) {
@@ -3096,6 +3206,12 @@ document.addEventListener("input", (ev) => {
 document.addEventListener("change", (ev) => {
   const el = ev.target;
   if (el.dataset.fdeclare !== undefined && S.form) { S.form.declare = el.checked; return; }
+  if (el.dataset.optin !== undefined && S.form) { S.form.optIn = el.checked; return; }
+  if (el.id === "svkeyswhere") { HOSTED.keysWhere(el.checked); return; }
+  if (el.dataset.citesw !== undefined && S.pid) {
+    postJournal({ cite_software: el.checked }, "cite", el.checked ? "Scriptavera is declared and cited." : "The declaration and the reference to Scriptavera are removed.");
+    return;
+  }
   if (el.dataset.frecorder !== undefined && S.form) { S.form.recorder = el.value; refreshDeclaration(true); return; }
   if (el.dataset.rdeclare !== undefined) { (S.recNow = S.recNow || {}).declare = el.checked; return; }
   if (el.dataset.rrecorder !== undefined) { (S.recNow = S.recNow || {}).recorder = el.value; showDialog(proofDialog()); return; }
@@ -3154,7 +3270,7 @@ window.addEventListener("hashchange", route);
 
 (async function start() {
   S.form = newForm();
-  try { await loadMeta(); await loadProjects(); }
+  try { await loadMeta(); await HOSTED.init(); await loadProjects(); }
   catch (e) { $("#main").innerHTML = `<div class="wrap"><div class="empty"><strong>The app did not start</strong>${esc(e.message)}</div></div>`; return; }
   route();
   if (!location.hash) render();

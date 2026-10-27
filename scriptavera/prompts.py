@@ -106,6 +106,7 @@ Transcription rules
 - [FIGURE: one neutral sentence saying what is drawn and how it is labelled] is only for real drawings: a graph, a diagram of objects and maps, a picture, a lattice, a table drawn as a picture. Never for a formula with labels. Put the marker exactly where the drawing stands in the argument; if the author numbered or captioned it, copy the number or caption into the sentence, and if it is drawn in the margin, say so.
 - Printed or typeset text on the page: copy exactly.
 - Keep the author's words. Do not paraphrase.
+- No markup other than LaTeX: no HTML (never <u>, <b> or <br>) and no markdown. A word the author underlined, highlighted, boxed or circled is written as the word itself; highlighting is not a label, so it never becomes \\underbrace or \\overbrace.
 
 Then catalogue notation.
 <symbols>: each distinct symbol, function, operator or named object specific enough that a reader may need its definition. Skip plain dummy variables and indices unless the notes give them a fixed meaning. One per line:
@@ -229,6 +230,7 @@ Rules
 4. Keep the author's wording and labels (Claim, Proof, Case 1, Theorem). Correct spelling and obvious slips of grammar silently.
 5. Diagrams: [FIGURE: one neutral sentence saying what is drawn and how it is labelled], only for real drawings (a graph, a diagram of objects and maps, a picture), placed exactly where the drawing stands in the argument. If the author numbered or captioned it, copy the number or caption into the sentence; if it is drawn in the margin, say so. Labels the author attached to parts of a formula with arrows or braces are notes on the formula, not a figure: write them as \\underbrace{{term}}_{{\\text{{label}}}} (or \\overbrace{{term}}^{{\\text{{label}}}}) inside the formula. Margin notes: [MARGIN: ...]. Leave out crossed-out material. Copy printed text exactly.
 6. The page may start or end in mid-sentence. Do not complete sentences from other pages.
+6a. No markup other than LaTeX: no HTML (never <u>, <b> or <br>) and no markdown. A word the author underlined, highlighted, boxed or circled is written as the word itself; highlighting is not a label, so it never becomes \\underbrace or \\overbrace. Write each part of the page once.
 7. <uncertain> is only for doubts that would change the MATHEMATICS: a symbol, an index, an exponent, a number, a relation sign, a quantifier, or a technical term that could be a different technical term. Put your best reading in the transcript and list the doubt. Use [?] only where nothing can be read.
 8. Never list language under <uncertain>: spelling, grammar, singular or plural, a missing small word, capitalisation, punctuation, or which ordinary word was meant. Settle those yourself. The author is never asked about language.
 
@@ -285,26 +287,63 @@ Return one JSON object and nothing else:
 - At most 4 boxes, each around one or more whole lines of handwriting that the passage comes from, in reading order.
 - If the passage is not written on this page, return "found": false with an empty list and say in "note" (plain words, no LaTeX) what the page has instead. Do not point at something else just to give an answer."""
 
-DRAW = """You redraw a hand-drawn figure from a page of mathematical notes as a clean TikZ picture, for inclusion in a research paper.
+FIG_LOCATE = """You point to the drawings on one page of handwritten mathematical notes. A transcription of the page marks each drawing with a short description; for each one, give the box around it on the page image.
 
-Be faithful: the same objects, the same labels, the same arrangement and the same arrows as in the drawing. Add nothing that is not drawn, and leave nothing out. Do not interpret or improve the mathematics.
+The box holds the drawing and its own labels: letters, symbols or words written inside it or next to it, and a label joined to it by a line. It does not hold the text of the notes around the drawing: the sentence that leads into it ("as follows:", "= equivalence classes of"), the sentence after it, a formula beside it, or a heading. If the drawing sits at the end of a line of text, the box starts where the drawing starts.
 
-Rules for the TikZ code
+Coordinates are whole numbers from 0 to 1000: 0,0 is the top-left corner of the image; ymin and ymax are measured down the height, xmin and xmax across the width.
+
+If two descriptions are the same drawing (the transcription described it twice), give the box for the first and write "same_as" with its number for the second. If a description matches nothing drawn on the page, write "found": false.
+
+Return one JSON object and nothing else:
+{{"drawings": [{{"n": 1, "found": true, "box": [ymin, xmin, ymax, xmax], "same_as": null}}]}}"""
+
+FIG_READ = """You read the labels of one hand-drawn figure from a mathematician's notes, so that the figure can be typeset. The figure itself is measured and drawn again by a program; you only read what is written in it.
+
+Image 1 is the figure. Image 2 is the same figure with numbered boxes around every group of small strokes the program took for handwriting. Any further images are enlarged parts of the figure (its separate pictures), for reading small writing.
+
+For each numbered box decide:
+- a label of the figure: say what it says, in LaTeX (mathematics between $...$, words as plain text). One label may span several boxes (the words of one phrase, a symbol and its subscript): list the boxes together.
+- part of the drawing: not writing at all, but a small shape of the figure (a small circle or loop, a cross, a tick, a short line, part of an arrow).
+- not part of this figure: writing of the notes that the box only happens to include (the sentence before or after the figure, a heading, a formula beside it), or crossed-out ink.
+Every box belongs to exactly one of these. Read symbols with the confirmed notation when the handwriting is ambiguous. Copy the labels exactly; do not complete, correct or explain them.
+
+If the figure has a label that no box covers, list it under "missed" with its box on image 1 (whole numbers from 0 to 1000, [ymin, xmin, ymax, xmax]).
+
+List every arrowhead of the figure under "arrowheads": the point of its tip on image 1 ([y, x], whole numbers from 0 to 1000) and its kind: "open" (two short strokes, like >), "triangle" (a closed outline) or "filled" (a solid head). An arrow with a head at both ends has two entries. A line ending at a dot, a bar or nothing has none.
+
+Return one JSON object and nothing else:
+{{"labels": [{{"boxes": [1, 2], "text": "finite $d$-ary trees"}}], "drawing": [3], "ignore": [4], "missed": [{{"text": "$\\alpha$", "box": [ymin, xmin, ymax, xmax]}}], "arrowheads": [{{"tip": [y, x], "head": "open"}}], "caption": "one neutral sentence saying what the figure shows"}}"""
+
+FIG_CHECK = """You check a redrawn figure against the hand-drawn original from a mathematician's notes.
+
+Image 1 is the author's drawing. Image 2 is the figure drawn again for a paper. The redrawing is meant to be cleaner than the original: straight lines straightened, curves smoothed, ends that nearly meet joined, points that nearly line up aligned, handwritten labels set in type, colours changed to print colours. None of that is a difference.
+
+Report only what makes the redrawing say something else than the drawing:
+- something drawn that is missing, or something extra;
+- a label that is wrong, missing, or at the wrong element;
+- an arrow missing, extra, pointing the other way, or with the wrong kind of head;
+- lines that meet in one and not in the other, a wrong crossing or branching, a curve where a straight line matters, or the reverse;
+- a wrong count (of vertices, leaves, edges, regions, dots in a row).
+Look at every part of the figure. Say where each problem is, in words a reader can find (for example "the left tree, second leaf from the left").
+
+Return one JSON object and nothing else:
+{{"same": true, "problems": [{{"what": "...", "where": "...", "fix": "what the redrawing must do"}}]}}
+"same" is true only when there is no problem."""
+
+FIG_FIX = """You correct a TikZ figure that was drawn from a hand-drawn figure in a mathematician's notes. Image 1 is the author's drawing; image 2 is the current TikZ figure. The TikZ code was written by a program from measurements of the drawing: its coordinates are right where nothing is said to be wrong, so keep them.
+
+Make exactly the corrections listed, and nothing else. Keep every other line of the code as it is. Keep the drawing clean: straight lines straight, curves smooth, labels in LaTeX.
+
+Rules for the code
 - One \\begin{{tikzpicture}} ... \\end{{tikzpicture}} and nothing else.
 - Only core TikZ and these libraries: arrows.meta, positioning, calc, decorations.pathreplacing, shapes.geometric, fit.
-- Labels in math mode ($...$) with standard amsmath/amssymb commands. Use the confirmed notation where the handwriting is ambiguous.
-- At most 12cm wide. Plain black lines, no colours, no shading.
 - It must compile with pdfLaTeX as written.
 
 Answer in exactly this format:
-<box>ymin, xmin, ymax, xmax</box>
-<caption>one neutral sentence saying what the figure shows</caption>
 <tikz>
 ...
-</tikz>
-The box is where the hand-drawn figure sits on the page: whole numbers from 0 to 1000, measured from the top-left corner (y down the height, x across the width), drawn generously around the whole figure including its labels."""
-
-DRAW_FIX = """The TikZ picture below does not compile. Repair it so that it compiles with pdfLaTeX, using only core TikZ and the libraries arrows.meta, positioning, calc, decorations.pathreplacing, shapes.geometric, fit. Keep the drawing the same. Return only the corrected \\begin{{tikzpicture}} ... \\end{{tikzpicture}}, with no commentary and no code fences."""
+</tikz>"""
 
 FIG_AS_TEXT = """The transcription of a page of handwritten notes marked something as a figure, written [FIGURE: ...]. The author says it is not a figure: it is their own annotation, for example arrows or braces from parts of a formula to short labels, or a remark written beside the argument. Rewrite the passage so that the annotation becomes part of the text. The page image is the authority.
 

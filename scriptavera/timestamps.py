@@ -27,7 +27,7 @@ import requests
 DEFAULT_TSA = ["https://freetsa.org/tsr", "http://timestamp.digicert.com"]
 DEFAULT_CALENDARS = ["https://a.pool.opentimestamps.org", "https://b.pool.opentimestamps.org",
                      "https://a.pool.eternitywall.com", "https://ots.btc.catallaxy.com"]
-UA = {"User-Agent": "Scriptavera (https://github.com/vaibhavchhajer/scriptavera)"}
+UA = {"User-Agent": "Scriptavera (https://github.com/Chhajer2000/scriptavera)"}
 
 
 # ======================================================================= DER

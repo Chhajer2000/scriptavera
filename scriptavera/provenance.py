@@ -41,6 +41,17 @@ PROOF = "proof"
 ORIGINALS = "originals"
 _busy: set[str] = set()
 _busy_lock = threading.Lock()
+# Called as listener(folder, status) whenever a record gets a timestamp or its Bitcoin confirmation (the hosted
+# service copies the receipts to its audit ledger).
+LISTENERS: list = []
+
+
+def _notify(folder: Path, st: dict) -> None:
+    for fn in list(LISTENERS):
+        try:
+            fn(folder, st)
+        except Exception:  # noqa: BLE001 - a listener's problem never stops the record
+            pass
 
 
 # --------------------------------------------------------------- the key
@@ -253,6 +264,8 @@ def timestamp(folder: Path) -> dict:
     complete = any(x.get("ok") for x in st.get("tsa", [])) and (st.get("ots") or {}).get("ok")
     st["next_try"] = 0 if complete else time.time() + min(3600 * 6, 300 * 2 ** min(st["tries"], 6))
     _save_status(folder, st)
+    if any(x.get("ok") for x in st.get("tsa", [])) or (st.get("ots") or {}).get("ok"):
+        _notify(folder, st)
     return st
 
 
@@ -278,6 +291,8 @@ def upgrade(folder: Path) -> dict:
             ots["block_hash"] = block["hash"]
     st["ots"] = ots
     _save_status(folder, st)
+    if res["changed"]:
+        _notify(folder, st)
     return st
 
 

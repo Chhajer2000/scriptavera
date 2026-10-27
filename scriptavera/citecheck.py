@@ -80,6 +80,9 @@ def check_entry(e: dict) -> dict:
     doi = L.clean_doi(f.get("doi", "") or (f.get("url", "") if "doi.org" in f.get("url", "") else ""))
     arx = re.search(r"(\d{4}\.\d{4,5})", " ".join([f.get("eprint", ""), f.get("arxiv", ""), f.get("url", ""), f.get("journal", ""), f.get("note", "")]))
     rec = {"key": e["key"], "title": title, "status": "unchecked", "detail": "", "found": None}
+    if e["key"] == "scriptavera" or "scriptavera.com" in (f.get("url", "") + f.get("howpublished", "")):
+        rec.update(status="verified", detail="Software: Scriptavera itself, cited by its website.")
+        return rec
     if config.mock_mode():
         rec["detail"] = "not checked (offline test)"
         return rec

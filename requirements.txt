@@ -6,3 +6,8 @@ pypdfium2>=4.30
 pillow>=10.0
 cryptography>=42.0
 sympy>=1.12
+numpy>=1.24
+# The hosted service (scriptavera.com): Google sign-in, Supabase, Cloud Storage. The desktop app runs without them.
+google-auth>=2.29
+supabase>=2.4
+google-cloud-storage>=2.16

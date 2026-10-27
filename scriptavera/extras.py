@@ -72,6 +72,7 @@ def make(p: Project, kind: str) -> dict:
         raise ValueError(f"The {kind} came back with unbalanced LaTeX ({check_balance(body)[0]}); try again.")
     pre = _preamble(p, P)
     title, authors = P.get("title", ""), _authors(p)
+    plain_authors = authors.replace(" \\and ", ", ")      # outside the f-string: Python 3.11 allows no backslash there
     if kind == "slides":
         tex = "\n".join([r"\documentclass[aspectratio=169]{beamer}", r"\usetheme{default}", r"\setbeamertemplate{navigation symbols}{}",
                          r"\usepackage{amsmath,amssymb,mathtools}", *pre, f"\\title{{{title}}}", f"\\author{{{authors}}}", r"\date{}",
@@ -80,7 +81,7 @@ def make(p: Project, kind: str) -> dict:
         tex = "\n".join([r"\RequirePackage{fix-cm}", r"\documentclass{article}", r"\usepackage[a0paper,landscape,margin=2.5cm]{geometry}",
                          r"\usepackage{amsmath,amssymb,mathtools,multicol,xcolor}", *pre, r"\pagestyle{empty}", r"\setlength{\columnsep}{3cm}",
                          r"\begin{document}", r"\fontsize{26}{33}\selectfont",
-                         f"\\begin{{center}}{{\\fontsize{{80}}{{96}}\\selectfont\\bfseries {title}\\par}}\\vspace{{1cm}}{{\\fontsize{{40}}{{48}}\\selectfont {authors.replace(' \\and ', ', ')}\\par}}\\end{{center}}\\vspace{{2cm}}",
+                         f"\\begin{{center}}{{\\fontsize{{80}}{{96}}\\selectfont\\bfseries {title}\\par}}\\vspace{{1cm}}{{\\fontsize{{40}}{{48}}\\selectfont {plain_authors}\\par}}\\end{{center}}\\vspace{{2cm}}",
                          r"\begin{multicols}{3}", body, r"\end{multicols}", r"\end{document}", ""])
     name = f"{kind}.tex"
     (out / name).write_text(tex, encoding="utf-8")

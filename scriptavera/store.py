@@ -62,7 +62,7 @@ STAGES: list[dict] = [
      "desc": "You choose the title from the suggestions, approve the introduction and choose the papers it cites", "gate": True},
 ]
 STAGE_IDS = [s["id"] for s in STAGES]
-LAYOUT = 6                      # bumped whenever the list of stages, or what a stage makes, changes
+LAYOUT = 7                      # bumped whenever the list of stages, or what a stage makes, changes
 
 # What each stage writes. Redoing a stage removes its own files and those of every later stage.
 ARTIFACTS: dict[str, list[str]] = {
@@ -186,9 +186,11 @@ class Project:
         for sid in STAGE_IDS[idx:]:
             self.remove(*ARTIFACTS.get(sid, []))
 
+        now = time.time()
+
         def f(st):
             for sid in STAGE_IDS[idx:]:
-                st["stages"][sid] = {"status": "pending"}
+                st["stages"][sid] = {"status": "pending", "reset": now}     # the calls of the earlier run stay in the log
             st["error"] = None
             st.pop("paper_title", None)
         self.update_state(f)
@@ -278,6 +280,81 @@ def migrate(p: Project) -> None:
             # is not yet approved, the Figures step is done again from the start, and its old drawings are discarded
             p.reset_from("figures")
             shutil.rmtree(p.dir / "figures", ignore_errors=True)
+        if before < 7:
+            _wake_waits(p)
+            _repair_readings(p)
+
+
+def _wake_waits(p: Project) -> None:
+    """A step that an earlier version paused while waiting for the strongest model may now go on at once with a model
+    almost as good, on either key: it is tried again right away (the app restarts it a few seconds after it opens), and
+    the earlier note that a weaker model could be allowed is dropped."""
+    import re
+    stale = re.compile(r"\s*A weaker model is not used for this job unless you allow it\.")
+
+    def f(s):
+        for x in s["stages"].values():
+            if x.get("status") == "paused" and x.get("reason") == "limits":
+                x.update(resume_at=time.time(), auto_tries=0, weaker="", error=stale.sub("", x.get("error") or ""))
+        e = s.get("error")
+        if isinstance(e, dict) and e.get("kind") == "limits":
+            e.update(resume_at=time.time(), message=stale.sub("", e.get("message") or ""))
+    p.update_state(f)
+
+
+def _repair_readings(p: Project) -> None:
+    """Readings saved by earlier versions could keep the end of the model's answer (its doubts and changes, or a second
+    start of the page), HTML markup such as <u>Def</u>, or a command repeated endlessly. While the transcript is not yet
+    approved, the first two are cut away and a page that looped is read again (that page only). A paper whose reading
+    steps are open again carries on by itself when it is next opened. A name made from a file name loses its
+    underscores."""
+    import re
+    from .texutil import answer_transcript, clean_transcript, looping
+    st = p.state
+    name = (st.get("meta") or {}).get("name") or ""
+    if "_" in name and " " not in name.strip():
+        p.update_state(lambda s: s["meta"].update(name=re.sub(r"_+", " ", name).strip()))
+        st = p.state
+    stages = st["stages"]
+    if stages.get("review", {}).get("status") == "done" or (st.get("meta") or {}).get("imported"):
+        return
+    tr = p.load("transcript")
+    reread: list[int] = []
+    if tr and tr.get("pages"):
+        changed = False
+        for n, rec in list(tr["pages"].items()):
+            old = rec.get("text") or ""
+            if rec.get("model") == "typed source":
+                continue
+            new = old
+            if re.search(r"</?(?:transcript|uncertain|changes)\b|</?(?:u|b|i|br|em|strong|mark|span)\b[^<>]{0,80}>", old, re.I):
+                new = clean_transcript(answer_transcript(old))
+            if looping(new):
+                del tr["pages"][n]
+                reread.append(int(n))
+                changed = True
+            elif new != old:
+                rec["text"] = new
+                changed = True
+        if changed:
+            p.save("transcript", tr)
+
+    # the Figures step under way began with judging the drawings; the calls before that belong to an earlier run
+    judged = [c.get("t") or 0 for c in p.calls(20000)
+              if c.get("stage") == "figures" and str(c.get("label", "")).startswith("Decide which drawings")]
+
+    def f(s):
+        if reread:
+            for sid in ("transcribe", "figures", "review"):
+                s["stages"][sid] = {"status": "pending", "reset": time.time()}
+        g = s["stages"]
+        fig = g.get("figures", {})
+        if fig.get("status") in ("pending", "paused", "error") and not fig.get("reset"):
+            fig["reset"] = (min(judged) - 1) if judged and fig.get("status") != "pending" else time.time()   # earlier calls are not this run's
+        if tr and tr.get("pages") is not None and fig.get("status") == "pending" \
+                and g.get("transcribe", {}).get("status") in ("done", "pending") and g.get("review", {}).get("status") != "done":
+            s["restart"] = True
+    p.update_state(f)
 
 
 def list_projects() -> list[dict]:

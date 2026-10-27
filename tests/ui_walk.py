@@ -292,7 +292,8 @@ try:
             shot(pg, f"20_{sid}", full=sid in ("understand", "assess", "scope", "structure", "simplify", "verify", "referee", "decide", "figures", "intro", "finish"))
             assert pg.evaluate("document.querySelectorAll('.katex-error').length") == 0, f"KaTeX error on {sid}"
         pg.click('[data-act="settings"]'); time.sleep(0.4); shot(pg, "30_settings", full=True)
-        assert "Only the strongest model is used" in pg.inner_text(".dialog") and "used only if you allow it" in pg.inner_text(".dialog")
+        dlg = pg.inner_text(".dialog")
+        assert "Only the strongest models are used" in dlg and "a weaker model is never used" in dlg and "allow it" not in dlg, dlg[:800]
         pg.keyboard.press("Escape")
         pg.click('.step[data-view="scout"]'); time.sleep(0.2)
         pg.click('[data-act="journal"]'); pg.wait_for_selector("#jrdialog"); time.sleep(0.3); shot(pg, "31_journal_dialog")

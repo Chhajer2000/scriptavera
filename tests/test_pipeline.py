@@ -57,7 +57,8 @@ shown_tr, shown_flags, _ = pipeline.visible_doubts(p)
 assert [(f["page"], f["snippet"], f["alt"]) for f in shown_flags] == [(5, "\\int_{1}^{n+1} \\frac{dx}{x} = \\log n", "\\int_{1}^{n+1} \\frac{dx}{x} = \\log(n+1)")], shown_flags   # cleaned, on its page
 assert "suggested reading" not in shown_flags[0]["issue"] and shown_flags[0]["issue"].startswith("The argument")
 figs = p.load("figures")["items"]
-assert len(figs) == 1 and figs[0]["page"] == 1 and figs[0]["box"] == [240, 90, 520, 900], figs
+b = figs[0]["box"]                       # found on the page, then fitted to the ink: it holds the whole drawing
+assert len(figs) == 1 and figs[0]["page"] == 1 and b[0] <= 280 and b[1] <= 138 and b[2] >= 495 and b[3] >= 862, figs
 assert pipeline.figure_file(p, "f1", "orig").exists()
 drawn = bool(figs[0]["tikz_ok"])
 assert drawn == bool(paperlib.find_engine()) and pipeline.figure_file(p, "f1", "tikz").exists() == drawn, figs[0]

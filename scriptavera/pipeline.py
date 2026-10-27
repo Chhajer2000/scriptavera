@@ -8,6 +8,7 @@ Every stage saves its result, so a stopped run resumes where it left off.
 
 from __future__ import annotations
 
+import contextvars
 import difflib
 import json
 import re
@@ -17,11 +18,11 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import audit as fidelity
-from . import config, domains, literature, paper as paperlib, prompts
+from . import config, domains, literature, paper as paperlib, prompts, tenancy
 from .llm import ROLES, Cancelled, LLMError, RunHooks, clock, router
 from . import store as storelib
 from .store import STAGE_IDS, STAGES, Project
-from .texutil import clean_transcript, drop_leaks, leaks
+from .texutil import answer_transcript, clean_transcript, collapse_loops, drop_leaks, leaks, looping
 from .util import (est_tokens, extract_tag, fit, loads_lenient, parse_lines, parse_list, parse_records, parse_rows,
                    to_float)
 
@@ -52,7 +53,6 @@ class Run(RunHooks):
         self._cancel = threading.Event()
         self.thread: threading.Thread | None = None
         self.settings = config.load_settings()
-        self.relax = False          # the author allowed a weaker model for the step that is running
 
     # hooks used by the router
     def on_call(self, record: dict) -> None:
@@ -94,8 +94,6 @@ class Run(RunHooks):
         that contains the model's own reasoning is asked for again once; what is still reasoning is removed."""
         self.check()
         kw.setdefault("effort", self.EFFORT.get(role))
-        if self.relax:
-            kw.setdefault("strict", False)
         res = router.chat(role, system, user, hooks=self, **kw)
         if (role == "writer" if paper is None else paper) and leaks(res.text):
             self.log(f"{kw.get('label') or 'A model'}: the answer contained the model's own reasoning; asked again.", "warn")
@@ -197,6 +195,8 @@ def start(project: Project) -> bool:
     if is_running(project.id) or project.state.get("meta", {}).get("imported"):
         return False                     # an imported paper has no notes to read: it is worked on in the editor
     disarm(project.id)
+    if project.state.get("restart"):
+        project.update_state(lambda st: st.pop("restart", None))
     run = Run(project)
     _runs[project.id] = run
     run.thread = threading.Thread(target=_drive, args=(run,), daemon=True, name=f"scriptavera-{project.id}")
@@ -253,6 +253,7 @@ def passing(e: BaseException) -> bool:
 
 def _drive(run: Run) -> None:
     p = run.p
+    tenancy.set_owner(tenancy.of_project(p.id))      # this thread uses its owner's keys and memory, no one else's
     literature.set_limits(p.state.get("meta", {}).get("test"))   # test mode: this thread searches only before the cutoff
     p.update_state(lambda st: st.update(running=True, error=None))
     run.changed()
@@ -271,7 +272,6 @@ def _drive(run: Run) -> None:
                 p.set_stage(sid, status="waiting", since=time.time())
                 run.log(f"Waiting for you: {stage['name'].lower()}.", "gate")
                 return
-            run.relax = bool(p.state["stages"].get(sid, {}).get("relax"))
             p.set_stage(sid, status="running", started=time.time(), error=None)
             run.changed()
             run.log(f"{stage['name']} started.", "stage")
@@ -756,7 +756,7 @@ def stage_survey(run: Run) -> None:
         else:
             res = run.ask("vision_best", system, f"This is page {n} of {len(p.state['pages'])}.",
                           images=[_page_bytes(p, n)], max_out=3200, effort="medium", label=f"Survey page {n}")
-        kind = _kind(res.text, extract_tag(res.text, "transcript"))
+        kind = _kind(res.text, answer_transcript(res.text))
         symbols = []
         for row in parse_rows(extract_tag(res.text, "symbols")):
             if not row[0] or len(row[0]) > 80:
@@ -766,7 +766,7 @@ def stage_survey(run: Run) -> None:
                             "defined": defined, "definition": row[3] if defined and len(row) > 3 else ""})
         terms = [{"term": r[0], "use": r[1] if len(r) > 1 else ""} for r in parse_rows(extract_tag(res.text, "terms"))
                  if r[0] and len(r[0]) < 80]
-        rec = {"kind": "notes" if src is not None else kind, "text": src if src is not None else clean_transcript(extract_tag(res.text, "transcript")),
+        rec = {"kind": "notes" if src is not None else kind, "text": src if src is not None else collapse_loops(clean_transcript(answer_transcript(res.text))),
                "symbols": symbols, "terms": terms, "gist": extract_tag(res.text, "gist"), "model": res.model}
         kind = rec["kind"]
         with lock:
@@ -778,7 +778,7 @@ def stage_survey(run: Run) -> None:
 
     workers = max(1, min(4, int(run.settings.get("parallel_pages", 2))))
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(work, n): n for n in todo}
+        futs = {ex.submit(contextvars.copy_context().run, work, n): n for n in todo}     # the same owner's keys
         for f in as_completed(futs):
             try:
                 f.result()
@@ -1442,8 +1442,9 @@ def adding_now(p: Project) -> dict | None:
     figures are still being drawn. None when nothing is being added."""
     st = p.state
     stages = st["stages"]
-    if p.load("flags") is None or stages.get("review", {}).get("status") == "done":
-        return None
+    review = stages.get("review", {})
+    if p.load("flags") is None or review.get("status") == "done" or not review.get("since"):
+        return None                            # the review was never opened: the steps before it are shown in turn
     tr = (p.load("transcript") or {}).get("pages", {})
     pages = [pg["n"] for pg in st.get("pages", []) if not pg.get("skip") and str(pg["n"]) not in tr]
     drawing = stages.get("figures", {}).get("status") in ("pending", "running")
@@ -1567,8 +1568,19 @@ def stage_transcribe(run: Run) -> None:
                      + fit(layers[str(n)], 2500, "head"))
         res = run.ask("vision_best", system, user, images=[_page_bytes(p, n)], max_out=3200, effort="high",
                       label=f"Transcribe page {n}")
-        text = clean_transcript(extract_tag(res.text, "transcript") or res.text)
+        text = clean_transcript(answer_transcript(res.text))
+        broke = looping(text)
+        if broke:                              # the model repeated itself endlessly: the page is read once more
+            again = run.ask("vision_best", system, user + "\n\nIMPORTANT: a previous reading of this page broke down and repeated "
+                            "one command endlessly. Transcribe the page once, from the top, and repeat nothing.",
+                            images=[_page_bytes(p, n)], max_out=3200, effort="high", label=f"Transcribe page {n} (again)")
+            text2 = clean_transcript(answer_transcript(again.text))
+            broke = looping(text2)
+            res, text = (again, text2) if not broke else (res, collapse_loops(text))
         uncertain = []
+        if broke:
+            uncertain.append({"snippet": "", "issue": "The reading of this page broke down twice (the model repeated itself), and the "
+                              "repetition was cut. Compare the page with the image and correct it by hand.", "alt": ""})
         for row in parse_rows(extract_tag(res.text, "uncertain"), min_cols=2):
             item = {"snippet": row[0], "issue": row[1], "alt": row[2] if len(row) > 2 else ""}
             if language_only(item["snippet"], item["alt"], item["issue"]):
@@ -1727,17 +1739,6 @@ def page_gaps(apages: list[dict], report: dict, marked: set[int] | None = None) 
     return out
 
 
-def _parse_box(raw: str) -> list[int] | None:
-    nums = re.findall(r"-?\d+(?:\.\d+)?", raw or "")
-    if len(nums) != 4:
-        return None
-    vals = [float(v) for v in nums]
-    if max(vals) <= 1.0:
-        vals = [v * 1000 for v in vals]
-    y0, x0, y1, x1 = (max(0, min(1000, int(v))) for v in vals)
-    return [y0, x0, y1, x1] if y1 - y0 >= 30 and x1 - x0 >= 30 else None
-
-
 def _crop_page(p: Project, n: int, box: list[int] | None) -> bytes:
     import io
     from PIL import Image
@@ -1761,71 +1762,39 @@ def _tikz_only(text: str) -> str:
 
 
 def figure_file(p: Project, fid: str, kind: str):
-    return p.dir / "figures" / (f"{fid}_tikz.png" if kind == "tikz" else f"{fid}_orig.jpg")
+    name = {"tikz": f"{fid}_tikz.png", "check": f"{fid}_check.png"}.get(kind, f"{fid}_orig.jpg")
+    return p.dir / "figures" / name
+
+
+def _page_record(p: Project, n: int) -> dict:
+    return next((pg for pg in p.state.get("pages", []) if pg.get("n") == n), {"n": n, "file": f"p{n:03d}.jpg"})
 
 
 def _draw_figure(p: Project, rec: dict, ask, conf: dict, instruction: str = "") -> None:
-    """One vision call: where the sketch is on the page, and a TikZ redrawing of it. Then one compile to show it."""
-    (p.dir / "figures").mkdir(exist_ok=True)
-    user = f"Redraw the figure on this page that the transcription describes as:\n{rec['desc']}\n\n"
-    if rec.get("of", 1) > 1:
-        user += f"The page has {rec['of']} figures; this is number {rec['k'] + 1}, counted from the top.\n\n"
-    user += f"CONFIRMED NOTATION\n{notation_text(conf, 1200)}"
-    if instruction:
-        user += (f"\n\nYOUR PREVIOUS DRAWING\n{rec.get('tikz') or '(none)'}\n\nTHE AUTHOR SAYS IT IS NOT WHAT THEY DREW\n"
-                 f"{instruction}\n\nRedraw it accordingly, staying faithful to the page.")
-    tikz, err = "", ""
+    """Draw a figure again (figflow.py): found on the page, measured from the original file, its labels read by the
+    model, redrawn by code and checked twice. A failure is not covered up: the figure keeps the error, which the author
+    sees next to their own drawing, and the other figures are still drawn."""
+    from . import figflow
     try:
-        res = ask("vision_best", prompts.DRAW.format(), user, images=[_page_bytes(p, rec["page"])], max_out=2600,
-                  effort="medium", label=f"Draw figure {rec['id'][1:]} (page {rec['page']})")
-        tikz = _tikz_only(extract_tag(res.text, "tikz") or res.text)
-        box = _parse_box(extract_tag(res.text, "box"))
-        cap = re.sub(r"\s+", " ", extract_tag(res.text, "caption")).strip()
-        rec["model"] = res.model
-        top = router.peers("vision_best", True)    # drawn by a weaker model (only if the author allowed one)?
-        rec["weak"] = bool(top) and not any(m.id == res.model and m.provider == res.provider for m in top)
-        if box:
-            rec["box"] = box
-        if cap and not (instruction and rec.get("caption_edited")):
-            rec["caption"] = cap
-        if not tikz:
-            err = "the model did not return a drawing"
-    except LLMError as e:
-        if passing(e):
-            raise
-        err = str(e)
+        figflow.draw(p, rec, ask, notation_text(conf, 1200), _page_record(p, rec["page"]), _page_bytes(p, rec["page"]),
+                     instruction)
+        return
+    except (LLMError, Cancelled):
+        raise
+    except Exception as e:  # noqa: BLE001 - shown to the author on the figure; the other figures are still drawn
+        traceback.print_exc()
+        why = str(e) if isinstance(e, figflow.FigureError) else f"the redrawing failed ({type(e).__name__}: {e})"
+    (p.dir / "figures").mkdir(exist_ok=True)
     orig = figure_file(p, rec["id"], "orig")
-    if rec.get("box") or not orig.exists():
+    if not orig.exists():                               # the author's own drawing is shown, cut from the page
         orig.write_bytes(_crop_page(p, rec["page"], rec.get("box")))
-    png = None
-    if tikz:
-        png, err = paperlib.render_tikz(tikz)
-        if not png and re.search(r"(tikz|pgf\w*)\.sty'? not found|took too long", err):
-            err = ("no LaTeX engine could draw it: the TikZ package (called pgf) is missing from the LaTeX on this computer. "
-                   "Install it (in MiKTeX Console: Packages, pgf), then press Draw again.")
-        if not png and "no LaTeX engine" not in err:
-            try:
-                res = ask("reason", prompts.DRAW_FIX.format(), f"ERROR: {err}\n\n{tikz}", max_out=2600, effort="low",
-                          label=f"Repair figure {rec['id'][1:]}")
-                fixed = _tikz_only(res.text)
-                if fixed:
-                    png2, err2 = paperlib.render_tikz(fixed)
-                    if png2:
-                        tikz, png, err = fixed, png2, ""
-                    else:
-                        err = err2 or err
-            except LLMError as e:
-                if passing(e):
-                    raise
     target = figure_file(p, rec["id"], "tikz")
-    if png:
-        target.write_bytes(png)
-    elif target.exists():
+    if target.exists():
         target.unlink()
-    rec.update(tikz=tikz, tikz_ok=True if png else (None if "no LaTeX engine" in err else False), error=err,
-               drawn=time.time(), choice="")
+    rec.update(tikz="", tikz_ok=False, error=why, drawn=time.time(), choice="", method="measured",
+               check={"same": None, "problems": []})
     if not rec.get("caption"):
-        rec["caption"] = re.sub(r"\s+", " ", rec["desc"]).strip()
+        rec["caption"] = re.sub(r"\s+", " ", rec.get("desc", "")).strip()
 
 
 def transcript_figures(p: Project) -> list[dict]:
@@ -1867,6 +1836,15 @@ def stage_figures(run: Run) -> None:
         drawings.judge(run, fresh, {int(n): v.get("text", "") for n, v in tr["pages"].items()})
         _save_figures(p, items)
     todo = [f for f in items if drawings.wanted_drawn(f) and not f.get("drawn")]
+    _locate_figures(run, items, todo)
+    for rec in todo:
+        if rec.get("dup_of") and not rec.get("answered"):
+            first = next((f for f in items if f["id"] == rec["dup_of"]), None)
+            rec.update(choice="none", auto=True, dup=True)
+            rec.setdefault("judged", {})["why"] = (f"The same drawing as the one on page {first['page'] if first else rec['page']}"
+                                                   " (the transcription marked it twice), so it is printed once.")
+    _save_figures(p, items)
+    todo = [f for f in todo if not f.get("dup")]
     for i, rec in enumerate(todo, 1):
         run.check()
         run.progress(i - 1, len(todo), f"drawing the figure on page {rec['page']}")
@@ -1883,6 +1861,24 @@ def stage_figures(run: Run) -> None:
     if todo and all(f.get("tikz_ok") is None for f in todo):
         run.log("No LaTeX program is installed on this computer, so the redrawn figures cannot be shown. "
                 "Your own drawings, cut from the pages, are offered instead.", "warn")
+
+
+def _locate_figures(run: Run, items: list[dict], todo: list[dict]) -> None:
+    """Find on each page the drawings that are to be drawn: one reading of the page for all its drawings, so that
+    a drawing the transcription marked twice is found as such."""
+    from . import figflow
+    p = run.p
+    pages = sorted({f["page"] for f in todo if not f.get("pbox")})
+    for n in pages:
+        run.check()
+        recs = [f for f in items if f["page"] == n]
+        try:
+            figflow.locate(p, n, recs, run.ask, _page_bytes(p, n), _page_record(p, n))
+        except (LLMError, Cancelled):
+            raise
+        except Exception:  # noqa: BLE001 - each figure is then found when it is drawn
+            traceback.print_exc()
+        _save_figures(p, items)
 
 
 def plural(n: int, word: str) -> str:
@@ -1916,7 +1912,7 @@ def redraw_figure(p: Project, fid: str, instruction: str) -> dict:
 
     def ask(role, system, user, **kw):
         return router.chat(role, system, user, hooks=hooks, **kw)
-    _draw_figure(p, rec, ask, p.load("confirmed", {}), instruction.strip() or "Look at the page again and redraw it more carefully.")
+    _draw_figure(p, rec, ask, p.load("confirmed", {}), instruction.strip())
     rec["redrawn"] = rec.get("redrawn", 0) + 1
     with p._lock:
         cur = p.load("figures") or {"items": []}

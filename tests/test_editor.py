@@ -305,7 +305,7 @@ try:
     run("Make the proof of Lemma 2.3 more detailed")
     raise SystemExit("a model at its limit went unnoticed")
 except A.AssistError as e:
-    assert "next best model" in str(e)
+    assert "Try the command again after" in str(e) and "next best model" not in str(e), str(e)   # it waits; never a weaker model
 print("7. by the AI: rewriting a proof, retrying an answer that does not fit, fixing the sentences that refer to a removed "
       "item, formulas reported, questions answered, unclear commands asked back, a model at its limit said plainly")
 

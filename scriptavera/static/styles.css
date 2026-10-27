@@ -701,6 +701,13 @@ textarea.mono { font-family: var(--mono); font-size: 13px; width: 100%; }
 .figdesc { font: 15px/1.5 var(--tex); border: 1px solid var(--rule); border-radius: 4px; background: #fff; padding: 10px 14px; margin: 6px 0 12px; }
 .figdesc .muted { font-family: var(--ui); margin-top: 4px; }
 .figdesc-s { font-family: var(--tex); font-size: 14.5px; color: var(--graphite); margin-top: 2px; }
+/* what the checks of a redrawn figure found */
+.figcheck { font-size: 13.5px; margin: -4px 0 10px; padding: 6px 10px; border-left: 3px solid var(--blue); background: var(--blue-soft); border-radius: 0 4px 4px 0; }
+.figcheck.c-ok { border-left-color: var(--green); background: var(--green-soft); }
+.figcheck.c-warn { border-left-color: #c9a227; background: var(--hl-soft); }
+.figcheck ul { margin: 4px 0 2px 18px; padding: 0; }
+.figcheck a { margin-left: 4px; }
+.figcheck details { margin-top: 2px; }
 .figweak { font-size: 13px; margin: -4px 0 10px; padding: 6px 10px; border: 1px solid #ecd97a; background: var(--hl-soft); border-radius: 4px; }
 .autoline { font-size: 13.5px; margin: 0 0 14px; padding: 10px 14px; border: 1px solid #b9dcc9; background: var(--green-soft); border-radius: 8px; }
 .fig-sub { font: 600 13px var(--ui); color: var(--graphite); text-transform: uppercase; letter-spacing: .05em; margin: 18px 0 4px; }
@@ -794,3 +801,26 @@ textarea.mono { font-family: var(--mono); font-size: 13px; width: 100%; }
 .addition { border-left: 3px solid var(--blue); background: #f2f5ff; padding: 4px 10px 4px 12px; margin: 8px 0; border-radius: 0 4px 4px 0; }
 .add-tag { display: block; font: 600 11.5px var(--ui); color: var(--blue-deep); margin-bottom: 2px; }
 .addition p { margin: .2em 0; }
+
+/* scriptavera.com: the account, the free papers, Google sign-in (hosted.js) */
+.hb-btn.sv-me { gap: 7px; }
+.hb-btn.sv-me img { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }
+.hb-btn.primary-ish { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
+.hb-btn.primary-ish:hover { background: var(--blue-deep); border-color: var(--blue-deep); }
+.homebar .chip { margin-right: 6px; font-size: 13px; padding: 5px 12px; }
+.homebar .chip:not(.green):not(.red) { background: var(--slate-2); color: var(--chalk); border: 1px solid var(--slate-3); }
+.banner .sv-gbtn { min-height: 40px; }
+.sv-guest { align-items: flex-start; }
+@media (max-width: 640px) { .homebar .chip { display: none; } }
+.sv-prov { border-top: 1px solid var(--rule-soft); padding: 14px 0 6px; }
+.sv-prov-h { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
+.sv-key { display: grid; grid-template-columns: minmax(130px, auto) 1fr auto; gap: 4px 10px; align-items: center; padding: 4px 0; }
+.sv-key > div { grid-column: 1 / -1; }
+.sv-key-name { font-size: 13.5px; }
+.sv-leak { color: var(--red); }
+.sv-steps { margin-top: 8px; padding: 10px 14px; border: 1px solid #c5cff3; background: var(--blue-soft); border-radius: 6px; font-size: 13px; }
+.sv-steps ol { margin: 6px 0 6px 18px; padding: 0; }
+.sv-steps li { margin: 2px 0; }
+.sv-consent { margin: 6px 0 0 16px; padding: 0; }
+.sv-consent li { margin: 3px 0; }
+@media (max-width: 640px) { .sv-key { grid-template-columns: 1fr auto; } }

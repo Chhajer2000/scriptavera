@@ -14,6 +14,7 @@ so adding one is a matter of a base URL and a key.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import threading
@@ -23,14 +24,15 @@ from dataclasses import dataclass, field
 
 import requests
 
-from . import config
+from . import config, tenancy
 from .util import est_tokens, strip_think
 
 # ------------------------------------------------------------------ roles
 
-# `strict` roles decide the quality of the paper. For them only the strongest model these keys can use is used, on
-# whichever key still has room for it (`margin` 0: the same model, nothing lesser); if none of its keys is free, the
-# work waits. A lesser model does such a job only when the author allows it for that step.
+# `strict` roles decide the quality of the paper. For them only the strongest model these keys can use, and models
+# almost as good as it (`margin` points below it on this job: for Gemini the same tier and a version at most 0.25
+# lower), are used: the best one first, on one key after the other, then the next. A weaker model is never used, not
+# even with the author's permission; if none of these is free, the work waits.
 ROLES: dict[str, dict] = {
     "vision_fast": {
         "name": "Scout reader", "strict": False,
@@ -38,7 +40,7 @@ ROLES: dict[str, dict] = {
         "ideal": "Any fast multimodal model.",
     },
     "vision_best": {
-        "name": "Handwriting transcriber", "strict": True, "margin": 0,
+        "name": "Handwriting transcriber", "strict": True, "margin": 1.0,
         "job": "Reads every page twice (notation survey, then the final transcription) and redraws the figures.",
         "ideal": "The strongest multimodal model available. Paid upgrade: Gemini Pro, Claude Opus or GPT-5 class.",
     },
@@ -48,18 +50,18 @@ ROLES: dict[str, dict] = {
         "ideal": "A fast, cheap text model. Groq-hosted open models are ideal.",
     },
     "reason": {
-        "name": "Mathematical reasoner", "strict": True, "margin": 0,
+        "name": "Mathematical reasoner", "strict": True, "margin": 1.0,
         "job": "Resolves notation, understands the whole paper, decides its structure, looks for shorter arguments, "
                "checks every proof and reads the paper as a referee.",
         "ideal": "The strongest reasoning model available. Paid upgrade: Claude Opus, GPT-5 thinking or Gemini Pro.",
     },
     "reader": {
-        "name": "Paper reader", "strict": True, "margin": 0,
+        "name": "Paper reader", "strict": True, "margin": 1.0,
         "job": "Reads each relevant paper in full and takes structured notes.",
         "ideal": "A long-context model, so a whole paper fits in one request.",
     },
     "writer": {
-        "name": "Academic writer", "strict": True, "margin": 0,
+        "name": "Academic writer", "strict": True, "margin": 1.0,
         "job": "Writes the introduction and every section, does the final copy-edit, writes the abstract and proposes titles.",
         "ideal": "A model with strong prose and exact LaTeX. Paid upgrade: Claude Opus or Sonnet.",
     },
@@ -134,6 +136,60 @@ PROVIDERS: dict[str, dict] = {
     },
 }
 
+# Providers a person may bring their own keys for on scriptavera.com (never Ollama or a custom address: the server
+# would then fetch any address someone typed).
+BYOK = ("gemini", "groq", "cerebras", "mistral", "openrouter")
+
+# What each provider does with what is sent to it, on its free and paid plans (as its terms say, October 2026).
+PRIVACY = {
+    "gemini": {"free": "On Google's free tier, what you send may be used to improve Google's products and read by human reviewers. Your unpublished notes can leak.",
+               "paid": "Paid tier: Google does not use your prompts to improve its products; it keeps them for a limited time to detect abuse.",
+               "": "Could not tell whether this key is on the free or the paid tier."},
+    "mistral": {"free": "On Mistral's free plan, what you send may be used to train its models unless you opt out in Mistral's admin panel.",
+                "paid": "Paid plan: you control whether Mistral may use your data; check that training is turned off in its admin panel.",
+                "": "Mistral does not say through its API which plan a key is on. On the free plan, data may be used for training unless you opt out in its admin panel."},
+    "openrouter": {"free": "Without credits, only free models are used, and some of the services behind them may log or train on prompts.",
+                   "paid": "With credits. Turn off the providers that train on prompts in OpenRouter's privacy settings.",
+                   "": "Could not tell whether this key has credits."},
+    "groq": {"free": "Groq does not train on what you send, on any plan.", "paid": "Groq does not train on what you send, on any plan.",
+             "": "Groq does not train on what you send, on any plan."},
+    "cerebras": {"free": "Cerebras does not train on what you send, on any plan.", "paid": "Cerebras does not train on what you send, on any plan.",
+                 "": "Cerebras does not train on what you send, on any plan."},
+}
+
+
+def leaks(provider: str, tier: str) -> bool:
+    """Whether a key of this provider and tier may let the provider train on, or people read, what is sent."""
+    return (provider == "gemini" and tier == "free") or (provider == "mistral" and tier != "paid") \
+        or (provider == "openrouter" and tier == "free")
+
+
+# Getting a key, in a few steps, as each provider's site shows it.
+KEY_STEPS = {
+    "gemini": {"link": "https://aistudio.google.com/apikey", "steps": [
+        "Open Google AI Studio and sign in with your Google account.",
+        "Click “Create API key” and pick (or create) a Google Cloud project.",
+        "Copy the key (a long code, usually starting with “AIza”) and paste it here.",
+        "For privacy, turn on billing for that project (AI Studio, “Set up billing”): the key then becomes a paid-tier key, and Google stops using what you send to improve its products."]},
+    "groq": {"link": "https://console.groq.com/keys", "steps": [
+        "Open the Groq console and sign in.",
+        "Click “Create API Key” and give it a name, such as Scriptavera.",
+        "Copy the key at once (it starts with “gsk_” and is shown only once) and paste it here."]},
+    "cerebras": {"link": "https://cloud.cerebras.ai/", "steps": [
+        "Open Cerebras Cloud and sign in.",
+        "Choose “API Keys” in the menu on the left.",
+        "Click “Generate API Key”, copy it (it starts with “csk-”) and paste it here."]},
+    "mistral": {"link": "https://console.mistral.ai/api-keys", "steps": [
+        "Open the Mistral console and sign in.",
+        "Under Billing, choose a plan (the free one is enough to try).",
+        "Under API Keys, click “Create new key”, copy it (it is shown only once) and paste it here.",
+        "In Mistral's admin panel, turn off the use of your data for training."]},
+    "openrouter": {"link": "https://openrouter.ai/keys", "steps": [
+        "Open OpenRouter and sign in.",
+        "Click “Create Key”, copy it (it starts with “sk-or-”) and paste it here.",
+        "Buy a few dollars of credits to use paid models, and in Settings, Privacy, turn off providers that train on prompts."]},
+}
+
 GEMINI_FLAGSHIPS = {"argon", "ultra"}        # Gemini models named above Pro (gemini-4-argon is Google's flagship)
 
 _NOT_CHAT = re.compile(
@@ -202,6 +258,7 @@ class Model:
     max_total: int = 60000       # ceiling for max_tokens (visible answer plus reasoning)
     interval: float = 2.0        # seconds between requests
     effort: bool = False         # accepts reasoning_effort
+    tier: int = -1               # Gemini: 0 Flash-Lite, 1 Flash, 2 Pro, 3 flagship (Pro and above: paid tier only)
     # runtime state
     cooldown_until: float = 0.0
     dead: bool = False
@@ -253,6 +310,7 @@ def classify(provider: str, model_id: str, meta: dict | None = None) -> Model | 
         # Flash-Lite, and within a tier the newer version first. Pro and Argon are not on Google's free tier: on a
         # free key the first request is refused with "limit: 0" and the model is skipped on that key from then on.
         tier = 3 if name in GEMINI_FLAGSHIPS else 2 if name == "pro" else 0 if lite else 1
+        m.tier = tier
         q = (66, 81, 96, 108)[tier] + 4 * v
         m.vision, m.effort = True, True
         m.req_tokens, m.out_cap, m.think_pad = 200_000, 16000, 8000
@@ -409,16 +467,20 @@ def _duration(s: str | None) -> float:
 
 
 class Router:
-    def __init__(self) -> None:
+    def __init__(self, keys: dict[str, list[str]] | None = None) -> None:
+        """keys: a person's own keys ({"GEMINI_API_KEY": [...], ...}), held in memory only; None reads .env."""
         self.models: list[Model] = []
         self.status: dict[str, dict] = {}
         self.discovered_at = 0.0
         self._lock = threading.RLock()
         self._pace = threading.Lock()
+        self._own = keys
 
     # -------------------------------------------------------- discovery
 
     def _base(self, provider: str) -> str:
+        if self._own is not None and provider not in BYOK:
+            return ""
         if provider == "ollama":
             url = config.get_env("OLLAMA_BASE_URL").rstrip("/")
             return (url if url.endswith("/v1") else url + "/v1") if url else ""
@@ -427,6 +489,8 @@ class Router:
         return PROVIDERS[provider]["base"]
 
     def _keys(self, provider: str) -> list[str]:
+        if self._own is not None:
+            return list(self._own.get(PROVIDERS[provider]["env"]) or []) if provider in BYOK else []
         if provider == "ollama":
             return ["ollama"] if config.get_env("OLLAMA_BASE_URL") else []
         if provider == "custom":
@@ -462,23 +526,99 @@ class Router:
                     if not found and msg.startswith("unreachable") and p["fallback"]:
                         found = [(x, {}) for x in p["fallback"]]
                         msg = "Could not list models; using known defaults"
-                    n = 0
-                    for mid, meta in found:
-                        mdl = classify(pid, mid, meta)
-                        if mdl:
-                            mdl.key, mdl.key_index = key, ki
-                            models.append(mdl)
-                            n += 1
+                    mine = [m for m in (classify(pid, mid, meta) for mid, meta in found) if m]
+                    for mdl in mine:
+                        mdl.key, mdl.key_index = key, ki
+                    tier = self._tier(pid, key, mine) if mine else ""
+                    if tier == "free":                    # Pro and Argon: not on this key; it goes straight to its best model
+                        for mdl in mine:
+                            if mdl.tier >= 2:
+                                mdl.dead, mdl.note = True, "not on this key's free tier"
+                    models.extend(mine)
+                    n = sum(1 for m in mine if not m.dead)
                     st["count"] += n
                     st["ok"] = st["ok"] or n > 0
                     st["message"] = msg if not n else f"{st['count']} usable models"
-                    st["keys"].append({"n": ki + 1, "ok": n > 0, "count": n, "message": msg if not n else f"{n} usable models"})
+                    st["keys"].append({"n": ki + 1, "ok": n > 0, "count": n, "tier": tier,
+                                       "leak": n > 0 and leaks(pid, tier),
+                                       "privacy": PRIVACY.get(pid, {}).get(tier, "") if n else "",
+                                       "message": msg if not n else f"{n} usable models"})
                 if st["ok"]:
                     st["message"] = f"{st['count']} usable models"          # a key that failed is reported under "keys"
             self.models = models
             self.status = status
             self.discovered_at = time.time()
             return status
+
+    def _tier(self, provider: str, key: str, mine: list[Model]) -> str:
+        """Whether a key is on its provider's free or paid plan: "free", "paid", or "" when it cannot be told."""
+        try:
+            if provider == "gemini":
+                return self._probe_tier(key, mine)
+            if provider == "openrouter":
+                return self._probe_openrouter(key)
+            if provider in ("groq", "cerebras"):
+                return self._probe_limits(provider, key, mine)
+        except Exception:  # noqa: BLE001 - not knowing the tier never stops a key from working
+            return ""
+        return ""
+
+    @staticmethod
+    def _probe_openrouter(key: str) -> str:
+        """OpenRouter says it directly: a key whose account has never bought credits is on the free tier."""
+        for path in ("/key", "/auth/key"):
+            try:
+                r = requests.get(PROVIDERS["openrouter"]["base"] + path, headers={"Authorization": f"Bearer {key}"}, timeout=12)
+            except requests.RequestException:
+                return ""
+            if r.status_code == 200:
+                data = (r.json() or {}).get("data") or {}
+                if "is_free_tier" in data:
+                    return "free" if data["is_free_tier"] else "paid"
+        return ""
+
+    def _probe_limits(self, provider: str, key: str, mine: list[Model]) -> str:
+        """Groq and Cerebras: the limits they report with an answer. A free plan allows a few thousand tokens a
+        minute per model; a paid plan allows many times more. One request of one token to the smallest model."""
+        small = sorted(mine, key=lambda m: (0 if re.search(r"8b|20b|instant|mini|small", m.id) else 1, m.id))
+        if not small:
+            return ""
+        body = {"model": small[0].id, "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 1}
+        try:
+            r = requests.post(self._base(provider) + "/chat/completions", data=json.dumps(body), timeout=30,
+                              headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+        except requests.RequestException:
+            return ""
+        h = {k.lower(): v for k, v in r.headers.items()}
+        try:
+            tpm = float(h.get("x-ratelimit-limit-tokens") or h.get("x-ratelimit-limit-tokens-minute") or 0)
+        except ValueError:
+            return ""
+        if not tpm:
+            return ""
+        return "paid" if tpm >= 200_000 else "free" if tpm <= 100_000 else ""
+
+    def _probe_tier(self, key: str, mine: list[Model]) -> str:
+        """Whether a Gemini key is on Google's free tier, found before any work is given to it: one tiny request to the
+        best model that only the paid tier serves. "free" when Google answers that its free-tier limit is 0, "paid"
+        when it answers (or names a limit above 0), "" when it cannot be told; then the first real request tells."""
+        paid_only = sorted((m for m in mine if m.tier >= 2), key=lambda m: -m.scores.get("reason", 0))
+        if not paid_only:
+            return ""
+        body = {"model": paid_only[0].id, "messages": [{"role": "user", "content": "Say OK."}], "max_tokens": 64}
+        try:
+            r = requests.post(self._base("gemini") + "/chat/completions", data=json.dumps(body), timeout=40,
+                              headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+        except requests.RequestException:
+            return ""
+        low = (r.text or "").lower()
+        if r.status_code == 200:
+            return "paid"
+        if r.status_code == 429:
+            return "free" if ("limit: 0" in low or 'limit": 0' in low) else "paid"
+        if r.status_code in (400, 403) and re.search(r"free[ _-]?tier|billing|not available", low):
+            return "free"
+        return ""
 
     def _list_models(self, provider: str, key: str) -> tuple[list[tuple[str, dict]], str]:
         base = self._base(provider)
@@ -543,6 +683,11 @@ class Router:
         self.discover()
         strict = ROLES[role].get("strict", False) if strict is None else strict
         pool = self.peers(role, vision) if strict else sorted(self._pool(role, vision), key=self._rank(role), reverse=True)
+        if not strict and pool:                 # a small job moves only to a model at least as capable, never a weaker one
+            cap = "vision_best" if vision or role.startswith("vision") else "reason"
+            floor = pool[0].scores.get(cap, 0) - 2
+            pinned = self._pinned(role)
+            pool = [m for m in pool if m.scores.get(cap, 0) >= floor or f"{m.provider}:{m.id}" in pinned]
         avail = [m for m in pool if m.available()]
 
         def fits_in(m: Model) -> bool:          # the same sum the request itself will be judged by
@@ -663,14 +808,11 @@ class Router:
         now = time.time()
         top = self.peers(role, vision)
         resting = sorted([m for m in top if m.cooldown_until > now], key=lambda m: m.cooldown_until)
-        weaker = [m for m in sorted(self._pool(role, vision), key=self._rank(role), reverse=True)
-                  if m not in top and m.available()]
         retry_at = (resting[0].cooldown_until + 5) if resting else now + 120
         names = "; ".join(self._when(m) for m in resting[:4]) or ", ".join(m.id for m in top[:4])
         err = LLMError(f"The strongest models for the '{ROLES[role]['name']}' job are not free right now: {names}. "
-                       "A weaker model is not used for this job unless you allow it.",
+                       "A weaker model is never used for this job; the work continues by itself as soon as one of them is free.",
                        kind="limits", retry_at=retry_at)
-        err.weaker = weaker[0].id if weaker else ""
         return err
 
     def _continue(self, m, role, system, user, images, res, max_out, temperature, label, hooks) -> Result:
@@ -922,4 +1064,94 @@ class _Skip(Exception):
     """This model cannot serve the request right now; try the next one."""
 
 
-router = Router()
+# ------------------------------------------------------------------ whose keys
+
+NO_KEYS = ("Add your own AI key first (AI keys, at the top of the page). Your keys are kept only in your browser, "
+           "so after the server restarts Scriptavera needs you to open the page once; then press Continue.")
+
+_service = Router()                                   # the keys in .env: the desktop app, or the service's own
+_people: dict[str, Router] = {}                       # owner -> that person's keys, in memory only
+_fingerprints: dict[str, str] = {}
+_people_lock = threading.Lock()
+
+
+def shared_keys() -> bool:
+    """On scriptavera.com, whether people without keys of their own may use the service's (SCRIPTAVERA_SHARED_KEYS=1)."""
+    return config.get_env("SCRIPTAVERA_SHARED_KEYS") == "1"
+
+
+def keys_fingerprint(keys: dict[str, list[str]]) -> str:
+    return hashlib.sha256(json.dumps(keys, sort_keys=True).encode()).hexdigest()
+
+
+def set_person_keys(owner: str, keys: dict[str, list[str]]) -> Router:
+    """A person's keys, for as long as this server runs: never written anywhere. The same keys sent again (each
+    time the page opens) reuse what was found out about them."""
+    fp = keys_fingerprint(keys)
+    with _people_lock:
+        if _fingerprints.get(owner) == fp and owner in _people:
+            return _people[owner]
+    r = Router(keys)
+    r.discover(True)
+    with _people_lock:
+        _people[owner], _fingerprints[owner] = r, fp
+    return r
+
+
+def drop_person_keys(owner: str) -> None:
+    with _people_lock:
+        _people.pop(owner, None)
+        _fingerprints.pop(owner, None)
+
+
+def move_person_keys(src: str, dst: str) -> None:
+    """A guest signs in: the keys they gave as a guest are now their account's."""
+    with _people_lock:
+        if src in _people and dst not in _people:
+            _people[dst], _fingerprints[dst] = _people.pop(src), _fingerprints.pop(src, "")
+
+
+def person_router(owner: str | None) -> Router | None:
+    with _people_lock:
+        return _people.get(owner) if owner else None
+
+
+class _Empty(Router):
+    """The router of someone who has given no keys: it knows no model, and says why when asked for one."""
+
+    def __init__(self) -> None:
+        super().__init__({})
+        self.discovered_at = time.time()
+
+    def discover(self, force: bool = False) -> dict:
+        return self.status
+
+    def chat(self, *a, **kw):
+        raise LLMError(NO_KEYS, "nokeys")
+
+
+_empty = _Empty()
+
+
+class _RouterProxy:
+    """`router` everywhere in the app: the router of whoever's work this is (tenancy.current()). On a computer, and
+    for work that is nobody's, the keys in .env."""
+
+    @staticmethod
+    def _target() -> Router:
+        owner = tenancy.current()
+        if owner is None:
+            return _service
+        mine = person_router(owner)
+        if mine is not None and mine.models:
+            return mine
+        return _service if shared_keys() else _empty
+
+    def __getattr__(self, name):
+        return getattr(self._target(), name)
+
+    def __setattr__(self, name, value):
+        setattr(self._target(), name, value)
+
+
+router = _RouterProxy()

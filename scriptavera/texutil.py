@@ -301,9 +301,44 @@ def clean_fragment(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", t).strip()
 
 
+_SECTIONS = r"uncertain|changes|symbols|terms|gist|kind|flags"
+_LOOP = re.compile(r"((?:\\[A-Za-z]+|[A-Za-z][^\s\\$]{0,19})[ \t]*)\1{24,}")
+_MATH_OR_MARKUP = re.compile(r"(\$\$.+?\$\$|\$[^$\n]+?\$)|(<br\s*/?>)|(</?(?:u|b|i|em|strong|mark|span|font|p|div|small|big|"
+                             r"transcript|" + _SECTIONS + r")\b[^<>$]{0,80}>)", re.S | re.I)
+
+
+def answer_transcript(answer: str) -> str:
+    """The transcription in a model's answer, however its tags came out. A reading started twice gives the last start;
+    a missing opening tag gives everything before the closing one; what follows the transcription (doubts, changes,
+    symbols) never comes with it. The same repair applies to a reading an earlier version saved with these parts."""
+    t = answer or ""
+    t = re.sub(r"<kind>.*?</kind>", "", t, flags=re.S | re.I)          # the notation survey puts its <kind> first
+    close = re.search(r"</transcript\s*>", t, re.I)
+    if close:
+        t = t[:close.start()]
+    opens = list(re.finditer(r"<transcript\b[^>]*>", t, re.I))
+    if opens:
+        t = t[opens[-1].end():]
+    later = re.search(rf"<(?:{_SECTIONS})\b[^>]*>", t, re.I)
+    if later:
+        t = t[:later.start()]
+    return t.strip()
+
+
+def looping(text: str) -> bool:
+    """A reading in which one command or word repeats endlessly ("\\quad \\quad \\quad ..."): the model broke down."""
+    return bool(_LOOP.search(text or ""))
+
+
+def collapse_loops(text: str) -> str:
+    return _LOOP.sub(lambda m: m.group(1), text or "")
+
+
 def clean_transcript(text: str) -> str:
-    """Normalise a page transcription (markdown-style with $ and $$ mathematics)."""
+    """Normalise a page transcription (markdown-style with $ and $$ mathematics). Markup a model may add outside the
+    formulas (HTML such as <u>Def</u>, or a stray tag of the answer format) is removed; the words stay."""
     t = (text or "").strip()
+    t = _MATH_OR_MARKUP.sub(lambda m: m.group(1) if m.group(1) else ("\n" if m.group(2) else ""), t)
     t = re.sub(r"^```[a-zA-Z]*\s*\n", "", t)
     t = re.sub(r"\n```\s*$", "", t)
     t = re.sub(r"(?<!\\)\\\[(.+?)\\\]", lambda m: "$$" + m.group(1).strip() + "$$", t, flags=re.S)   # not the \\[2pt] row spacer

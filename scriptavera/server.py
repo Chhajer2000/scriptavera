@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Vaibhav Chhajer
-"""Local web server: the interface and its JSON API. Listens on 127.0.0.1 only."""
+"""Web server: the interface and its JSON API. On a computer it listens on 127.0.0.1 only; as the hosted service
+(scriptavera.com on Cloud Run, see hosting.py and hosted.py) it listens on 0.0.0.0 at the port Cloud Run gives."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import os
@@ -19,8 +21,8 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from . import __version__, config, domains, final, ingest, journals, literature, paper as paperlib, pipeline, revision, store, writing
-from . import arxivpack, assist, citecheck, costs, extras, memory, phone, provenance, reviews, sources, typed, workspace
-from .llm import PROVIDERS, ROLES, LLMError, router
+from . import arxivpack, assist, citecheck, costs, extras, hosting, memory, phone, provenance, reviews, sources, tenancy, typed, workspace
+from .llm import KEY_STEPS, PROVIDERS, ROLES, LLMError, router
 
 DOWNLOADS = {
     "main.tex": "text/x-tex", "main_standard_class.tex": "text/x-tex", "references.bib": "text/plain",
@@ -29,6 +31,25 @@ DOWNLOADS = {
     "poster.tex": "text/x-tex", "poster.pdf": "application/pdf",
     "arxiv-submission.zip": "application/zip", "arxiv-metadata.txt": "text/plain; charset=utf-8",
 }
+
+
+def _fingerprint() -> str:
+    """The program's own files as they are on disk: name, size and time of change. It differs as soon as any of them
+    is changed, so that the page can tell when the program running is not the one on disk, and the browser never keeps
+    an old copy of the page's files."""
+    from pathlib import Path
+    h = hashlib.sha1()
+    for f in sorted([*Path(__file__).resolve().parent.glob("*.py"), *config.STATIC_DIR.glob("*.*")]):
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        if f.is_file():
+            h.update(f"{f.name}:{st.st_size}:{st.st_mtime_ns}\n".encode())
+    return h.hexdigest()[:12]
+
+
+BUILD = _fingerprint()           # the files this program was started with
 
 
 def ok(data=None, **kw) -> JSONResponse:
@@ -129,6 +150,15 @@ def _record_about(meta: dict, made_by: dict | None) -> dict:
 
 # ------------------------------------------------------------------ meta
 
+def _how_to_cite() -> dict:
+    """How to cite Scriptavera, in the forms people paste: a sentence, BibTeX, and the LaTeX of the reference."""
+    ref = paperlib.software_reference()
+    text = (f"V. Chhajer, {ref['title']}, {ref['venue']} ({ref['year']}), {ref['url']}"
+            + (f", doi:{ref['doi']}" if ref.get("doi") else "") + ".")
+    return {"text": text, "bibtex": paperlib.reference_bibtex(ref), "url": ref["url"],
+            "repository": paperlib.SOFTWARE["repository"], "doi": ref.get("doi") or ""}
+
+
 def _meta_payload() -> dict:
     env = {}
     for k, info in config.ENV_KEYS.items():
@@ -138,10 +168,11 @@ def _meta_payload() -> dict:
     for pid, pr in PROVIDERS.items():
         st = router.status.get(pid, {})
         providers.append({"id": pid, "label": pr["label"], "env": pr["env"], "signup": pr["signup"], "why": pr["why"],
+                          "steps": (KEY_STEPS.get(pid) or {}).get("steps", []),
                           "configured": bool(router._keys(pid)), "ok": st.get("ok", False),
                           "count": st.get("count", 0), "message": st.get("message", ""), "keys": st.get("keys", [])})
     return {
-        "version": __version__, "mock": config.mock_mode(), "domains": domains.DOMAINS,
+        "version": __version__, "stale": _fingerprint() != BUILD, "mock": config.mock_mode(), "domains": domains.DOMAINS,
         "phases": store.PHASES, "stages": store.STAGES,
         "roles": ROLES, "providers": providers, "plan": router.plan() if router.models else {},
         "models": [m.public() for m in router.models], "settings": config.load_settings(), "env": env, "memory": memory.stats(),
@@ -151,24 +182,40 @@ def _meta_payload() -> dict:
         "families": [{"id": f["id"], "name": f["name"], "house": f["house"], "template": f["template"]}
                      for f in journals.FAMILIES if f["id"] != "generic"],
         "statements": [{"id": k, "name": name} for k, name in paperlib.STATEMENTS],
+        "cite": _how_to_cite(),
         "identity": {k: v for k, v in _identity_public().items() if k in ("fingerprint", "error")},
+        # a key on a provider's free tier: what is sent with it may be used to train models and be read by people
+        # (or on a plan that may train on it: Mistral unless the plan is known to be paid, OpenRouter without credits)
+        "free_tier_keys": any(k.get("leak") or k.get("tier") == "free" for pr in providers for k in pr.get("keys") or []),
     }
 
 
 async def api_meta(request: Request):
+    if hosting.public() and request.scope.get("scriptavera", {}).get("admin"):
+        tenancy.set_owner(None)              # the administrators' settings show the service's own keys
     if not router.discovered_at:
         await run_in_threadpool(router.discover)
-    return ok(_meta_payload())
+    data = _meta_payload()
+    if hosting.public():
+        from . import hosted
+        ident = hosted.identity(request)
+        data["hosted"] = {"public": True, "admin": ident.get("admin", False), "signed_in": bool(ident.get("uid"))}
+        if not ident.get("admin"):           # the service's keys and settings are its administrators' business
+            data["env"] = {k: {"label": v["label"], "set": False, "shown": ""} for k, v in config.ENV_KEYS.items()}
+            for pr in data["providers"]:
+                pr["keys"] = [{"n": k.get("n"), "ok": k.get("ok"), "tier": k.get("tier")} for k in pr.get("keys") or []]
+                pr["message"] = ""
+    return ok(data)
 
 
 # What "the source" is: the program, its tests and its terms. Never the author's papers, keys or settings: only
 # files of known kinds, inside the program's own folders, no hidden files and no links that lead elsewhere.
 SOURCE_FILES = ("app.py", "run_app.bat", "requirements.txt", "README.md", "LICENSE", "LICENSING.md", "CLA.md",
                 "CONTRIBUTING.md", "TRADEMARKS.md", "THIRD_PARTY_NOTICES.md", "CITATION.cff", "funding.json",
-                ".gitignore")
-SOURCE_DIRS = ("scriptavera", "tests", "docs", ".github")
+                ".gitignore", "Dockerfile", ".dockerignore", "DEPLOY.md")
+SOURCE_DIRS = ("scriptavera", "tests", "docs", ".github", "supabase")
 SOURCE_KINDS = {".py", ".js", ".mjs", ".css", ".html", ".svg", ".png", ".woff2", ".woff", ".ttf", ".md", ".txt", ".bat",
-                ".cff", ".yml", ".yaml", ""}
+                ".cff", ".yml", ".yaml", ".sql", ""}
 
 
 def source_files() -> list:
@@ -225,6 +272,7 @@ async def api_source(request: Request):
 
 
 async def api_settings(request: Request):
+    tenancy.set_owner(None)                  # the keys in .env (on scriptavera.com: the service's, set by its admins)
     body = await _body(request)
     env = {k: str(v).strip() for k, v in (body.get("env") or {}).items() if k in config.ENV_KEYS}
     if env:
@@ -253,6 +301,7 @@ async def api_test_mode(request: Request):
 
 
 async def api_test(request: Request):
+    tenancy.set_owner(None)
     await run_in_threadpool(router.discover, True)
     return ok(_meta_payload())
 
@@ -268,6 +317,9 @@ async def api_journals(request: Request):
 
 async def api_projects(request: Request):
     out = store.list_projects()
+    if hosting.public():                                 # only this person's papers (or this browser's, as a guest)
+        from . import hosted
+        out = await run_in_threadpool(hosted.visible, request, out)
     for x in out:
         x["running"] = pipeline.is_running(x["id"])     # papers carry on in the background while you work on another
     return ok(projects=out)
@@ -286,6 +338,15 @@ async def api_name(request: Request):
 
 
 async def api_create(request: Request):
+    public = hosting.public()
+    if public:
+        from . import hosted
+        refusal = await run_in_threadpool(hosted.precheck, request)    # no free paper left: say so before anything
+        if refusal:
+            return refusal
+        refusal = hosted.keys_ready()                                    # nothing could read the notes yet
+        if refusal:
+            return refusal
     form = await request.form()
     try:
         meta = json.loads(form.get("meta") or "{}")
@@ -322,8 +383,16 @@ async def api_create(request: Request):
     made_by, why = _declaration(meta, authors)
     if not made_by:
         return fail(why)
+    release = lambda: None                                                      # noqa: E731
+    sign_ok, unsigned_why = True, ""
+    if public:
+        refusal, release = await run_in_threadpool(hosted.claim, request)     # one free paper, taken atomically
+        if refusal:
+            return refusal
+        sign_ok, unsigned_why = await run_in_threadpool(hosted.can_sign, request)
+    opt_in = meta.get("dataset_opt_in") is True       # unticked unless the author ticks it
     clean = {
-        "name": (meta.get("name") or files[0][0]).strip()[:120],
+        "name": _tidy_name(meta.get("name") or files[0][0])[:120],
         "domains": doms[:3], "subarea": (meta.get("subarea") or "").strip()[:300],
         "hints": (meta.get("hints") or "").strip()[:1500], "title": (meta.get("title") or "").strip()[:300],
         "authors": authors,
@@ -333,19 +402,25 @@ async def api_create(request: Request):
         "files": [n for n, _ in files],
         "journal": journals.clean_journal(meta.get("journal")), "statements": {},
         "declaration": {**made_by, "text": declaration_text(authors, made_by), "at": time.time()},
+        "dataset_opt_in": opt_in,
+        "cite_software": True,        # the paper declares and cites Scriptavera; the author can remove it
     }
     pid = store.new_id()
     folder = config.PROJECTS_DIR / pid
-    try:                    # before anything else is done with the notes: keep them, fingerprint them, sign the record
-        await run_in_threadpool(provenance.make_record, folder, files, _record_about(clean, made_by))
-    except Exception as e:  # noqa: BLE001 - a missing library must not stop the paper; the author is told on the page
-        (folder / "proof").mkdir(parents=True, exist_ok=True)
-        (folder / "proof" / "error.txt").write_text(f"The record could not be made: {e}", encoding="utf-8")
+    if not sign_ok:         # the hosted service signs only for people signed in with Google Drive connected
+        hosted.lock_record(folder, unsigned_why)
+    else:
+        try:                # before anything else is done with the notes: keep them, fingerprint them, sign the record
+            await run_in_threadpool(provenance.make_record, folder, files, _record_about(clean, made_by))
+        except Exception as e:  # noqa: BLE001 - a missing library must not stop the paper; the author is told on the page
+            (folder / "proof").mkdir(parents=True, exist_ok=True)
+            (folder / "proof" / "error.txt").write_text(f"The record could not be made: {e}", encoding="utf-8")
     try:
         pages = await run_in_threadpool(_ingest_any, files, folder, 0)
     except Exception as e:  # noqa: BLE001
         import shutil
         shutil.rmtree(folder, ignore_errors=True)
+        await run_in_threadpool(release)                  # the free paper is given back
         return fail(f"Could not read the upload: {e}")
     tinfo = json.loads((folder / "typed.json").read_text(encoding="utf-8")) if (folder / "typed.json").exists() else {}
     if tinfo.get("title") and not clean["title"]:
@@ -353,9 +428,11 @@ async def api_create(request: Request):
     if tinfo:
         clean["typed"] = tinfo.get("kind")
     tm = config.load_settings().get("test_mode") or {}
-    if tm.get("on") and tm.get("before"):        # a test paper keeps its limits, whatever is switched later
-        clean["test"] = {"before": tm["before"], "exclude": tm.get("exclude") or [], "at": time.time()}
+    if tm.get("on") and tm.get("before") and (not public or hosted.identity(request).get("admin")):
+        clean["test"] = {"before": tm["before"], "exclude": tm.get("exclude") or [], "at": time.time()}   # kept with the paper
     store.create(clean, pages, pid)
+    if public:
+        await run_in_threadpool(hosted.register, request, pid, clean, opt_in, sign_ok)
     if provenance.status(folder):
         provenance.work_later(folder)     # the timestamps are asked for in the background; only fingerprints leave
     return ok(id=pid)
@@ -396,7 +473,6 @@ def _bundle(p: store.Project) -> dict:
         "statements": meta.get("statements") or {},
         "paper": p.load("paper"), "calls": p.calls(300),
         "downloads": [n for n in DOWNLOADS if (p.dir / "out" / n).exists()],
-        "kept": (p.dir / "out_before_update").exists(),
         "proof": _proof_info(p),
         "editor": {"exists": workspace.exists(p), "can": (p.dir / "out" / "main.tex").exists()},
         "katex_macros": (p.load("typed") or {}).get("katex", {}),
@@ -410,8 +486,12 @@ def _proof_info(p: store.Project) -> dict:
     if s:
         return s
     err = p.dir / "proof" / "error.txt"
-    return {"missing": True, "error": err.read_text(encoding="utf-8") if err.exists() else "",
-            "originals": (p.dir / provenance.ORIGINALS).exists()}
+    locked = ""
+    if hosting.public():
+        from . import hosted
+        locked = hosted.locked_reason(p.dir)
+    return {"missing": True, "error": locked or (err.read_text(encoding="utf-8") if err.exists() else ""),
+            "locked": bool(locked), "originals": (p.dir / provenance.ORIGINALS).exists()}
 
 
 async def api_project(request: Request):
@@ -423,6 +503,9 @@ async def api_project(request: Request):
         pipeline.disarm(p.id)
         await run_in_threadpool(pipeline.wait_stopped, p.id, 8.0)
         store.delete(p.id)
+        if hosting.public():
+            from . import hosted
+            await run_in_threadpool(hosted.deleted, p.id)
         return ok()
     ready = any(m.vision and not m.dead for m in router.models)
     got = await run_in_threadpool(pipeline.recover_pages, p) if ready else []
@@ -445,9 +528,15 @@ async def api_project(request: Request):
     return ok(await run_in_threadpool(_bundle, p))
 
 
+def _tidy_name(name: str) -> str:
+    """A paper's name as a person writes it: a name taken from a file ("Martin_Palmer_Talk_Notes") gets its spaces."""
+    name = str(name or "").strip()
+    return re.sub(r"_+", " ", name).strip() if "_" in name and " " not in name else name
+
+
 async def api_run(request: Request):
-    """Start, continue, or redo from a step. `relax` lets the next best model do the step that is waiting for
-    the strongest one."""
+    """Start, continue, or redo from a step. A step waiting for the strongest models keeps waiting for them: a weaker
+    model is never used."""
     p = _project(request)
     if not p:
         return fail("Project not found.", 404)
@@ -457,6 +546,9 @@ async def api_run(request: Request):
     if not router.discovered_at:
         await run_in_threadpool(router.discover)
     if not any(m.vision and not m.dead for m in router.models):
+        if hosting.public():
+            from .llm import NO_KEYS
+            return fail(NO_KEYS, 400)
         return fail("No model that can read images is available. Add a Google Gemini key in Settings (free), "
                     "or a Groq key.")
     frm = body.get("from")
@@ -464,14 +556,11 @@ async def api_run(request: Request):
         pipeline.disarm(p.id)
         p.reset_from(frm)
     else:                                   # continue: clear the stopped state, keep everything that is finished
-        relax = bool(body.get("relax"))
-
         def f(st):
             st["error"] = None
             for s in st["stages"].values():
+                s.pop("relax", None)                # set by an earlier version, which let a weaker model step in
                 if s.get("status") in ("error", "running", "paused"):
-                    if relax and s.get("status") == "paused":
-                        s["relax"] = True
                     s["status"], s["resume_at"], s["auto_tries"] = "pending", None, 0
         p.update_state(f)
     pipeline.start(p)
@@ -713,11 +802,11 @@ async def api_figure_image(request: Request):
     fid = request.path_params.get("fid", "")
     if not p or not fid.isalnum():
         return Response(status_code=404)
-    kind = "tikz" if request.query_params.get("kind") == "tikz" else "orig"
+    kind = request.query_params.get("kind") if request.query_params.get("kind") in ("tikz", "check") else "orig"
     path = pipeline.figure_file(p, fid, kind)
     if not path.exists():
         return Response(status_code=404)
-    return FileResponse(path, media_type="image/png" if kind == "tikz" else "image/jpeg", headers={"Cache-Control": "no-store"})
+    return FileResponse(path, media_type="image/jpeg" if kind == "orig" else "image/png", headers={"Cache-Control": "no-store"})
 
 
 async def api_figure(request: Request):
@@ -934,8 +1023,9 @@ async def api_journal(request: Request):
         return fail("Wait for the current run to finish.")
     journal = body.get("journal") if "journal" in body else p.state.get("meta", {}).get("journal")
     statements = body.get("statements") if isinstance(body.get("statements"), dict) else None
+    cite = body.get("cite_software") if isinstance(body.get("cite_software"), bool) else None
     try:
-        paper = await run_in_threadpool(final.set_journal, p, journal, statements)
+        paper = await run_in_threadpool(final.set_journal, p, journal, statements, cite)
     except LLMError as e:
         return fail(str(e))
     meta = p.state.get("meta", {})
@@ -1007,6 +1097,14 @@ async def api_download(request: Request):
     path = p.dir / "out" / name
     if not path.exists():
         return Response(status_code=404)
+    if hosting.public():
+        from . import hosted
+        await run_in_threadpool(hosted.downloaded, p.id, name)    # a finished paper downloaded: its notes can be purged
+    if name == "paper.zip" and provenance.status(p.dir):
+        from . import hosted
+        data = await run_in_threadpool(hosted.paper_zip_with_proof, p)     # with the record, its .tsr and SHA256SUMS
+        return Response(data, media_type=DOWNLOADS[name], headers={"Content-Disposition": 'attachment; filename="paper.zip"',
+                                                                    "Cache-Control": "no-store"})
     inline = name in ("paper.html", "paper.pdf") and request.query_params.get("view")
     return FileResponse(path, media_type=DOWNLOADS[name],
                         filename=None if inline else name,
@@ -1032,7 +1130,7 @@ def _editor_project(request: Request) -> store.Project | None:
 
 
 async def editor_page(request: Request):
-    return FileResponse(config.STATIC_DIR / "editor.html", headers={"Cache-Control": "no-store"})
+    return _page("editor.html")
 
 
 async def api_editor(request: Request):
@@ -1242,6 +1340,10 @@ def _resolve_for(p: store.Project, ident: str):
 async def import_paper(request: Request):
     """A paper written elsewhere (a .tex file, or an Overleaf project as a .zip), opened in the editor for a
     referee's report or the proofs. Nothing is read by a model and no pipeline runs on it."""
+    if hosting.public():
+        from . import hosted
+        if not hosted.identity(request).get("uid"):
+            return fail("Sign in with Google to import a LaTeX paper.", 401)
     form = await request.form()
     files = []
     for f in form.getlist("files"):
@@ -1269,6 +1371,8 @@ async def import_paper(request: Request):
     except workspace.WorkspaceError as e:
         store.delete(pid)
         return fail(str(e))
+    if hosting.public():
+        await run_in_threadpool(hosted.register, request, pid, meta, False, False)
     return ok(id=pid)
 
 
@@ -1438,7 +1542,7 @@ async def api_editor_assist(request: Request):
         if isinstance(body.get("error"), dict):
             prop = await run_in_threadpool(assist.explain_error, p, body["error"])
         else:
-            prop = await run_in_threadpool(assist.run, p, str(body.get("command") or "")[:4000], where, bool(body.get("relax")))
+            prop = await run_in_threadpool(assist.run, p, str(body.get("command") or "")[:4000], where)
     except assist.AssistError as e:
         return fail(str(e))
     except workspace.WorkspaceError as e:
@@ -1473,6 +1577,12 @@ async def api_proof(request: Request):
     body = await _body(request)
     action = body.get("action")
     meta = p.state.get("meta", {})
+    if hosting.public() and action in ("record_now", "version", "retry"):
+        from . import hosted
+        allowed, why = await run_in_threadpool(hosted.can_sign, request)
+        if not allowed:
+            return fail(why, 403)
+        (p.dir / "proof" / "locked.json").unlink(missing_ok=True)
     try:
         if action == "record_now":
             if provenance.status(p.dir):
@@ -1591,8 +1701,13 @@ async def api_identity(request: Request):
     return ok(identity=me)
 
 
+def _page(name: str) -> Response:
+    html = (config.STATIC_DIR / name).read_text(encoding="utf-8").replace("{{build}}", BUILD)
+    return Response(html, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
+
+
 async def index(request: Request):
-    return FileResponse(config.STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
+    return _page("index.html")
 
 
 routes = [
@@ -1666,35 +1781,99 @@ routes = [
 
 
 class LocalOnly:
-    """The app serves only this computer. A request must name this computer as its host (which stops a web page from
-    reaching the app through a renamed address), and a request that changes anything must come from the app's own
-    page (which stops another website from sending it orders through the browser)."""
-    HOSTS = ("127.0.0.1", "localhost", "[::1]")
+    """Which requests are served.
+
+    On a computer, the app serves only that computer: a request must name it as its host (which stops a web page
+    from reaching the app through a renamed address), and a request that changes anything must come from the app's
+    own page (which stops another website from sending it orders through the browser).
+
+    The host names of the hosted service are accepted too: scriptavera.com, www.scriptavera.com and any listed in
+    SCRIPTAVERA_ALLOWED_HOSTS (a name starting with a dot, like .run.app, stands for every name ending so). As the
+    hosted service (hosting.public()), www.scriptavera.com and the .org domain are sent on to https://scriptavera.com,
+    and every request then goes through hosted.gate: who is asking, and whether the paper asked for is theirs."""
+    HOSTS = hosting.LOCAL_HOSTS
 
     def __init__(self, app):
         self.app = app
 
+    @staticmethod
+    def _host_ok(host: str) -> bool:
+        allowed = hosting.allowed_hosts()
+        return host in allowed or any(a.startswith(".") and host.endswith(a) for a in allowed)
+
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
-            host = headers.get("host", "").rsplit(":", 1)[0] if not headers.get("host", "").startswith("[") \
-                else headers.get("host", "").split("]")[0] + "]"
-            bad = host not in self.HOSTS
+            raw_host = headers.get("host", "").lower()
+            host = raw_host.rsplit(":", 1)[0] if not raw_host.startswith("[") else raw_host.split("]")[0] + "]"
+            public = hosting.public()
+            canonical = hosting.canonical_host()
+            if public and (host in hosting.redirect_hosts() or host == "www." + canonical):
+                target = "https://" + canonical + (scope.get("raw_path") or scope.get("path", "/").encode()).decode("latin-1")
+                if scope.get("query_string"):
+                    target += "?" + scope["query_string"].decode("latin-1")
+                await send({"type": "http.response.start", "status": 301,
+                            "headers": [(b"location", target.encode("latin-1")), (b"content-length", b"0")]})
+                await send({"type": "http.response.body", "body": b""})
+                return
+            bad = not self._host_ok(host)
             if not bad and scope.get("method", "GET") not in ("GET", "HEAD", "OPTIONS"):
                 origin = headers.get("origin")
                 if origin and origin != "null":
-                    o = origin.split("://", 1)[-1]
+                    o = origin.split("://", 1)[-1].lower()
                     o_host = o.split("]")[0] + "]" if o.startswith("[") else o.rsplit(":", 1)[0]
-                    bad = o_host not in self.HOSTS or o != headers.get("host", "")
+                    bad = not self._host_ok(o_host) or o != raw_host
                 elif origin == "null":
                     bad = True
             if bad:
                 await send({"type": "http.response.start", "status": 403,
                             "headers": [(b"content-type", b"application/json")]})
                 await send({"type": "http.response.body",
-                            "body": b'{"ok": false, "error": "Requests are accepted only from this app on this computer."}'})
+                            "body": b'{"ok": false, "error": "Requests are accepted only from this app on this computer."}'
+                            if not public else b'{"ok": false, "error": "This address is not served by Scriptavera."}'})
                 return
+            extra: list = []
+            if public:
+                from . import hosted
+                refusal, extra = await hosted.gate(scope, headers)
+                if refusal is not None:
+                    async def send_refusal(message):
+                        if message["type"] == "http.response.start":
+                            message = {**message, "headers": [*message.get("headers", []), *extra]}
+                        await send(message)
+                    await refusal(scope, receive, send_refusal)
+                    return
+            static = scope.get("path", "").startswith("/static/")
+
+            async def marked(message):
+                # every answer names the files this program was started with: a page loaded from other files reloads
+                # itself; the page's own files are always asked for again (an unchanged one costs only a short answer)
+                if message["type"] == "http.response.start":
+                    hs = [h for h in message.get("headers", []) if not (static and h[0].lower() == b"cache-control")]
+                    hs.append((b"x-scriptavera-build", BUILD.encode()))
+                    if static:
+                        hs.append((b"cache-control", b"no-cache"))
+                    hs.extend(extra)
+                    message = {**message, "headers": hs}
+                await send(message)
+            await self.app(scope, receive, marked)
+            return
         await self.app(scope, receive, send)
+
+
+def _signing_key_from_env() -> None:
+    """On Cloud Run the container's files are new at every start, so the service's signing key comes from Secret
+    Manager (SCRIPTAVERA_SIGNING_KEY_PEM): every record is then signed with the same key."""
+    pem = (os.environ.get("SCRIPTAVERA_SIGNING_KEY_PEM") or "").strip()
+    if not pem:
+        return
+    d = provenance.identity_dir()
+    key = d / "signing-key.pem"
+    if not key.exists() or key.read_text(encoding="ascii", errors="ignore").strip() != pem:
+        d.mkdir(parents=True, exist_ok=True)
+        key.write_text(pem + "\n", encoding="ascii")
+        if not (d / "identity.json").exists():
+            (d / "identity.json").write_text(json.dumps({"created": time.time()}), encoding="utf-8")
 
 
 def create_app():
@@ -1704,8 +1883,25 @@ def create_app():
         mimetypes.add_type(kind, ext)     # Windows can map .js to text/plain in its registry; modules then refuse to load
     config.load_env()
     config.PROJECTS_DIR.mkdir(exist_ok=True)
+    _signing_key_from_env()
     _recover()
-    return LocalOnly(Starlette(routes=routes))
+    all_routes = list(routes)
+    if hosting.public():
+        from . import hosted
+        all_routes = [*hosted.routes(), *routes]
+        hosted.start()                    # checkpoints, the opt-in test suite, purging, the audit ledger
+    return LocalOnly(Starlette(routes=all_routes))
+
+
+def serve() -> None:
+    """The hosted service: every interface (0.0.0.0) at the port Cloud Run gives in PORT (8080 by default).
+    One process: the papers being made run in its background threads."""
+    import uvicorn
+    port = int(os.environ.get("PORT") or "8080")
+    host = os.environ.get("SCRIPTAVERA_HOST") or "0.0.0.0"
+    print(f"Scriptavera {__version__} listening on {host}:{port}" + (" (hosted service)" if hosting.public() else ""), flush=True)
+    uvicorn.run(create_app(), host=host, port=port, log_level=os.environ.get("SCRIPTAVERA_LOG_LEVEL", "info"),
+                proxy_headers=False, server_header=False, timeout_keep_alive=75)
 
 
 def _recover() -> None:

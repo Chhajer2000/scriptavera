@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 
-from . import assist, prompts
+from . import assist, prompts, tenancy
 from . import workspace as W
 from .llm import LLMError
 from .store import Project
@@ -136,6 +136,7 @@ def propose(p: Project, rnd: dict, pt: dict, extra: str = "") -> None:
 
 
 def _work(p: Project, rid: str) -> None:
+    tenancy.set_owner(tenancy.of_project(p.id))      # the paper's owner's keys, in this thread
     rnd = get_round(p, rid)
     try:
         if not rnd["points"]:

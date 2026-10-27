@@ -47,11 +47,15 @@ used that way.
 5. **Your confirmation.** You confirm the topic and every symbol or term the notes use without defining. A page button
    marks on your page where the symbol was read.
 6. *Deep reading.* A refined search, then the most relevant papers are read one by one.
-7. *Final transcription.* Every page read again with the confirmed notation and the research context.
+7. *Final transcription.* Every page read again with the confirmed notation and the research context. A reading that
+   breaks down (one command repeated endlessly, or parts of the model's answer left in it) is asked for once more.
 8. *Figures.* Each drawing is judged from the text around it (see below). A figure the paper's reader needs is
-   redrawn as a proper figure; a drawing that only explains your argument, as most drawings in proofs and proof
-   sketches do, is not printed and not redrawn, but the writers still read it. Labels you wrote on a formula with
-   arrows or braces are not figures: they are written into the formula as braces with the label under the term.
+   redrawn as a proper figure: its ink is measured (the pen strokes of a PDF, or the scanned image), straightened
+   and aligned, and its labels are typeset at the size you wrote them; a model only reads the labels and checks the
+   redrawing against your drawing, and anything that does not match is shown to you. A drawing that only explains
+   your argument, as most drawings in proofs and proof sketches do, is not printed and not redrawn, but the writers
+   still read it. Labels you wrote on a formula with arrows or braces are not figures: they are written into the
+   formula as braces with the label under the term.
 9. **Your review.** You check the transcript against the page images and say, for each figure for the paper, whether
    the redrawn version is what you drew (or ask for it to be drawn again, use your own drawing, keep it out of the
    paper, or leave it out). A drawing judged to be only an explanation is settled without a question: you see why,
@@ -162,13 +166,6 @@ itself, so the decision does not depend on how well a model reads a sketch:
   completion of that proof (below) is written and checked with your drawings for it in view: it may put into words
   what a drawing shows, and nothing more.
 
-When a redrawn figure was drawn by a weaker model (only if you allowed one for that step), its card says so, so that
-you compare it closely or use your own drawing.
-
-Notes read by an earlier version of the app, whose transcript is not yet approved, have their Figures step done again
-by itself: the old drawings are discarded, the transcript and your answers to doubts are kept, and **Continue** judges
-and redraws the drawings as described here.
-
 ## Completing a sketched proof
 
 When the assessment finds that a proof is only sketched, the proof check offers a completed proof that follows your
@@ -201,39 +198,43 @@ keep your sketch.
 
 ## Which model does which job
 
-For the jobs that decide the quality of the paper (reading the handwriting, understanding, writing, checking proofs,
-refereeing, copy-editing) only the strongest model your keys can use is used. A lesser model never steps in by itself.
+**First, each key is checked.** When the app starts, it sends one tiny request with each Gemini key to a model that
+only Google's paid tier serves. A free key is refused ("limit: 0"), so for that key Pro and Argon are set aside before
+any work is given to it, and its jobs go straight to the best model it can use. Settings shows each key with its tier.
 
-How models are ranked: each job has a score for every model your keys reach. Gemini models are ranked by tier first,
-then by version: Gemini 4 Argon (Google's flagship), then Pro, then Flash, then Flash-Lite, and within a tier the newer
-version first. So 3.1 Pro comes before 3.8 Flash, and 3.8 Flash before 3.6 Flash. Argon and Pro are not on Google's free
-tier: on a free key the first request is refused with "limit: 0", the app notes that the model does not work on that
-key, and the job goes to the strongest model the key can use, all in the same request. For the small tasks (the first
-look at the pages, search queries, scoring) the fast, cheap models come first.
+**How models are ranked.** Each job has a score for every model your keys reach. Gemini models are ranked by tier
+first, then by version: Gemini 4 Argon (Google's flagship), then Pro, then Flash, then Flash-Lite, and within a tier
+the newer version first. So 3.1 Pro comes before 3.8 Flash, and 3.8 Flash before 3.6 Flash.
+
+**The jobs that decide the quality of the paper** (reading the handwriting, the figures, understanding, writing,
+checking proofs, refereeing, copy-editing) use the best model on one key after the other: when the first key reaches
+its limit for that model, the same model continues on the second key. When every key has reached it, the next best
+model takes over, again key after key, but only a model almost as good: the same tier and a version at most 0.25
+lower. With free keys that is 3.8 Flash, then 3.7 Flash, then 3.6 Flash. A weaker model (an older Flash, Flash-Lite, or
+another provider's smaller model) is never used for these jobs. If none of them is free, the step **waits**, shows
+when it will continue, and restarts by itself at that time from the exact point where it stopped. The small tasks (the
+first look at the pages, search queries, scoring) use fast models, and move only to a model at least as capable.
+
+**Why one model does several jobs.** Each job chooses its own model. A free key opens only Flash and Flash-Lite, and
+3.8 Flash is the strongest of these at reading handwriting and at mathematical reasoning alike, so it is chosen for
+every job above; with a paid key, Argon would be. Each model has its own daily allowance, so when 3.8 Flash has used
+its allowance on every key, 3.7 Flash and then 3.6 Flash carry on.
 
 Several keys for one provider are written in `.env` on one line, separated by commas
-(`GEMINI_API_KEY=first,second`). They are used one after the other: when a key reaches its limit for a model, the same
-model continues on the next key. Settings shows each key's state on its own. Google counts limits per project, so a
-second key helps only if it comes from a different Google Cloud project; it reaches Pro or Argon only if that project
-has billing enabled (Argon costs $2 per million input and $10 per million output tokens until 30 November 2026, then
-$4 and $20).
+(`GEMINI_API_KEY=first,second`). Google counts limits per project, so a second key helps only if it comes from a
+different Google Cloud project; it reaches Pro or Argon only if that project has billing enabled (Argon costs $2 per
+million input and $10 per million output tokens until 30 November 2026, then $4 and $20).
 
-If none of the strongest models is free (a daily limit, an overloaded provider), the step **waits**. The app shows when
-it will continue, and restarts by itself at that time from the exact point where it stopped. If you would rather not
-wait, a button lets the next best model do that one step; the step is marked, and can be redone later.
-
-With free keys this matters. A paper needs roughly ninety calls to the strongest model, and free daily allowances are
-small, so a run can take more than a day, most of it waiting. Your allowances are shown at
-https://aistudio.google.com/rate-limit. A paid key, or a second key from a different Google project, removes most of the waiting.
+With free keys the waiting matters. A paper needs roughly ninety calls to the strongest model, and free daily
+allowances are small, so a run can take more than a day, most of it waiting. Your allowances are shown at
+https://aistudio.google.com/rate-limit. A paid key, or a second key from a different Google project, removes most of
+the waiting.
 
 ## Stopping and continuing
 
 Everything is saved after every step, and inside the long steps after every page, section or proof. **Continue**
 carries on from the exact point; **Start over** discards the results and begins again; **Redo from this step** repeats one
 step and what follows it. If a step fails, the reason is shown.
-
-A paper started with an earlier version of the app keeps its reading, confirmed notation and transcript. The paper
-itself is written again by the new steps; the one built earlier is kept in the folder `out_before_update`.
 
 ## Literature
 
@@ -347,8 +348,8 @@ Bharatiya Sakshya Adhiniyam, 2023 asks for a certificate that includes the recor
 
 Keep a copy of the folder `identity` somewhere safe: records already made stay verifiable without it, but new records
 can be signed with the same key only with it. Timestamping can be turned off in Settings; the signed record is made
-either way. Papers started before this version have no record: the chip offers to make one from the page images
-Scriptavera kept, and such a record says that it was made later.
+either way. For a paper that has no record yet, the chip offers to make one from the page images Scriptavera kept;
+such a record says that it was made later.
 
 ### How this compares with arXiv
 
@@ -420,3 +421,26 @@ The papers and files Scriptavera produces from your notes are yours, under any t
 section 3). Contributions are accepted under the Contributor Licence Agreement in `CLA.md` (see `CONTRIBUTING.md`).
 The AGPL grants no rights to the name Scriptavera or its logo (`TRADEMARKS.md`). Third-party parts keep their own
 licences (`THIRD_PARTY_NOTICES.md`).
+
+## How to cite Scriptavera
+
+If you used Scriptavera in preparing a paper, a talk or a thesis, please cite it, as you would cite GAP or SageMath:
+
+> V. Chhajer, *Scriptavera: faithful conversion of handwritten research notes into papers*, Software, version 1.0
+> (2026), https://scriptavera.com.
+
+```bibtex
+@misc{scriptavera,
+  author       = {Chhajer, Vaibhav},
+  title        = {{Scriptavera: faithful conversion of handwritten research notes into papers}},
+  year         = {2026},
+  note         = {Software, version 1.0},
+  howpublished = {\url{https://scriptavera.com}},
+  url          = {https://scriptavera.com}
+}
+```
+
+Every paper Scriptavera makes ends, by default, with a short statement of what Scriptavera did for it (the
+declaration of AI-assisted tools that most journals require; for Elsevier journals under the heading they ask for),
+citing this entry. The author can remove both under Journal, Your statements. `CITATION.cff` holds the same
+information for GitHub's "Cite this repository" button and for Zenodo.

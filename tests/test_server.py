@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Vaibhav Chhajer
 """The JSON API over real HTTP, with simulated models: every route, the three stops for the author, waiting for
-the strongest model, the author's permission to use the next best one, automatic restart, redoing a step."""
+the strongest model (never a weaker one), automatic restart, redoing a step; the page and the program it talks to."""
 import json, os, socket, threading, time
 from helpers import ROOT, isolate, pages_pdf
 tmp = isolate("scriptavera_srv_")
@@ -53,6 +53,24 @@ def answers(b):
             "topic": {"problem": b["topic"]["problem"]}, "answers": [], "extra": [{"symbol": "\\int", "meaning": "the Riemann integral"}],
             "instructions": "Write log for the natural logarithm."}
 
+
+# ------------------------------------------------------------------ the page and the program it talks to
+from scriptavera import server as srvmod
+page = requests.get(B + "/", timeout=30)
+assert f"/static/app.js?b={srvmod.BUILD}" in page.text and "{{build}}" not in page.text and "?v=" not in page.text
+assert page.headers["x-scriptavera-build"] == srvmod.BUILD and page.headers["cache-control"] == "no-store"
+js = requests.get(B + f"/static/app.js?b={srvmod.BUILD}", timeout=30)
+assert js.ok and js.headers["cache-control"] == "no-cache" and js.headers["x-scriptavera-build"] == srvmod.BUILD
+again = requests.get(B + f"/static/app.js?b={srvmod.BUILD}", headers={"If-None-Match": js.headers["etag"]}, timeout=30)
+assert again.status_code == 304, again.status_code                 # unchanged: a short answer
+assert f"/static/editor.js?b={srvmod.BUILD}" in requests.get(B + "/editor/x", timeout=30).text
+assert call("GET", "/api/meta")["stale"] is False and call("GET", "/api/meta")["version"] == "1.0"
+real = srvmod._fingerprint
+srvmod._fingerprint = lambda: "changed-on-disk"
+assert call("GET", "/api/meta")["stale"] is True, "files changed while the program runs: the page says so"
+srvmod._fingerprint = real
+print("0. the page names the files the program was started with; its own files are always asked for again; "
+      "files changed while it runs are reported")
 
 # ------------------------------------------------------------------ meta, journals, creation
 m = call("GET", "/api/meta")
@@ -120,22 +138,21 @@ post(f"/api/projects/{pid}/reglossary")
 assert "still need your confirmation" in post(f"/api/projects/{pid}/confirm", {"glossary": []}, 400)["error"]
 assert "not at the review step" in post(f"/api/projects/{pid}/review", expect=400)["error"]
 
-# the strongest reader is resting when page 3 is transcribed: the step waits, and says which model could step in
+# the strongest reader is resting when page 3 is transcribed: the step waits for it, and never lets a weaker one in
 os.environ.update(SCRIPTAVERA_MOCK_FAIL="busy:Transcribe page 3", SCRIPTAVERA_MOCK_RESET="4")
 post(f"/api/projects/{pid}/confirm", answers(b))
 b = wait(pid, "transcribe", ("paused",))
 s = b["state"]["stages"]["transcribe"]
-assert s["reason"] == "limits" and s["weaker"] == "sim-small" and 3 < s["resume_at"] - time.time() < 12, s
+assert s["reason"] == "limits" and not s.get("weaker") and 3 < s["resume_at"] - time.time() < 12, s
 assert "strongest models for the 'Handwriting transcriber' job are not free" in s["error"] and "sim-vision (daily limit reached" in s["error"], s["error"]
+assert "weaker model is never used" in s["error"], s["error"]
 assert list(b["transcript"]["pages"]) == ["1", "2"], "the pages finished before the wait are kept"
 assert next(x for x in call("GET", "/api/projects")["projects"] if x["id"] == pid)["paused"]
-post(f"/api/projects/{pid}/run", {"relax": True})                       # the author allows the next best model for this step
-b = wait(pid, "review", seconds=60, allow=("figures",))                 # the next step waits by itself until the strong model is back
+b = wait(pid, "review", seconds=60, allow=("transcribe", "figures"))   # it carries on by itself when the strong model is back
 s = b["state"]["stages"]
-assert s["transcribe"]["relax"] and s["transcribe"]["stand_in"] == {"wanted": ["sim-vision", "sim-text"], "used": {"sim-small": 5}}, s["transcribe"]
-assert b["transcript"]["pages"]["2"]["model"] == "sim-vision" and b["transcript"]["pages"]["3"]["model"] == "sim-small"
+assert "stand_in" not in s["transcribe"] and all(v["model"] == "sim-vision" for v in b["transcript"]["pages"].values()), s["transcribe"]
 assert "stand_in" not in s["figures"] and s["figures"]["model"] == "mock:sim-vision", s["figures"]
-print("waited for the strongest model; the author let the next best one finish one step; the following step restarted by itself")
+print("waited for the strongest model, never a weaker one, and carried on by itself")
 
 # ------------------------------------------------------------------ second stop: transcript and figures
 # doubts about language saved by an earlier version of the app are not shown either, and nothing on disk changes

@@ -25,6 +25,9 @@ async function api(path, opts = {}) {
   else if (opts.body !== undefined) { init.body = JSON.stringify(opts.body); init.headers["Content-Type"] = "application/json"; }
   let res;
   try { res = await fetch(path, init); } catch (e) { throw new Error("Scriptavera is not responding. Check that its window is still open."); }
+  const build = res.headers.get("x-scriptavera-build");      /* the program was started again with other files: */
+  if (build && api.build && build !== api.build) { location.reload(); return new Promise(() => {}); }   /* load the page anew */
+  if (build) api.build = build;
   let data = null;
   try { data = await res.json(); } catch (e) { /* not JSON */ }
   if (!res.ok || !data || data.ok === false) {
@@ -807,17 +810,14 @@ async function ask(command, opts = {}) {
   const sel = cm.getSelection();
   const where = { path: E.current, line: cm.getCursor().line + 1, selection: sel && sel.length < 6000 ? sel : "" };
   try {
-    const body = opts.error ? { error: opts.error } : { command, where, relax: !!opts.relax };
+    const body = opts.error ? { error: opts.error } : { command, where };
     const r = await api(`${API}/assist`, { method: "POST", body });
     E.proposal = r.proposal;
     E.lastCommand = command;
     showProposal();
   } catch (e) {
-    const limits = /next best model/i.test(e.message);
     rv.innerHTML = `<div class="rv-note error">${esc(e.message)}</div>
-      <div class="rv-buttons">${limits ? `<button class="btn primary" data-act="relax">Use the next best model for this command</button>` : ""}
-      <span class="spacer"></span><button class="btn" data-act="closereview">Close</button></div>`;
-    E.relaxCommand = command; E.relaxError = opts.error;
+      <div class="rv-buttons"><span class="spacer"></span><button class="btn" data-act="closereview">Close</button></div>`;
   } finally {
     E.busy = false; $("#ask").classList.remove("busy"); $("#askBtn").disabled = false; $("#askBtn").textContent = "Propose changes";
   }
@@ -1132,7 +1132,6 @@ document.addEventListener("click", async (ev) => {
     case "accept": accept(); break;
     case "closereview": $("#review").hidden = true; E.proposal = null; cm.focus(); break;
     case "alt": { const al = E.proposal.alternatives[Number(t.dataset.i)]; $("#askText").value = al.command; ask(al.command); break; }
-    case "relax": ask(E.relaxCommand, { relax: true, error: E.relaxError }); break;
     case "history": history(); break;
     case "notes": inNotes(); break;
     case "review": reviewOpen(); break;

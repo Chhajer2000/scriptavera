@@ -151,19 +151,19 @@ calls["b"] = "busy"; n0 = len(calls["log"])
 try:
     router.chat("writer", "s", "u", hooks=Quick(), label="strict-2"); raise SystemExit("a lesser model must not answer a strict job")
 except LLMError as e:
-    assert e.kind == "limits" and e.weaker == "next" and "not free right now" in str(e) and "strong (overloaded at the provider" in str(e), str(e)
+    assert e.kind == "limits" and not e.weaker and "never used" in str(e) and "strong (overloaded at the provider" in str(e), str(e)
     assert 250 < e.retry_at - time.time() < 320, e.retry_at - time.time()               # the first of its keys to come back
 tried = [m for m, _ in calls["log"][n0:]]
 assert tried == ["strong"] * 4 and "next" not in tried, tried                           # patient with the second key, never the next model
-assert router.candidates("writer") == [] and [m.id for m in router.candidates("writer", strict=False)] == ["next", "weak"]
-assert router.chat("writer", "s", "u", hooks=Quick(), label="allowed", strict=False).model == "next"    # only when the author allows it
-assert router.chat("fast", "s", "u", hooks=Quick(), label="small job").model == "next"                  # other jobs fall back freely
+assert router.candidates("writer") == [] and [m.id for m in router.candidates("writer", strict=False)] == ["next"]   # never the weak one
+assert router.chat("writer", "s", "u", hooks=Quick(), label="allowed", strict=False).model == "next"    # a call that is not strict
+assert router.chat("fast", "s", "u", hooks=Quick(), label="small job").model == "next"                  # small jobs: never to a weaker one
 config.save_settings({"routing": {"writer": ["custom:weak"]}})                         # a model the author pins comes first
 assert [m.id for m in router.peers("writer")] == ["weak", "strong", "strong"] and router.chat("writer", "s", "u", hooks=Quick()).model == "weak"
 config.save_settings({"routing": {}})
 for m in router.models: m.cooldown_until = 0
 calls["b"] = "ok"
-print("strict roles: the same model on the next key, a lesser model refused, wait time and stand-in reported")
+print("strict roles: the same model on the next key, a lesser model refused, wait time reported")
 router.models = keep
 
 os.environ["CUSTOM_API_KEY"] = "sk-wrong"

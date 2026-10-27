@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import io
+import os
 import re
 import shutil
 import subprocess
@@ -562,7 +563,7 @@ def reference_links(p: dict) -> list[tuple[str, str]]:
     if not links and p.get("zbl"):
         links.append((f"Zbl {p['zbl']}", f"https://zbmath.org/?q=an:{p['zbl']}"))
     if not links and p.get("url"):
-        links.append(("link", p["url"]))
+        links.append((re.sub(r"^https?://", "", p["url"]).rstrip("/") if p.get("kind") == "software" else "link", p["url"]))
     return links
 
 
@@ -645,6 +646,12 @@ def reference_latex(p: dict, label: str = "") -> str:
 
 
 def reference_bibtex(p: dict) -> str:
+    if p.get("kind") == "software":                # @misc: understood by BibTeX and biblatex alike
+        fields = [("author", " and ".join(f"{a['family']}, {a['given']}" for a in p.get("authors") or [])),
+                  ("title", "{" + p.get("title", "") + "}"), ("year", str(p.get("year") or "")),
+                  ("note", p.get("venue") or "Software"), ("doi", p.get("doi") or ""),
+                  ("howpublished", "\\url{" + p["url"] + "}" if p.get("url") else ""), ("url", p.get("url") or "")]
+        return f"@misc{{{p['key']},\n" + ",\n".join(f"  {k} = {{{v}}}" for k, v in fields if v) + "\n}"
     venue, vol, issue, pages = _venue_bits(p)
     kind = "article" if p.get("venue") and "arxiv" not in p["venue"].lower() else "misc"
     fields = [("author", " and ".join((a.get("family", "") + ", " + a.get("given", "")).strip(", ")
@@ -661,6 +668,59 @@ def reference_bibtex(p: dict) -> str:
 
 STATEMENTS = (("ack", "Acknowledgements"), ("funding", "Funding"), ("competing", "Competing interests"),
               ("data", "Data availability"))
+
+# ------------------------------------------------------------------ citing Scriptavera itself
+# As GAP and SageMath ask, a paper made with Scriptavera says so and cites it: in a short declaration of the AI-assisted
+# tool used (which Elsevier, Springer Nature and others require anyway), placed last before the references, and one
+# entry in the references. It is on for every new paper and the author can remove it (Journal, Your statements).
+# Once the GitHub repository is archived on Zenodo, put its concept DOI in SOFTWARE["doi"] (or SCRIPTAVERA_DOI): the
+# reference then carries a DOI that always resolves to the latest version.
+SOFTWARE_KEY = "scriptavera"
+SOFTWARE = {
+    "title": "Scriptavera: Faithful conversion of handwritten research notes into papers",
+    "authors": [{"family": "Chhajer", "given": "Vaibhav"}],
+    "year": 2026,
+    "url": "https://scriptavera.com",
+    "repository": "https://github.com/Chhajer2000/scriptavera",
+    "doi": "",
+}
+
+
+def software_reference() -> dict:
+    """Scriptavera as one entry of the references, for the version that made the paper."""
+    from . import __version__
+    return {"key": SOFTWARE_KEY, "kind": "software", "title": SOFTWARE["title"], "authors": SOFTWARE["authors"],
+            "year": SOFTWARE["year"], "venue": f"Software, Version {__version__}",
+            "doi": os.environ.get("SCRIPTAVERA_DOI", "").strip() or SOFTWARE["doi"], "url": SOFTWARE["url"]}
+
+
+def software_heading(prof: dict | None) -> str:
+    """Elsevier asks for this exact heading, immediately above the references; others for a plain one."""
+    if (prof or {}).get("house") == "elsarticle" or (prof or {}).get("template") == "elsarticle":
+        return "Declaration of generative AI and AI-assisted technologies in the writing process"
+    return "Use of AI-assisted tools"
+
+
+def software_statement(paper: dict) -> str:
+    """The declaration, in LaTeX, saying exactly what Scriptavera did for this paper: which parts it drafted
+    depends on what the author kept of its proposals. The tool's name, its purpose and the author's oversight are
+    what the publishers ask for."""
+    from . import __version__
+    n = len(paper.get("authors") or [])
+    who, whose = ("the authors", "the authors'") if n > 1 else ("the author", "the author's")
+    did = ["to transcribe " + whose + " handwritten notes"]
+    if paper.get("abstract_source") == "generated":
+        did.append("to draft the abstract")
+    if str(paper.get("intro_source") or "").startswith(("generated", "rewritten")):
+        did.append("to draft the introduction")
+    if paper.get("title_source") in ("generated", "suggested", "chosen by you"):
+        did.append("to propose the title")
+    did.append("to edit the language and the layout of the text")
+    listed = did[0] if len(did) == 1 else ", ".join(did[:-1]) + " and " + did[-1]
+    return (f"In preparing this paper, {who} used Scriptavera~\\cite{{{SOFTWARE_KEY}}} (Version {__version__}), "
+            f"which uses AI language models {listed}. The mathematics is {whose} own: every change to it was decided "
+            f"by {who}, who checked the whole text and take{'' if n > 1 else 's'} full responsibility for the content "
+            "of this paper.")
 
 
 def statement_sections(paper: dict, prof: dict | None = None) -> list[tuple[str, str]]:
@@ -735,6 +795,9 @@ def render_html(paper: dict, refs: list[dict], fig_url=None) -> str:
             out.append(f'<div class="p-block" data-block="{bid}">{tex_to_html(b["text"], ctx)}</div>')
     for head, text in statement_sections(paper):
         out.append(f'<h2 class="p-sec p-stmt-h">{html.escape(head)}</h2><div class="p-block p-stmt"><p>{html.escape(text)}</p></div>')
+    if paper.get("cite_software"):
+        out.append(f'<h2 class="p-sec p-stmt-h">{html.escape(software_heading(prof))}</h2>'
+                   f'<div class="p-block p-stmt" data-part="software"><p>{tex_to_html(software_statement(paper), ctx, inline=True)}</p></div>')
     if refs:
         out.append('<h2 class="p-sec p-refs-h">References</h2><ol class="p-refs">')
         out += [reference_html(p, ref_labels[i]) for i, p in enumerate(refs)]
@@ -872,6 +935,8 @@ def build_tex(paper: dict, refs: list[dict], profile: dict | str | None = None, 
     L.append(blocks_to_latex(paper.get("blocks", []), markers=markers, figs=figs))
     for head, text in statement_sections(paper, prof):
         L += ["", f"\\section*{{{head}}}", esc(text)]
+    if paper.get("cite_software"):                  # last before the references, as Elsevier asks
+        L += ["", f"\\section*{{{software_heading(prof)}}}", software_statement(paper)]
     if refs:
         labels = reference_labels(refs, "numeric" if tpl == "elsarticle" else prof.get("ref_style", "numeric"))
         widest = max(labels, key=len) if labels else "9"
@@ -965,6 +1030,37 @@ def render_tikz(code: str, timeout: int = 300) -> tuple[bytes | None, str]:
             return buf.getvalue(), ""
         except Exception as e:  # noqa: BLE001
             return None, f"could not render ({type(e).__name__})"
+
+
+def measure_tex(snippets: list[str], timeout: int = 120) -> list[tuple[float, float] | None]:
+    """The typeset size (width, height with depth), in points, of each piece of text as a label of a TikZ picture
+    sets it (inline, in the document font of render_tikz), from one compile. None for a piece that does not compile,
+    and for all of them when no LaTeX engine is installed."""
+    engine = find_engine()
+    if engine not in ("pdflatex", "xelatex", "lualatex") or not snippets:
+        return [None] * len(snippets)
+    macros = "\n".join(f"\\providecommand{{{k}}}{{{v}}}" for k, v in MACROS.items())
+    body = []
+    for i, t in enumerate(snippets):
+        body.append(f"\\sbox\\lblbox{{\\begin{{tabular}}{{@{{}}c@{{}}}}{t}\\end{{tabular}}}}"
+                    f"\\typeout{{SIZE {i} \\the\\wd\\lblbox\\space\\the\\ht\\lblbox\\space\\the\\dp\\lblbox}}")
+    doc = ("\\documentclass[11pt]{article}\n\\usepackage{amsmath,amssymb}\n" + macros + "\n\\newsavebox\\lblbox\n"
+           "\\begin{document}\n" + "\n".join(body) + "\n\\end{document}\n")
+    out: list = [None] * len(snippets)
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+        (Path(d) / "m.tex").write_text(doc, encoding="utf-8")
+        try:
+            r = subprocess.run([engine, *engine_flags(engine), "-interaction=nonstopmode", "-draftmode", "m.tex"],
+                               cwd=d, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        except (subprocess.TimeoutExpired, OSError):
+            return out
+        log = (r.stdout or b"").decode("utf-8", "ignore")
+    for m in re.finditer(r"(?m)^SIZE (\d+) ([\d.]+)pt ([\d.]+)pt ([\d.]+)pt", log):
+        i = int(m.group(1))
+        out[i] = (float(m.group(2)), float(m.group(3)) + float(m.group(4)))
+    if "! " in log:                                   # an error: a piece measured after it may be wrong, keep none
+        return [None] * len(snippets)
+    return out
 
 
 def compile_pdf(tex: str, timeout: int = 300, files: dict | None = None) -> dict:

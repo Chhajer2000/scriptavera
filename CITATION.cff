@@ -1,12 +1,14 @@
 cff-version: 1.2.0
-message: "If you use Scriptavera in preparing a paper, please cite it as below."
+message: "If you used Scriptavera in preparing a paper, a talk or a thesis, please cite it as below."
 type: software
-title: "Scriptavera: faithful conversion of handwritten research notes into papers"
+title: "Scriptavera: Faithful conversion of handwritten research notes into papers"
 abstract: "Scriptavera turns handwritten research notes into a LaTeX research paper in many small, checked steps, with the author confirming the notation, every doubtful reading and every figure, and a mechanical audit that the mathematics reaches the paper unchanged."
 authors:
   - family-names: "Chhajer"
     given-names: "Vaibhav"
-version: 1.1
+version: 1.0
+url: "https://scriptavera.com"
+repository-code: "https://github.com/Chhajer2000/scriptavera"
 date-released: 2026-10-10
 license: AGPL-3.0-only
 keywords:

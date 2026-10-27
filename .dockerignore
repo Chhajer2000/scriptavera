@@ -1,0 +1,19 @@
+# Never in the image: keys, settings, anybody's papers or notes, the personal signing key, local scratch files.
+.env
+.env.*
+settings.json
+projects/
+input_notes/
+identity/
+memory/
+phone_uploads/
+accounts.db
+.git/
+**/__pycache__/
+*.pyc
+*.log
+check_router_status.py
+check_routes.py
+test_all_keys.py
+test_all_keys_v2.py
+Scriptavera_Technical_Overview.pdf

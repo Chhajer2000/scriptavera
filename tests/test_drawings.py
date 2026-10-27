@@ -4,6 +4,7 @@
 explanation is settled without being redrawn, the writers still read it, and a sketched proof is completed with it.
 Anything the code cannot square is put to the author, who can always print a drawing after all."""
 import json
+import re
 import os
 os.environ["SCRIPTAVERA_MOCK_DRAWINGS"] = "1"                # the proof on page 3 carries the author's own picture
 os.environ["SCRIPTAVERA_MOCK_SKETCH"] = "1"                  # and the assessment calls that proof a sketch
@@ -67,7 +68,8 @@ assert f2["page"] == 3 and f2["judged"]["use"] == "explanation" and f2["judged"]
 assert "compared" in f2["judged"]["illustrates"] and not f2.get("drawn") and not pipeline.figure_file(p, "f2", "orig").exists()
 labels = [c["label"] for c in p.calls(5000)]
 assert labels.count("Decide which drawings are for the paper") == 1, labels
-assert "Draw figure 1 (page 1)" in labels and not any(l.startswith("Draw figure 2") for l in labels), "an explanation is not redrawn"
+FIG2 = ("Draw figure 2", "Read the labels of figure 2", "Check figure 2", "Correct figure 2")
+assert "Read the labels of figure 1 (page 1)" in labels and not any(l.startswith(FIG2) for l in labels), "an explanation is not redrawn"
 asked = simulator.SEEN["Decide which drawings are for the paper"]
 assert "Where it sits: inside a proof (it begins on page 3" in asked and "Where it sits: in the statement of the problem" in asked
 try:
@@ -108,7 +110,9 @@ except ValueError as e:
 n0 = len(q.calls(5000))
 g = pipeline.print_figure(q, "f2")
 assert g["choice"] == "" and g["asked_print"] and not g["auto"] and g.get("drawn") and pipeline.figure_file(q, "f2", "orig").exists()
-assert [c["label"] for c in q.calls(5000)[n0:]] == ["Draw figure 2 (page 3)"]
+made = [c["label"] for c in q.calls(5000)[n0:]]
+assert made and all(re.match(r"(Find the drawings on page 3|Read the labels of figure 2 |Check figure 2 |Correct figure 2|Draw figure 2 )", x) for x in made), made
+assert any(x.startswith("Read the labels of figure 2") or x.startswith("Draw figure 2") for x in made), made
 pipeline.set_figure(q, "f2", choice="orig")
 pipeline.set_figure(q, "f1", choice="tikz" if q.load("figures")["items"][0].get("tikz_ok") else "orig")
 pipeline.submit_review(q, {})
@@ -149,7 +153,8 @@ assert o2.load("transcript") == text_before and o2.load("doubt_answers") == answ
 n0 = len(o2.calls(5000))
 pipeline.start(o2); wait(o2, "review")
 labels = [c["label"] for c in o2.calls(5000)[n0:]]
-assert labels == ["Decide which drawings are for the paper", "Draw figure 1 (page 1)"], labels
+assert labels == ["Decide which drawings are for the paper", "Find the drawings on page 1", "Read the labels of figure 1 (page 1)",
+                  "Check figure 1 against the drawing"], labels
 assert {f["id"]: f["choice"] for f in o2.load("figures")["items"]} == {"f1": "", "f2": "explain"}
 # a finished paper is not touched, nor one whose figures were already judged
 done = new_project(); past_topic(done)

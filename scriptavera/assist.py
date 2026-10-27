@@ -27,7 +27,7 @@ from collections import Counter
 
 from . import prompts
 from . import workspace as W
-from .llm import LLMError, RunHooks, router
+from .llm import LLMError, RunHooks, clock, router
 from .store import Project
 from .texutil import check_balance, split_math
 from .util import est_tokens
@@ -974,7 +974,7 @@ def apply_ops(ops: list[dict], texts: dict[str, str], items: list[dict], words: 
     return new, problems, regions
 
 
-def ai_command(p: Project, command: str, texts: dict[str, str], ol: dict, where: dict, relax: bool = False) -> dict:
+def ai_command(p: Project, command: str, texts: dict[str, str], ol: dict, where: dict) -> dict:
     items, kinds = ol["items"], ol["kinds"]
     words = vocabulary(kinds)
     _section_ends(items, texts)
@@ -1001,7 +1001,7 @@ def ai_command(p: Project, command: str, texts: dict[str, str], ol: dict, where:
     label = "Editor command"
     try:
         res = router.chat("writer", prompts.EDIT_COMMAND.format(), user, max_out=min(16000, est_tokens(listing) // 2 + 3000),
-                          temperature=0.1, effort="medium", label=label, hooks=hooks, strict=False if relax else None)
+                          temperature=0.1, effort="medium", label=label, hooks=hooks)
     except LLMError as e:
         raise AssistError(_why(e)) from None
     parsed = _parse_ops(res.text)
@@ -1016,8 +1016,7 @@ def ai_command(p: Project, command: str, texts: dict[str, str], ol: dict, where:
                    "of the OUTLINE for item operations.")
         try:
             res = router.chat("writer", prompts.EDIT_COMMAND.format(), retry, max_out=min(16000, est_tokens(listing) // 2 + 3000),
-                              temperature=0.1, effort="medium", label=label + " (second try)", hooks=hooks,
-                              strict=False if relax else None)
+                              temperature=0.1, effort="medium", label=label + " (second try)", hooks=hooks)
         except LLMError as e:
             raise AssistError(_why(e)) from None
         parsed = _parse_ops(res.text)
@@ -1048,14 +1047,14 @@ class _Hooks(RunHooks):
 
 def _why(e: LLMError) -> str:
     msg = str(e)
-    if getattr(e, "kind", "") == "limits":
-        return msg + " You can let the next best model do this one command."
+    if getattr(e, "kind", "") == "limits" and getattr(e, "retry_at", 0):
+        return msg + f" Try the command again after {clock(e.retry_at)}."
     return msg
 
 
 # --------------------------------------------------------------- the entry
 
-def run(p: Project, command: str, where: dict | None = None, relax: bool = False) -> dict:
+def run(p: Project, command: str, where: dict | None = None) -> dict:
     """Carry out one command as a proposal."""
     command = re.sub(r"\s+", " ", str(command or "")).strip()
     if not command:
@@ -1069,7 +1068,7 @@ def run(p: Project, command: str, where: dict | None = None, relax: bool = False
     where = where or {}
     out = rule_command(p, command, texts, ol)    # a plain rearrangement: done by code (its errors are the author's to see)
     if out is None:
-        out = ai_command(p, command, texts, ol, where, relax=relax)
+        out = ai_command(p, command, texts, ol, where)
     extra = {k: v for k, v in out.items() if k in ("navigate", "answer", "question", "model")}
     extra["kind"] = out["kind"]
     if out["kind"] == "edit":

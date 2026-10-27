@@ -71,7 +71,7 @@ pipeline.start(p); wait(p, "review")
 new = [c["label"] for c in p.calls(5000)[before:]]
 assert not [l for l in new if l.startswith("Survey")], "the notation is confirmed: the page goes straight to the final reading"
 assert [l for l in new if l.startswith("Transcribe")] == ["Transcribe page 3"], new
-assert not any(l.startswith(("Resolve notation", "Scout", "Draw figure")) for l in new), new
+assert not any(l.startswith(("Resolve notation", "Scout", "Draw figure", "Find the drawings", "Read the labels of figure")) for l in new), new
 assert sum(l.startswith("Check transcript") for l in new) == 1, new
 tr = p.load("transcript")["pages"]
 assert "3" in tr and p.state["stages"]["confirm"]["status"] == "done" and p.state["stages"]["review"]["status"] == "waiting"

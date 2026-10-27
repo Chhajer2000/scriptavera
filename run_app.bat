@@ -8,7 +8,7 @@ set PYTHONIOENCODING=utf-8
 where python >nul 2>nul
 if errorlevel 1 goto nopython
 
-python -c "import starlette, uvicorn, multipart, requests, pypdfium2, PIL, cryptography, sympy" >nul 2>nul
+python -c "import starlette, uvicorn, multipart, requests, pypdfium2, PIL, cryptography, sympy, numpy" >nul 2>nul
 if errorlevel 1 goto install
 goto run
 

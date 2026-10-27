@@ -19,7 +19,7 @@ missing = [str(f.relative_to(ROOT)) for f in ROOT.rglob("*")
 assert not missing, missing
 print("1. the licence texts are the official ones and every program file carries the notice")
 
-names = [str(f.relative_to(ROOT)) for f in server.source_files()]
+names = [f.relative_to(ROOT).as_posix() for f in server.source_files()]
 assert "LICENSE" in names and "scriptavera/server.py" in names and "scriptavera/static/vendor/katex/LICENSE" in names
 assert not [n for n in names if n.startswith(("projects", "input_notes")) or n.endswith((".env", "settings.json"))
             or any(p.startswith(".") for p in n.split("/")[1:] if not n.startswith(".github"))], names

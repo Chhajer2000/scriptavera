@@ -59,12 +59,14 @@ try:
         pg.wait_for_selector(".kinds", timeout=120000); time.sleep(0.3)
         pg.click('[data-act="scopesubmit"]')                            # the suggested plan
 
-        # the strongest writer is resting when the third section is due: the step waits and says so
-        pg.wait_for_selector('[data-act="relax"]', timeout=120000); time.sleep(0.3)
+        # the strongest writer is resting when the third section is due: the step waits and says so; no weaker model is offered
+        pg.wait_for_function("[...document.querySelectorAll('.banner')].some(b => /waiting for the strongest models/.test(b.innerText))", timeout=120000)
+        time.sleep(0.3)
         pg.screenshot(path=str(OUT / "40_waiting_for_strongest.png"))
-        banner = pg.inner_text(".banner")
+        banner = next(t for t in pg.locator(".banner").all_inner_texts() if "waiting for the strongest models" in t)
         print("banner:", banner[:300].replace("\n", " "))
-        assert "waiting for the strongest model" in banner and "sim-small" in banner and "continue by itself" in banner, banner
+        assert "never used" in banner and "continue by itself" in banner and "sim-small" not in banner, banner
+        assert pg.locator('[data-act="relax"]').count() == 0, "a weaker model is never offered"
         assert pg.locator('#topbar [data-act="resume"]').count() == 1
         pg.click('#topbar [data-act="menu"]'); assert pg.locator('#topbar .menu [data-act="startover"]').count() == 1
         pg.keyboard.press("Escape"); time.sleep(0.2); assert pg.locator(".menu").count() == 0
@@ -72,15 +74,13 @@ try:
             "inside a paper the rail has the way home and the steps only"
         assert pg.locator('#rail .home-btn').count() == 1
         assert "Paused until" in pg.inner_text(".step.paused")
-        pg.click('[data-act="relax"]')                                  # the author allows the next best model for this one step
-        pg.wait_for_selector("#deccount", timeout=120000)               # ... and the next step restarts by itself when the strong model is back
+        pg.wait_for_selector("#deccount", timeout=120000)               # it restarts by itself when the strong model is back
         pg.click('.step[data-view="structure"]'); time.sleep(0.4)
         text = pg.inner_text("#main")
-        assert "done by a weaker model, with your permission" in text and "sim-small" in text, text[:600]
-        pg.screenshot(path=str(OUT / "41_stand_in.png"))
-        calls = json.loads(pg.evaluate("JSON.stringify(S.b.calls.filter(c => c.stage === 'simplify').map(c => c.model))"))
-        assert calls and set(calls) == {"sim-text"}, calls                # the following step was done by the strongest model again
-        print("waited, stood in for one step with permission, then restarted by itself")
+        assert "stood in" not in text and "with your permission" not in text, text[:600]     # no weaker model did any of it
+        calls = json.loads(pg.evaluate("JSON.stringify(S.b.calls.filter(c => (c.stage === 'structure' || c.stage === 'simplify') && c.ok).map(c => c.model))"))
+        assert calls and set(calls) == {"sim-text"}, calls                # only the strongest model wrote and checked
+        print("waited for the strongest model, never a weaker one, then restarted by itself")
 
         pg.click('.step[data-view="decide"]'); pg.wait_for_selector("#deccount")
         pg.locator('[data-act="decsim"][data-v="reject"]').click()
@@ -105,7 +105,7 @@ try:
         assert st["c"] == bool(st["e"]) and not st["lint"]
         pg.screenshot(path=str(OUT / "42_after_edit.png"))
 
-        # direct links, links from an earlier version, the list of papers
+        # direct links, a link to a step that does not exist, the list of papers
         pid = pg.evaluate("location.hash").split("/")[1]
         pg.goto(f"{U}#p/{pid}/verify"); pg.reload(); pg.wait_for_selector(".steps"); time.sleep(0.6)
         assert "Proofs checked" in pg.inner_text("#main"), pg.inner_text("#main")[:200]
@@ -122,15 +122,24 @@ try:
         box = pg.locator(".pcard").bounding_box()                                              # the whole card opens the paper
         pg.mouse.click(box["x"] + 40, box["y"] + box["height"] - 50); pg.wait_for_selector("#paperHost")
 
-        # a project that was started with an earlier version says what was kept
+        # redoing from a step: nothing on the screen speaks of versions of the app
         (work / "projects" / pid / "out_before_update").mkdir()
         pg.click('[data-act="redo"][data-stage="understand"]'); pg.click('[data-act="cfyes"]')
         pg.wait_for_selector(".kinds", timeout=120000); time.sleep(0.3)
         pg.click('[data-act="scopesubmit"]')
         pg.wait_for_selector("#deccount", timeout=120000)
         pg.click('.step[data-view="understand"]'); time.sleep(0.4)
-        assert "started with an earlier version of the app" in pg.inner_text("#main")
-        pg.screenshot(path=str(OUT / "44_earlier_version.png"))
+        assert "version" not in pg.inner_text("#main").lower(), pg.inner_text("#main")[:400]
+        pg.screenshot(path=str(OUT / "44_redone.png"))
+
+        # a page loaded while the program ran from other files loads itself anew
+        built = pg.evaluate("S.build")
+        assert built and len(built) == 12, built
+        pg.evaluate("S.build = 'other-files'")
+        with pg.expect_navigation(timeout=20000):
+            pg.evaluate("() => { api('/api/meta'); }")            # not awaited: the page goes away
+        pg.wait_for_selector("#paperHost, .steps", timeout=20000); time.sleep(0.3)
+        assert pg.evaluate("S.build") == built
 
         # start over, then delete
         pg.click('#topbar [data-act="menu"]'); pg.click('.menu [data-act="startover"]')

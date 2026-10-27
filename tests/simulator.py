@@ -247,6 +247,26 @@ def respond(label: str, system: str, user: str, vision: bool, model: Model | Non
     n = _page_no(label)
     SEEN[label] = user
 
+    # ---- drawings: found on the page, their labels read, the redrawing checked and corrected
+    if label.startswith("Find the drawings"):
+        items = re.findall(r"(?m)^(\d+)\. ", user)
+        out = []
+        for k in items:
+            if k == "1":
+                out.append({"n": 1, "found": True, "box": [255, 120, 520, 880], "same_as": None})
+            else:
+                out.append({"n": int(k), "found": False, "box": None, "same_as": None})
+        return json.dumps({"drawings": out})
+    if label.startswith("Read the labels of figure"):
+        boxes = [int(b) for b in re.findall(r"(?m)^box (\d+):", user)]
+        return json.dumps({"labels": [], "drawing": [], "ignore": boxes, "missed": [],
+                           "caption": "Rectangles of width $1$ under the graph of a decreasing function."})
+    if label.startswith("Check figure"):
+        return json.dumps({"same": True, "problems": []})
+    if label.startswith("Correct figure"):
+        m = re.search(r"\\begin\{tikzpicture\}.*\\end\{tikzpicture\}", user, re.S)
+        return "<tikz>\n" + (m.group(0) if m else "") + "\n</tikz>"
+
     # ---- reading the notes
     if label.startswith("Locate"):
         if "tail" in label:
@@ -389,6 +409,14 @@ page 5 || Does the last display of the proof end with $\log n$ or with $\log(n+1
                4: "s > 1 || the relation could be 'greater' or 'greater or equal' || s \\ge 1",
                5: "= \\log n || the argument of the logarithm is hard to read: n or n+1 || = \\log(n+1)",
                6: "the sums are bounded || singular or plural is unclear || the sum is bounded"}.get((n - 1) % len(PAGES) + 1, "none")
+        # answers as weaker models gave them (SCRIPTAVERA_MOCK_BROKEN="2,3"): page 2 without its opening tag and with
+        # web markup, page 3 repeating one command endlessly (its second reading is sound, unless "3!" is given)
+        broken = os.environ.get("SCRIPTAVERA_MOCK_BROKEN", "").split(",")
+        if n == 2 and "2" in broken:
+            return (f"<u>Claim</u>" + _page_text(n)[5:] + "\n</transcript>\n<uncertain>\nnone\n</uncertain>\n"
+                    "<changes>\nAdded underlining to the word Claim.\n</changes>")
+        if n == 3 and ("3!" in broken or ("3" in broken and "(again)" not in label)):
+            return "<transcript>\n" + _page_text(n)[:60] + " " + "\\quad " * 300 + "\n</transcript>\n<uncertain>\nnone\n</uncertain>"
         return f"<transcript>\n{_page_text(n)}\n</transcript>\n<uncertain>\n{unc}\n</uncertain>\n<changes>\nnone\n</changes>"
     if label.startswith("Check transcript"):
         return ("<flags>\npage 5 || = \\log n || the right-hand side does not match the claim being proved || = \\log(n+1)\n"
@@ -413,13 +441,6 @@ page 5 || Does the last display of the proof end with $\log n$ or with $\log(n+1
                 out.append({"id": fid, "use": "paper", "sure": True, "illustrates": "", "needed": "none",
                             "why": "It shows the comparison of the sum with an integral, the method the notes announce with the problem."})
         return json.dumps({"drawings": out})
-    if label.startswith("Draw figure") or label.startswith("Repair figure"):
-        return ("<box>240, 90, 520, 900</box>\n<caption>Rectangles of width $1$ under the graph of a decreasing function.</caption>\n"
-                "<tikz>\n\\begin{tikzpicture}[scale=1.05]\n\\draw[->] (0,0) -- (6.5,0) node[right] {$x$};\n"
-                "\\draw[->] (0,0) -- (0,3.5);\n\\draw[domain=1:6,smooth,samples=40] plot (\\x,{3/\\x});\n"
-                "\\foreach \\k in {2,3,4,5,6} \\draw (\\k-1,0) rectangle (\\k,{3/\\k});\n"
-                "\\foreach \\k in {1,2,3} \\node[below] at (\\k,0) {$\\k$};\n\\node[below] at (6,0) {$n$};\n"
-                "\\end{tikzpicture}\n</tikz>")
 
     # ---- the first draft
     if label.startswith("Understand"):
