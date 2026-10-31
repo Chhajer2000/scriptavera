@@ -18,7 +18,7 @@
       "name": "Scriptavera",
       "description": "Turns handwritten research notes (scans or photos) into a LaTeX research paper in small, checked steps. The author confirms the notation, every doubtful reading and every figure, and a mechanical audit checks that every formula reaches the paper unchanged. Mathematics first; designed for any field.",
       "webpageUrl": {
-        "url": "https://github.com/Chhajer2000/scriptavera"
+        "url": "https://scriptavera.com"
       },
       "repositoryUrl": {
         "url": "https://github.com/Chhajer2000/scriptavera"
@@ -41,7 +41,7 @@
         "guid": "annualgrant",
         "status": "active",
         "name": "Annual Core Engineering Team, Compute Infrastructure and University Testing",
-        "description": "Full 12 month seed grant budget ($99,000 USD / Rs 95,04,000 INR) covering the 3 person engineering team (Principal Investigator and Mathematical Lead, Applied AI Engineer, and Full Stack Backend Engineer), 3 developer PCs/laptops, high resolution monitors, and an iPad tablet with stylus for handwritten mathematical note testing, dedicated GPU server rental and frontier AI API compute, managed 3 seat office cabin, RFC 3161 timestamping infrastructure, and free testing at university mathematics institutes.",
+        "description": "Full 12 month seed grant budget ($99,000 USD / Rs 95,04,000 INR) covering the 3 person engineering team (Mathematical Lead, Applied AI Engineer, and Full Stack Backend Engineer), developer hardware, tablet with stylus for handwriting testing, GPU and API compute, managed office, RFC 3161 timestamp infrastructure, and university mathematics institute testing.",
         "amount": 99000,
         "currency": "USD",
         "frequency": "yearly",
