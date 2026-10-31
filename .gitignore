@@ -9,3 +9,5 @@ identity/
 phone_uploads/
 memory/
 accounts.db
+
+.firebase/

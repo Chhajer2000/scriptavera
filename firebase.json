@@ -1,0 +1,14 @@
+{
+  "hosting": {
+    "public": "scriptavera/static",
+    "rewrites": [
+      {
+        "source": "**",
+        "run": {
+          "serviceId": "scriptavera",
+          "region": "asia-south1"
+        }
+      }
+    ]
+  }
+}

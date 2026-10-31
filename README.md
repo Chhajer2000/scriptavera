@@ -12,6 +12,7 @@ up to six times to ask you what only you can decide.
 When you start, you give the area, the problem you are working on in your own words, and keywords (both required),
 and optionally the one or two papers your work relies on most. These are looked up first and read first.
 
+**Website:** https://scriptavera.com  
 **2-Minute Video Walkthrough:** https://youtu.be/BoExpXqJ0BY
 
 ## Start
