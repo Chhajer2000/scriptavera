@@ -24,6 +24,9 @@ const ICON = {
   back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg>',
   sliders: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M18 7h2M4 17h3M12 17h8"/><circle cx="15.5" cy="7" r="2.3"/><circle cx="9.5" cy="17" r="2.3"/></svg>',
   pages: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3.5h9.5a1.5 1.5 0 0 1 1.5 1.5v12.5"/><rect x="5" y="6.5" width="11" height="14" rx="1.5"/><path d="M10.5 10.5v6M7.5 13.5h6"/></svg>',
+  slides: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>',
+  review: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>',
 };
 
 function newForm() {
@@ -543,8 +546,7 @@ const HOW = { read: "Every page is read. You confirm the topic, the notation and
   write: "The notes are understood as a whole; you choose the plan, and the paper is written from them.",
   revise: "Arguments are shortened, every proof is checked and a referee reads the draft. You decide on each change to the mathematics.",
   final: "You choose the title and check the citations. You get the LaTeX, the PDF and a package for Overleaf." };
-const HOME_ACTS = `<button class="btn primary" data-act="newpaper">${ICON.plus}New paper from notes</button>
-  <button class="btn" data-act="importpaper" title="A paper written elsewhere (a .tex file or an Overleaf .zip), opened in the editor to carry out a referee's report or the journal's proof corrections">${ICON.doc}Import a LaTeX paper</button>`;
+const HOME_ACTS = `<button class="btn primary big" data-act="newpaper">${ICON.plus}Import notes</button>`;
 function papersBoard() {
   const P = (S.projects || []).filter((p) => !p.imported), imported = (S.projects || []).filter((p) => p.imported);
   const groups = [
@@ -558,6 +560,35 @@ function papersBoard() {
       <h2>${esc(h)} <span class="pg-n2">${list.length}</span></h2>${sub ? `<p class="pgroup-sub">${esc(sub)}</p>` : ""}
       <div class="pgrid">${list.map(paperCard).join("")}</div></section>`).join("");
 }
+function researchSuiteGrid() {
+  return `<div class="suite-grid">
+    <div class="suite-card">
+      <div class="suite-card-icon">${ICON.doc}</div>
+      <h3>Research Papers</h3>
+      <p>Convert handwritten notes, page scans, or drafts into verified LaTeX publications with symbol by symbol formula auditing.</p>
+      <button class="btn primary" data-act="newpaper">${ICON.plus}Import notes</button>
+    </div>
+    <div class="suite-card">
+      <div class="suite-card-icon">${ICON.slides}</div>
+      <h3>Conference Presentations</h3>
+      <p>Transform theorems, proofs, and definitions into professional LaTeX Beamer presentation slides for seminars and conferences.</p>
+      <button class="btn" data-act="slidesguide">${ICON.slides}Presentation slides</button>
+    </div>
+    <div class="suite-card">
+      <div class="suite-card-icon">${ICON.review}</div>
+      <h3>Reviewer Comments</h3>
+      <p>Address referee critiques point by point, carry out proof corrections, and draft formal author response letters.</p>
+      <button class="btn" data-act="rebuttalguide">${ICON.review}Reviewer rebuttal</button>
+    </div>
+    <div class="suite-card">
+      <div class="suite-card-icon">${ICON.shield}</div>
+      <h3>Proof &amp; Priority Audit</h3>
+      <p>Verify mathematical AST consistency, cross check citations on arXiv, and seal scans with RFC 3161 timestamps.</p>
+      <button class="btn" data-act="auditguide">${ICON.shield}Integrity audit</button>
+    </div>
+  </div>`;
+}
+
 function viewHome() {
   const P = S.projects || [];
   const noKey = !S.meta.has_vision;
@@ -565,19 +596,21 @@ function viewHome() {
       <button class="btn" data-act="settings">Open settings</button></div>` : HOSTED.noKeyBanner()) : "") + HOSTED.guestNotice(true);
   if (!P.length) {
     return `<div class="home">${key}<div class="home-empty">
-      <h1>Your papers</h1>
-      <p class="lead">Start a paper from your notes: a scanned PDF, photos of the pages, or typed notes in LaTeX or Markdown. Scriptavera reads them, asks you only what you must decide, and writes the paper with every formula as you wrote it.</p>
-      <div class="home-acts">${HOME_ACTS}</div>
-      <p class="muted small">Already have the paper in LaTeX? Import it to carry out a referee's report or the journal's proof corrections in the editor.</p>
+      <h1>Mathematical Research Suite</h1>
+      <p class="lead">Transform handwritten notes, proofs, and drafts into publication ready LaTeX papers, conference presentations, and peer review rebuttals.</p>
+      <div class="home-hero-actions">${HOME_ACTS}</div>
+      <p class="muted small" style="margin-top:10px">Automatically recognizes handwritten notes, scanned PDFs, page photos, typed text, or LaTeX files (.tex / .zip).</p>
       </div>
-      <ol class="howto" aria-label="How a paper is made">${S.meta.phases.map((ph) => `<li><b>${esc(ph.name)}</b><span>${esc(HOW[ph.id] || "")}</span></li>`).join("")}</ol>
+      ${researchSuiteGrid()}
       ${aboutLine()}</div>`;
   }
   return `<div class="home">${key}
     <div class="home-head"><div class="grow"><h1>Your papers</h1>
       <p>Every step is saved as it finishes, so you can leave a paper at any point and come back to it.</p></div>
       <div class="home-acts">${HOME_ACTS}</div></div>
-    ${papersBoard()}${aboutLine()}</div>`;
+    ${papersBoard()}
+    <div style="margin-top:36px"><h2 style="font-size:18px;margin-bottom:12px">Research suite</h2>${researchSuiteGrid()}</div>
+    ${aboutLine()}</div>`;
 }
 function money(x) { return x >= 1 ? "$" + x.toFixed(2) : x > 0 ? "$" + x.toFixed(3) : "$0"; }
 function tokens(n) { return n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(n); }
@@ -648,7 +681,7 @@ function viewNew() {
     ${noKey && HOSTED.admin() ? `<div class="banner"><div class="grow"><b>Connect an AI key first.</b> Reading handwriting needs a model that accepts images.
       A free Google Gemini key is enough to start.</div><button class="btn" data-act="settings">Open settings</button></div>` : noKey ? HOSTED.noKeyBanner() : ""}
     ${HOSTED.formNotices(f)}
-    <div class="crumbs"><button class="btn small" data-act="home">${ICON.back}Home</button><span class="muted small">New paper from notes</span></div>
+    <div class="crumbs"><button class="btn small" data-act="home">${ICON.back}Home</button><span class="muted small">Import notes</span></div>
     <div class="head"><h1>Which area of mathematics are these notes in?</h1>
       <p>Your answer limits the literature search to that area and tells every model which conventions to expect. Nothing is read until you choose.</p></div>
     <div class="sheet">
@@ -671,8 +704,8 @@ function viewNew() {
         </div></div>
       <div class="sec"><h2>Your notes</h2><p>A scanned PDF, or photos of the pages in order. Blank pages and covers are skipped automatically. Typed notes work too: a .tex file, an Overleaf project downloaded as a .zip, Markdown or plain text. Their text is taken exactly as written, so nothing has to be read from an image.</p>
         <div class="row" style="margin-bottom:8px"><button class="btn small" data-act="phone" data-for="new">Take photos with your phone</button></div>
-        <div class="drop" data-act="pick" id="drop" tabindex="0" role="button"><strong>Drop the notes here</strong>
-          <span class="muted">or click to choose a PDF, images, or typed notes (.tex, .zip, .md, .txt)</span></div>
+        <div class="drop" data-act="pick" id="drop" tabindex="0" role="button"><strong>Drop notes or paper here</strong>
+          <span class="muted">Click or drop handwritten scans, page photos, PDF, typed text, or LaTeX papers (.tex / .zip)</span></div>
         <input type="file" id="fileInput" hidden multiple accept=".pdf,image/*,.tex,.ltx,.zip,.md,.markdown,.txt">
         <div class="files">${files}</div>
         ${freeTierNotice()}
@@ -2370,10 +2403,28 @@ function settingsDialog() {
     </div></div>`;
 }
 function aboutLine() {
-  /* The AGPL asks that people using the program over a network can get its source: the link serves this very copy. */
-  return `<p class="muted small about">Scriptavera ${esc((S.meta || {}).version || "")} · © 2026 Vaibhav Chhajer · free software under the
-    <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">GNU AGPL v3</a> ·
-    <a href="/api/source" download>Source code of this copy</a> · <a href="#" data-act="howtocite">How to cite</a> · no warranty · a commercial licence is available for use without the AGPL's conditions (see LICENSING.md)</p>`;
+  const v = esc((S.meta || {}).version || "1.0");
+  return `<footer class="app-footer">
+    <div class="footer-grid">
+      <div class="footer-col">
+        <div class="footer-head">Scriptavera ${v}</div>
+        <p class="muted small">Open source mathematical research pipeline converting notes into verified papers, conference presentations, and peer review responses.</p>
+        <p class="muted small">&copy; 2026 Vaibhav Chhajer</p>
+      </div>
+      <div class="footer-col">
+        <div class="footer-head">Open Source</div>
+        <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">GNU AGPL v3 License</a>
+        <a href="/api/source" download>Source code of this copy</a>
+        <a href="https://github.com/Chhajer2000/scriptavera" target="_blank" rel="noopener">GitHub Repository</a>
+      </div>
+      <div class="footer-col">
+        <div class="footer-head">Academic &amp; Licensing</div>
+        <a href="#" data-act="howtocite">How to cite Scriptavera</a>
+        <a href="https://github.com/Chhajer2000/scriptavera/blob/main/LICENSING.md" target="_blank" rel="noopener">Commercial Licensing</a>
+        <span class="muted small">Provided without warranty</span>
+      </div>
+    </div>
+  </footer>`;
 }
 function showDialog(html) { const o = $("#overlay"); const keep = o.scrollTop; o.innerHTML = html; o.hidden = false; o.scrollTop = keep; renderMath(o); }
 function closeDialog() {
@@ -2740,6 +2791,59 @@ const ACT = {
       S.meta = await api("/api/test_mode", { method: "POST", body: { on: el.dataset.on === "1", before, exclude: $("#tmExclude").value } });
       closeDialog(); toast(el.dataset.on === "1" ? `Test mode is on. New papers search only literature published before ${before}.` : "Test mode is off."); render();
     } catch (e) { toast(e.message, true); }
+  },
+  slidesguide() {
+    const P = (S.projects || []).filter((p) => !p.imported);
+    const opts = P.map((p) => `<button class="btn" data-act="makeslides" data-id="${p.id}">${esc(p.name || "Untitled paper")}</button>`).join("");
+    showDialog(`<div class="dialog" role="dialog" aria-modal="true" aria-label="Conference presentations">
+      <div class="dlg-h"><h2>Conference Presentations &amp; Slides</h2><button class="btn small quiet" data-act="closedlg">Close</button></div>
+      <div class="dlg-b">
+        <p>Generate professional LaTeX Beamer presentation slides from your mathematical proofs and theorems.</p>
+        ${P.length ? `<div style="margin:16px 0"><b>Choose a paper to generate slides:</b><div class="row" style="margin-top:8px;flex-wrap:wrap;gap:8px">${opts}</div></div>` : ""}
+        <p style="margin-top:14px">Or import a research paper or notes directly to create a slide deck:</p>
+        <button class="btn primary" data-act="importslides">${ICON.slides}Upload paper for slides</button>
+      </div>
+      <div class="dlg-f"><button class="btn" data-act="closedlg">Close</button></div></div>`);
+  },
+  async makeslides(el) {
+    closeDialog();
+    location.hash = `p/${el.dataset.id}`;
+    toast("Open the editor to compile presentation slides from this paper.");
+  },
+  importslides() {
+    closeDialog();
+    ACT.newpaper();
+  },
+  rebuttalguide() {
+    showDialog(`<div class="dialog" role="dialog" aria-modal="true" aria-label="Reviewer comments and rebuttal">
+      <div class="dlg-h"><h2>Reviewer Comments &amp; Journal Proofs</h2><button class="btn small quiet" data-act="closedlg">Close</button></div>
+      <div class="dlg-b">
+        <p>Carry out referee reports and journal proof corrections with mathematical precision:</p>
+        <ul style="margin:10px 0 16px 20px;line-height:1.6">
+          <li>Systematically isolates referee critiques across theorems, lemmas, and notation.</li>
+          <li>Separates language and typography changes from mathematical points.</li>
+          <li>Drafts an itemized, formal author response letter for the journal editor.</li>
+        </ul>
+        <button class="btn primary" data-act="openrebuttal">${ICON.review}Import paper for referee review</button>
+      </div>
+      <div class="dlg-f"><button class="btn" data-act="closedlg">Close</button></div></div>`);
+  },
+  openrebuttal() {
+    closeDialog();
+    ACT.importpaper();
+  },
+  auditguide() {
+    showDialog(`<div class="dialog" role="dialog" aria-modal="true" aria-label="Mathematical audit and integrity">
+      <div class="dlg-h"><h2>Proof &amp; Formula Integrity Audit</h2><button class="btn small quiet" data-act="closedlg">Close</button></div>
+      <div class="dlg-b">
+        <p>Scriptavera protects mathematical research through three independent mechanical checks:</p>
+        <ul style="margin:10px 0 16px 20px;line-height:1.6">
+          <li><b>Abstract Syntax Tree Formula Auditor:</b> Verifies that every formula and equation in the LaTeX matches the handwritten notes symbol by symbol.</li>
+          <li><b>Citation &amp; Literature Verifier:</b> Cross checks citations against arXiv and CrossRef to prevent hallucinated references.</li>
+          <li><b>Cryptographic Proof of Priority:</b> Binds your raw scans with RFC 3161 digital timestamps to establish irrefutable evidence of when your theorems existed.</li>
+        </ul>
+      </div>
+      <div class="dlg-f"><button class="btn" data-act="closedlg">Close</button></div></div>`);
   },
   async importpaper() {
     const inp = document.createElement("input");

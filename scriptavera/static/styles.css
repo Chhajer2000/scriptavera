@@ -824,3 +824,118 @@ textarea.mono { font-family: var(--mono); font-size: 13px; width: 100%; }
 .sv-consent { margin: 6px 0 0 16px; padding: 0; }
 .sv-consent li { margin: 3px 0; }
 @media (max-width: 640px) { .sv-key { grid-template-columns: 1fr auto; } }
+
+
+/* Research suite feature grid and modern footer */
+.suite-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 18px;
+  margin: 32px 0 40px;
+  max-width: 980px;
+}
+.suite-card {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+.suite-card:hover {
+  border-color: var(--blue);
+  transform: translateY(-2px);
+}
+.suite-card-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 14px;
+}
+.suite-card-icon svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.suite-card h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--ink);
+}
+.suite-card p {
+  font-size: 13.5px;
+  color: var(--graphite);
+  line-height: 1.5;
+  margin-bottom: 20px;
+  flex-grow: 1;
+}
+.suite-card .btn {
+  width: 100%;
+  justify-content: center;
+}
+
+.home-empty .lead {
+  font-size: 16.5px;
+  line-height: 1.6;
+  margin: 14px 0 24px;
+  max-width: 64ch;
+  color: var(--graphite);
+}
+
+.home-hero-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.app-footer {
+  margin-top: 56px;
+  padding: 28px 0 36px;
+  border-top: 1px solid var(--rule);
+  max-width: 980px;
+}
+.footer-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr;
+  gap: 28px;
+}
+.footer-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.footer-head {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+.footer-col a {
+  color: var(--graphite);
+  text-decoration: none;
+  font-size: 13px;
+  transition: color 0.15s ease;
+}
+.footer-col a:hover {
+  color: var(--blue);
+  text-decoration: underline;
+}
+@media (max-width: 640px) {
+  .footer-grid {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+}
