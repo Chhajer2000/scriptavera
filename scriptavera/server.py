@@ -1804,7 +1804,8 @@ class LocalOnly:
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
-            raw_host = headers.get("host", "").lower()
+            fwd_host = (headers.get("x-forwarded-host") or "").split(",")[0].strip().lower()
+            raw_host = (fwd_host or headers.get("host", "")).lower()
             host = raw_host.rsplit(":", 1)[0] if not raw_host.startswith("[") else raw_host.split("]")[0] + "]"
             public = hosting.public()
             canonical = hosting.canonical_host()
@@ -1822,7 +1823,8 @@ class LocalOnly:
                 if origin and origin != "null":
                     o = origin.split("://", 1)[-1].lower()
                     o_host = o.split("]")[0] + "]" if o.startswith("[") else o.rsplit(":", 1)[0]
-                    bad = not self._host_ok(o_host) or o != raw_host
+                    server_host = headers.get("host", "").lower().rsplit(":", 1)[0]
+                    bad = not self._host_ok(o_host) or not (o == raw_host or (public and self._host_ok(server_host)))
                 elif origin == "null":
                     bad = True
             if bad:
