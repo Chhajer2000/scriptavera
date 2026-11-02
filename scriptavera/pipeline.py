@@ -447,8 +447,9 @@ def _scout_order(pages: list[dict]) -> list[int]:
     return head + spread
 
 
-SCOUT_LEAST = 4            # pages read before the topic is decided (all of them, if there are fewer)
+SCOUT_LEAST = 5            # pages read before the topic is decided (all of them, if there are fewer)
 SCOUT_CONFIDENCE = 0.85    # and read on until the topic is at least this clear
+SCOUT_GAIN_MIN = 0.03      # stop reading extra pages if confidence gain per new page is less than this
 
 
 def stage_scout(run: Run) -> None:
@@ -458,22 +459,38 @@ def stage_scout(run: Run) -> None:
         raise ValueError("Every page looks blank. Check the upload.")
     scout: dict = p.load("scout", {})
     order = _scout_order(pages)
-    batch = max(2, int(run.settings.get("scout_batch", 4)))
     threshold = max(SCOUT_CONFIDENCE, float(run.settings.get("scout_confidence", SCOUT_CONFIDENCE)))
-    least = min(SCOUT_LEAST, len(pages))       # never decide the topic from fewer pages than this
+    least = min(int(run.settings.get("scout_least", SCOUT_LEAST)), len(pages))
+    gain_min = float(run.settings.get("scout_gain_min", SCOUT_GAIN_MIN))
     layers = exact_layers(p)
     system = prompts.SCOUT.format(field=run.field)
     total = len(order)
     topic: dict = p.load("topic", {})
     _resolve_key_papers(run)
     rounds = 0
+    prev_conf: float | None = None
+
     while True:
         read_content = sum(1 for v in scout.values() if v["kind"] == "content")
-        if topic.get("confidence", 0) >= threshold and read_content >= least:
-            break
-        todo = [n for n in order if str(n) not in scout][:max(batch, least - read_content)]
+        if topic and read_content >= least:
+            conf = float(topic.get("confidence", 0))
+            if conf >= 0.95:
+                run.log(f"Topic confidence reached {int(conf * 100)}%: stopping scout.")
+                break
+            if prev_conf is not None:
+                gain = conf - prev_conf
+                if conf >= threshold and gain < gain_min:
+                    run.log(f"Topic confidence held at {int(conf * 100)}% (gain {int(gain * 100)}% < {int(gain_min * 100)}%): stopping scout.")
+                    break
+                if conf < threshold and read_content >= least + 3 and gain <= 0.01:
+                    run.log(f"Topic confidence plateaued at {int(conf * 100)}%: stopping scout.")
+                    break
+
+        batch_size = max(1, least - read_content) if read_content < least else 1
+        todo = [n for n in order if str(n) not in scout][:batch_size]
         if not todo:
             break
+        prev_conf = float(topic.get("confidence", 0)) if topic else None
         rounds += 1
         typed_src = (p.load("typed") or {}).get("pages", {})
         for n in todo:
@@ -507,13 +524,24 @@ def stage_scout(run: Run) -> None:
         topic["pages_read"] = sorted(int(k) for k in scout)
         p.save("topic", topic)
         run.changed()
-        run.log(f"Topic confidence {int(topic['confidence'] * 100)}% after {len(scout)} page(s): {topic.get('subfield', '')}")
+        conf = float(topic.get("confidence", 0))
+        run.log(f"Topic confidence {int(conf * 100)}% after {len(scout)} page(s): {topic.get('subfield', '')}")
         read_content = sum(1 for v in scout.values() if v["kind"] == "content")
-        if topic["confidence"] >= threshold and read_content >= least:
-            break
+        if read_content >= least:
+            if conf >= 0.95:
+                run.log(f"Topic confidence reached {int(conf * 100)}%: stopping scout.")
+                break
+            if prev_conf is not None:
+                gain = conf - prev_conf
+                if conf >= threshold and gain < gain_min:
+                    run.log(f"Topic confidence held at {int(conf * 100)}% (gain {int(gain * 100)}% < {int(gain_min * 100)}%): stopping scout.")
+                    break
+                if conf < threshold and read_content >= least + 3 and gain <= 0.01:
+                    run.log(f"Topic confidence plateaued at {int(conf * 100)}%: stopping scout.")
+                    break
         if [n for n in order if str(n) not in scout]:
-            run.log(f"Reading more pages: the topic is {int(topic['confidence'] * 100)}% clear"
-                    + (f", and at least {least} pages are read" if read_content < least else f"; {int(threshold * 100)}% is needed")
+            run.log(f"Reading more pages: the topic is {int(conf * 100)}% clear"
+                    + (f", and at least {least} pages are read" if read_content < least else f"; checking if extra pages increase confidence")
                     + (f" ({topic['missing']})" if topic.get("missing") and read_content >= least else "") + ".")
     if not topic:
         topic = _make_topic(run, scout)
