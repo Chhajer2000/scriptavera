@@ -326,7 +326,6 @@ function connect(pid) {
     if (e.type === "log") {
       S.logs.push(e); if (S.logs.length > 400) S.logs.shift();
       drawLog();
-  if (S.view === "new" && S.form && S.form.files && S.form.files.length) renderUploadPreview();
       if (e.level === "error" || e.level === "gate" || e.level === "done") refreshSoon(150);
     } else if (e.type === "progress") {
       if (S.b && S.b.state.stages[e.stage]) S.b.state.stages[e.stage].progress = { done: e.done, total: e.total, note: e.note };
@@ -2632,6 +2631,7 @@ function render() {
   if (HOSTED.on) HOSTED.paintButtons();             // Google's sign-in buttons, where the page has room for one
   renderMath(main);
   drawLog();
+  if (S.view === "new" && S.form && S.form.files && S.form.files.length) renderUploadPreview();
   if (S.view === "assemble" && S.tab === "latex" && S.b && S.b.paper) loadTex();
   if (S.edit) { const el = $(`.paper [data-block="${S.edit.target}"], .paper [data-part="${S.edit.target}"]`); if (el) el.classList.add("on"); }
 }
