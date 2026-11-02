@@ -448,7 +448,7 @@ def _scout_order(pages: list[dict]) -> list[int]:
 
 
 SCOUT_LEAST = 5            # pages read before the topic is decided (all of them, if there are fewer)
-SCOUT_CONFIDENCE = 0.85    # and read on until the topic is at least this clear
+SCOUT_CONFIDENCE = 0.80    # and read on until the topic is at least this clear
 
 
 def stage_scout(run: Run) -> None:
@@ -469,6 +469,8 @@ def stage_scout(run: Run) -> None:
     rounds = 0
     while True:
         read_content = sum(1 for v in scout.values() if v["kind"] == "content")
+        if topic.get("confidence", 0) >= threshold and read_content >= least:
+            break
         todo = [n for n in order if str(n) not in scout][:max(batch, least - read_content)]
         if not todo:
             break
