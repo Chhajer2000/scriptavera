@@ -36,12 +36,14 @@ try:
         pg.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
         pg.on("pageerror", lambda e: errors.append("PAGEERROR " + str(e)))
         pg.goto(f"http://127.0.0.1:{PORT}/#p/{p.id}/review"); pg.wait_for_selector(".review"); time.sleep(0.8)
-        line = pg.inner_text(".autoline")
-        assert "One drawing only explains your argument" in line and "page 3" in line, line
-        assert pg.locator("#fig-f2").count() == 0, "a sure explanation is not asked about"
         assert "For the paper." in pg.inner_text("#fig-f1 .figverdict")
         pg.screenshot(path=str(OUT / "d1_todo.png"))
-        pg.click('.autoline [data-act="rvtab"]'); time.sleep(0.5)
+        pg.click('.rv3-row .rv-p[data-n="3"]'); time.sleep(0.5)
+        line = pg.inner_text("#rvpanel .autoline")
+        assert "One drawing on this page only explains your argument" in line, line
+        assert pg.locator("#fig-f2").count() == 0, "a sure explanation is not asked about"
+        assert "not printed" in pg.inner_text("#tb-3 .tfig"), "the middle says what was decided about the drawing"
+        pg.locator("#rvpanel > details.pp-sec > summary").click(); time.sleep(0.3)
         row = pg.locator(".srow", has_text="Page 3")
         assert "Not printed" in row.inner_text() and "Decided by the app" in row.inner_text(), row.inner_text()
         pg.screenshot(path=str(OUT / "d2_settled.png"))
@@ -54,13 +56,15 @@ try:
         pg.click('#fig-f2 .choice[data-v="explain"]'); time.sleep(0.6)
         assert pg.locator("#fig-f2").count() == 0 and "Not printed" in pg.inner_text("#toast")
         for _ in range(20):                                           # every other item settled: Approve opens
-            left = pg.evaluate("(() => { const x = openItems()[0]; return x ? x.type + ':' + x.f.id : '' })()")
+            left = pg.evaluate("(() => { const x = openItems()[0]; return x ? x.type + ':' + x.f.id + ':' + x.n : '' })()")
             if not left:
                 break
-            t, i = left.split(":")
+            t, i, n = left.split(":"); pg.click(f'.rv3-row .rv-p[data-n="{n}"]'); time.sleep(0.3)
             pg.locator(f'#fig-{i} .choice[data-v="orig"]' if t == "fig" else f'#flag-{i} [data-act="dropflag"]').click(); time.sleep(0.4)
+        assert "Approve and continue" in pg.inner_text(".rv3-acts")
+        pg.click('#rvpanel [data-act="rvmode"][data-v="approve"]'); time.sleep(0.3)        # the summary, before approving
         assert "1 only explaining your argument (not printed)" in pg.inner_text(".approve-card"), pg.inner_text(".approve-card")
-        pg.click('[data-act="approve"]'); time.sleep(1.5)
+        pg.click('.approve-card [data-act="approve"]'); time.sleep(1.5)
         b.close()
     figs = {f["id"]: f for f in p.load("figures")["items"]}
     assert figs["f2"]["choice"] == "explain" and not figs["f2"]["auto"] and p.load("approved"), figs["f2"]

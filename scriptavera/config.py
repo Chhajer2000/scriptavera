@@ -40,7 +40,7 @@ DEFAULT_SETTINGS = {
     # Pinned models per role, e.g. {"vision_best": ["gemini:gemini-3.8-flash"]}
     "routing": {},
     "scout_batch": 4,          # pages read per scout round
-    "scout_confidence": 0.7,   # stop scouting once topic confidence reaches this
+    "scout_confidence": 0.85,  # stop scouting once topic confidence reaches this (never below 0.85; at least 5 pages)
     "candidates_keep": 24,     # papers kept after ranking
     "read_top_k": 8,           # papers read in full
     "parallel_pages": 2,       # simultaneous page calls in the survey pass

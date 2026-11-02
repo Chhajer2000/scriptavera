@@ -72,7 +72,7 @@ ARTIFACTS: dict[str, list[str]] = {
     "survey": ["survey", "glossary", "locations"],
     "confirm": ["confirmed"],
     "reading": ["brief"],
-    "transcribe": ["transcript", "flags", "dismissed", "doubt_answers"],
+    "transcribe": ["transcript", "flags", "dismissed", "doubt_answers", "page_checks"],
     "figures": ["figures"],
     "review": ["approved"],
     "understand": ["dossier"],
@@ -87,6 +87,52 @@ ARTIFACTS: dict[str, list[str]] = {
     "assemble": ["front", "paper", "final_partial", "revision", "citations"],
     "finish": ["finished"],
 }
+
+
+# What kind of notes were uploaded decides which steps are needed. Handwritten notes (scans, photos, a PDF of images)
+# go through every step. Typed notes (LaTeX, Markdown, text) are their own transcript: nothing is read from an image,
+# so there is no transcription to make, no drawing to find and nothing to check. A PDF made on a computer has the
+# exact words in its text layer; its formulas are still read from the page, and the author is asked only about the
+# figures, under "Your figures" (the step disappears when no figure needs a decision).
+SOURCE_LABELS = {"handwritten": "Handwritten or scanned notes", "text_pdf": "A PDF made on a computer",
+                 "typed": "LaTeX or typed notes"}
+SKIPPED_FOR = {"typed": ["transcribe", "figures", "review"], "text_pdf": [], "handwritten": []}
+
+
+def source_kind(state: dict, folder: Path) -> str:
+    pages = [pg for pg in state.get("pages", []) if isinstance(pg, dict) and not pg.get("skip")]
+    if not pages:
+        return "handwritten"
+
+    def read(name: str) -> dict:
+        f = folder / f"{name}.json"
+        try:
+            return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+        except Exception:
+            return {}
+    typed_pages = read("typed").get("pages", {})
+    # text_layer is set at upload only for text a computer drew on the page: the hidden text that tablets and OCR put
+    # under handwriting does not count, and a page uploaded before this check is treated as handwriting
+    kinds = {"typed" if (pg.get("typed") or str(pg["n"]) in typed_pages) else "text" if pg.get("text_layer") else "image"
+             for pg in pages}
+    if "image" in kinds:
+        return "handwritten"                  # one page read from its image makes the whole upload need every step
+    return "typed" if kinds == {"typed"} else "text_pdf"
+
+
+def hidden_stages(state: dict, folder: Path) -> list[str]:
+    """The steps this upload does not need: they still run where they have work to do, but are not shown."""
+    kind = source_kind(state, folder)
+    out = list(SKIPPED_FOR[kind])
+    if kind == "text_pdf" and state.get("stages", {}).get("review", {}).get("skipped"):
+        out.append("review")                  # no figure needed the author's decision
+    return out
+
+
+def source_plan(state: dict, folder: Path) -> dict:
+    kind = source_kind(state, folder)
+    return {"kind": kind, "label": SOURCE_LABELS[kind], "hidden": hidden_stages(state, folder),
+            "names": {"review": "Your figures"} if kind == "text_pdf" else {}}
 
 
 _locks: dict[str, threading.RLock] = {}
@@ -374,7 +420,8 @@ def list_projects() -> list[dict]:
         if st.get("layout") != LAYOUT:
             proj = get(st["id"])
             st = proj.state if proj else st
-        done = sum(1 for s in st.get("stages", {}).values() if s.get("status") == "done")
+        hidden = hidden_stages(st, d)
+        done = sum(1 for sid, s in st.get("stages", {}).items() if s.get("status") == "done" and sid not in hidden)
         waiting = next((sid for sid in STAGE_IDS if st["stages"].get(sid, {}).get("status") == "waiting"), None)
         paused = next((s.get("resume_at") for s in st["stages"].values() if s.get("status") == "paused"), None)
         now = next((sid for sid in STAGE_IDS if st["stages"].get(sid, {}).get("status") != "done"), None)
@@ -384,13 +431,14 @@ def list_projects() -> list[dict]:
                     "imported": bool(meta.get("imported")), "test": (meta.get("test") or {}).get("before") or None,
                     "authors": [a.get("name") for a in meta.get("authors") or [] if isinstance(a, dict) and a.get("name")][:6],
                     "first_page": first, "record": (d / "proof" / "record.json").exists(),
-                    "current": now, "current_name": next((x["name"] for x in STAGES if x["id"] == now), ""),
+                    "current": now, "current_name": next((x["name"] for x in STAGES if x["id"] == now), "") if now not in hidden
+                    else next((x["name"] for x in STAGES if x["id"] not in hidden and st["stages"].get(x["id"], {}).get("status") != "done"), ""),
                     "completed": st["stages"].get("finish", {}).get("status") == "done",
                     "stopped": next((s.get("error") for s in st["stages"].values() if s.get("status") == "error"), None),
                     "paused": paused, "id": st["id"], "name": st.get("meta", {}).get("name") or "Untitled notes",
                     "domains": st.get("meta", {}).get("domains", []), "pages": len(st.get("pages", [])),
                     "created": st.get("created"), "updated": st.get("updated"), "done": done,
-                    "total": len(STAGE_IDS), "waiting": waiting, "error": bool(st.get("error")),
+                    "total": len(STAGE_IDS) - len(hidden), "hidden": hidden, "waiting": waiting, "error": bool(st.get("error")),
                     "title": st.get("meta", {}).get("title") or st.get("paper_title") or ""})
     out.sort(key=lambda x: x.get("updated") or 0, reverse=True)
     return out

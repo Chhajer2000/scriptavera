@@ -464,7 +464,7 @@ def _bundle(p: store.Project) -> dict:
                    for n, v in (p.load("survey") or {}).items()},
         "brief": p.load("brief"), "transcript": shown_tr, "flags": shown_flags, "language_settled": settled,
         "figures": (p.load("figures") or {}).get("items"), "approved": bool(p.load("approved")),
-        "doubt_answers": p.load("doubt_answers", []), "adding": pipeline.adding_now(p),
+        "doubt_answers": p.load("doubt_answers", []), "page_notes": pipeline.page_notes(p), "source_plan": store.source_plan(p.state, p.dir), "adding": pipeline.adding_now(p),
         "dossier": p.load("dossier"), "intro": p.load("intro"), "plan": p.load("plan"), "draft": draft,
         "assessment": assessment, "novelty": p.load("novelty"), "scope": p.load("scope"), "scope_default": writing.default_scope(assessment) if assessment else None,
         "finish": final.finish_info(p) if p.load("paper") else None,
@@ -794,6 +794,44 @@ async def api_doubt(request: Request):
                            how=str(body.get("how") or "kept"), value=str(body.get("value") or ""),
                            issue=str(body.get("issue") or ""))
     return ok()
+
+
+async def api_page_note(request: Request):
+    """The author's comment on one page of the notes, or the page confirmed as read (or no longer)."""
+    p = _project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    body = await _body(request)
+    try:
+        n = int(body.get("page") or 0)
+    except (TypeError, ValueError):
+        return fail("Unknown page.")
+    if n not in {pg.get("n") for pg in p.state.get("pages", [])}:
+        return fail("Unknown page.")
+    comment = body.get("comment") if isinstance(body.get("comment"), str) else None
+    confirmed = bool(body.get("confirmed")) if "confirmed" in body else None
+    return ok(notes=pipeline.set_page_note(p, n, comment=comment, confirmed=confirmed))
+
+
+async def api_correct_page(request: Request):
+    """The author's comment on a page carried out by the model (or, with undo, the last such correction taken back)."""
+    p = _project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    if pipeline.is_running(p.id) and p.state["stages"].get("transcribe", {}).get("status") == "running":
+        return fail("Pages are being read right now. Try again in a minute; your comment is saved.")
+    body = await _body(request)
+    try:
+        n = int(body.get("page") or 0)
+    except (TypeError, ValueError):
+        return fail("Unknown page.")
+    try:
+        if body.get("undo"):
+            return ok(**pipeline.undo_correction(p, n))
+        comment = body.get("comment") if isinstance(body.get("comment"), str) else None
+        return ok(**await run_in_threadpool(pipeline.correct_page, p, n, comment))
+    except (ValueError, LLMError) as e:
+        return fail(str(e))
 
 
 async def api_figure_image(request: Request):
@@ -1737,6 +1775,8 @@ routes = [
     Route("/api/projects/{pid}/reglossary", api_reglossary, methods=["POST"]),
     Route("/api/projects/{pid}/transcript/{n}", api_transcript, methods=["PUT"]),
     Route("/api/projects/{pid}/doubt", api_doubt, methods=["POST"]),
+    Route("/api/projects/{pid}/page_note", api_page_note, methods=["POST"]),
+    Route("/api/projects/{pid}/correct_page", api_correct_page, methods=["POST"]),
     Route("/api/projects/{pid}/figure/{fid}", api_figure_image, methods=["GET"]),
     Route("/api/projects/{pid}/figure/{fid}", api_figure, methods=["POST"]),
     Route("/api/projects/{pid}/review", api_review, methods=["POST"]),

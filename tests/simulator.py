@@ -267,6 +267,16 @@ def respond(label: str, system: str, user: str, vision: bool, model: Model | Non
         m = re.search(r"\\begin\{tikzpicture\}.*\\end\{tikzpicture\}", user, re.S)
         return "<tikz>\n" + (m.group(0) if m else "") + "\n</tikz>"
 
+    # ---- the author's comment on a page, carried out: "X -> Y" replaces X by Y; anything else changes nothing
+    if label.startswith("Correct page"):
+        comment = user.split("THE AUTHOR'S COMMENT ON THIS PAGE\n", 1)[1].split("\n\nCONFIRMED NOTATION", 1)[0]
+        page = user.split("TRANSCRIPTION OF THIS PAGE\n", 1)[1]
+        m = re.search(r"(.+?)\s*->\s*(.+)", comment)
+        if m and m.group(1).strip() in page:
+            a, b = m.group(1).strip(), m.group(2).strip()
+            return f"<transcript>\n{page.replace(a, b)}\n</transcript>\n<changes>\n{a} -> {b}\n</changes>\n<reply>\nReplaced {a} by {b}.\n</reply>"
+        return f"<transcript>\n{page}\n</transcript>\n<changes>\nnone\n</changes>\n<reply>\nYour comment explains the page; nothing in the transcription needed changing.\n</reply>"
+
     # ---- reading the notes
     if label.startswith("Locate"):
         if "tail" in label:

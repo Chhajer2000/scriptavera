@@ -228,6 +228,23 @@ def _stage_func(sid: str):
             "assemble": final.stage_assemble}[sid]
 
 
+def _review_not_needed(p: Project) -> str:
+    """The transcript is approved without stopping when the upload leaves nothing to check: typed notes are their
+    own transcript; in a PDF made on a computer the words are exact, and the author is asked only about figures,
+    so the step stops only for a figure that needs a decision. Returns what to tell the author, or "" to stop."""
+    kind = storelib.source_kind(p.state, p.dir)
+    if kind == "handwritten" or pending_comments(p):
+        return ""
+    if kind == "typed":
+        return "Your notes are typed: their text is the transcript, so there was nothing to read from an image or to check."
+    present = {(f["page"], f["k"]) for f in transcript_figures(p)}
+    if any((f["page"], f["k"]) in present and f.get("choice") not in ("tikz", "orig", "none", "explain")
+           for f in (p.load("figures") or {}).get("items", [])):
+        return ""
+    return ("The words of your PDF were taken from the file, and no figure needed your decision, so the transcript "
+            "was approved without stopping.")
+
+
 def _gate_is_empty(p: Project, sid: str) -> bool:
     """A gate with nothing for the author to decide is passed without stopping."""
     if sid == "scope":
@@ -265,6 +282,12 @@ def _drive(run: Run) -> None:
                 continue
             run.stage = sid
             if stage.get("gate"):
+                passed = _review_not_needed(p) if sid == "review" else ""
+                if passed:
+                    submit_review(p, {})
+                    p.set_stage(sid, status="done", finished=time.time(), skipped=True)
+                    run.log(passed, "done")
+                    continue
                 if _gate_is_empty(p, sid):
                     p.set_stage(sid, status="done", finished=time.time(), skipped=True)
                     run.log(GATE_PASSED.get(sid, "Nothing needed your decision, so this step was passed."), "done")
@@ -310,6 +333,14 @@ def _drive(run: Run) -> None:
 
 def _page_bytes(p: Project, n: int) -> bytes:
     return (p.dir / "pages" / f"p{n:03d}.jpg").read_bytes()
+
+
+def exact_layers(p: Project) -> dict:
+    """The text layers of the pages whose text a computer drew (ingest.py): their words are exact. A hidden reading
+    of handwriting that a tablet or OCR put in the PDF is never given to the readers as exact."""
+    layers = p.load("textlayer", {}) or {}
+    ok = {str(pg["n"]) for pg in p.state.get("pages", []) if pg.get("text_layer")}
+    return {n: v for n, v in layers.items() if n in ok}
 
 
 def _content_pages(p: Project) -> list[dict]:
@@ -416,6 +447,10 @@ def _scout_order(pages: list[dict]) -> list[int]:
     return head + spread
 
 
+SCOUT_LEAST = 5            # pages read before the topic is decided (all of them, if there are fewer)
+SCOUT_CONFIDENCE = 0.85    # and read on until the topic is at least this clear
+
+
 def stage_scout(run: Run) -> None:
     p = run.p
     pages = _content_pages(p)
@@ -424,24 +459,28 @@ def stage_scout(run: Run) -> None:
     scout: dict = p.load("scout", {})
     order = _scout_order(pages)
     batch = max(2, int(run.settings.get("scout_batch", 4)))
-    threshold = float(run.settings.get("scout_confidence", 0.7))
+    threshold = max(SCOUT_CONFIDENCE, float(run.settings.get("scout_confidence", SCOUT_CONFIDENCE)))
+    least = min(SCOUT_LEAST, len(pages))       # never decide the topic from fewer pages than this
+    layers = exact_layers(p)
     system = prompts.SCOUT.format(field=run.field)
     total = len(order)
     topic: dict = p.load("topic", {})
     _resolve_key_papers(run)
     rounds = 0
     while True:
-        todo = [n for n in order if str(n) not in scout][:batch]
+        read_content = sum(1 for v in scout.values() if v["kind"] == "content")
+        todo = [n for n in order if str(n) not in scout][:max(batch, least - read_content)]
         if not todo:
             break
         rounds += 1
         typed_src = (p.load("typed") or {}).get("pages", {})
         for n in todo:
             run.check()
-            if str(n) in typed_src:            # typed notes: their words are known, nothing is read from an image
-                src = typed_src[str(n)]
-                scout[str(n)] = {"kind": "notes", "prose": fit(re.sub(r"\$[^$]*\$|\\\[.*?\\\]", " ", src, flags=re.S), 2500, "head"),
-                                 "printed": "", "terms": [], "names": [], "model": "typed source"}
+            if str(n) in typed_src or str(n) in layers:   # typed notes, or a PDF's text layer: the words are known
+                src = typed_src.get(str(n)) or layers[str(n)]
+                scout[str(n)] = {"kind": "content", "prose": fit(re.sub(r"\$[^$]*\$|\\\[.*?\\\]", " ", src, flags=re.S), 2500, "head"),
+                                 "printed": "", "terms": [], "names": [],
+                                 "model": "typed source" if str(n) in typed_src else "text layer of the PDF"}
                 p.save("scout", scout)
                 run.progress(len(scout), total, f"page {n} read")
                 continue
@@ -468,8 +507,12 @@ def stage_scout(run: Run) -> None:
         run.changed()
         run.log(f"Topic confidence {int(topic['confidence'] * 100)}% after {len(scout)} page(s): {topic.get('subfield', '')}")
         read_content = sum(1 for v in scout.values() if v["kind"] == "content")
-        if topic["confidence"] >= threshold and read_content >= min(3, len(pages)):
+        if topic["confidence"] >= threshold and read_content >= least:
             break
+        if [n for n in order if str(n) not in scout]:
+            run.log(f"Reading more pages: the topic is {int(topic['confidence'] * 100)}% clear"
+                    + (f", and at least {least} pages are read" if read_content < least else f"; {int(threshold * 100)}% is needed")
+                    + (f" ({topic['missing']})" if topic.get("missing") and read_content >= least else "") + ".")
     if not topic:
         topic = _make_topic(run, scout)
         p.save("topic", topic)
@@ -745,6 +788,7 @@ def stage_survey(run: Run) -> None:
     errors: list[str] = []
 
     typed_src = (p.load("typed") or {}).get("pages", {})
+    layers = exact_layers(p)
 
     def work(n: int) -> None:
         src = typed_src.get(str(n))
@@ -754,7 +798,11 @@ def stage_survey(run: Run) -> None:
                           f"and catalogue the notation as instructed.\n\nSOURCE OF THE PAGE\n{src}", max_out=3200,
                           effort="medium", label=f"Survey page {n} (typed)")
         else:
-            res = run.ask("vision_best", system, f"This is page {n} of {len(p.state['pages'])}.",
+            layer = layers.get(str(n))             # a PDF made on a computer: its exact words go beside the image
+            res = run.ask("vision_best", system, f"This is page {n} of {len(p.state['pages'])}." + (
+                "\n\nTEXT LAYER OF THIS PAGE (copied from the PDF file itself: its words are exact, its formulas are not, "
+                "because superscripts, fractions and symbols are flattened in it; read the formulas from the image)\n"
+                + fit(layer, 2500, "head") if layer else ""),
                           images=[_page_bytes(p, n)], max_out=3200, effort="medium", label=f"Survey page {n}")
         kind = _kind(res.text, answer_transcript(res.text))
         symbols = []
@@ -1437,6 +1485,110 @@ def dismiss_doubt(p: Project, page: int, snippet: str, alt: str, how: str = "kep
         memory.learn_reading(p.state.get("meta", {}), snippet, alt if how == "suggested" else value)
 
 
+def page_notes(p: Project) -> dict:
+    """The author's comment on each page of the notes, and the pages they confirmed as read. A comment is the
+    author's own word about a handwritten page and is kept when the pages are read again; a confirmation is of one
+    reading, and goes when the transcription is done again."""
+    notes = (p.load("page_notes") or {}).get("pages", {})
+    checks = (p.load("page_checks") or {}).get("pages", {})
+    return {"comments": {n: v for n, v in notes.items() if (v or {}).get("text")}, "confirmed": checks}
+
+
+def set_page_note(p: Project, n: int, comment: str | None = None, confirmed: bool | None = None) -> dict:
+    """Save the author's comment on page n (an empty comment removes it), or confirm the page as read (or undo it)."""
+    with p._lock:
+        if comment is not None:
+            data = p.load("page_notes", {"pages": {}})
+            text = str(comment).strip()[:4000]
+            if text:
+                data["pages"][str(n)] = {"text": text, "at": time.time()}
+            else:
+                data["pages"].pop(str(n), None)
+            p.save("page_notes", data)
+        if confirmed is not None:
+            data = p.load("page_checks", {"pages": {}})
+            if confirmed:
+                data["pages"][str(n)] = time.time()
+            else:
+                data["pages"].pop(str(n), None)
+            p.save("page_checks", data)
+    return page_notes(p)
+
+
+def pending_comments(p: Project) -> list[int]:
+    """Pages with a comment of the author's that has not been carried out yet. The transcript is not approved while
+    there is one."""
+    return sorted(int(n) for n in page_notes(p)["comments"])
+
+
+def correct_page(p: Project, n: int, comment: str | None = None) -> dict:
+    """The author's comment on page n is carried out: the page is read again with the comment, and only what the
+    comment asks for is changed. The comment is then settled and kept with the page, with what was done and the page
+    as it was before, so that the correction can be undone."""
+    tr = p.load("transcript", {"pages": {}})
+    page = tr["pages"].get(str(n))
+    if not page:
+        raise ValueError("This page has not been read yet.")
+    note = (comment if comment is not None else (page_notes(p)["comments"].get(str(n)) or {}).get("text", "")).strip()[:4000]
+    if not note:
+        raise ValueError("Write your comment on the page first.")
+    before = page["text"]
+    hooks = Run(p)
+    hooks.stage = "review"
+    user = (f"PAGE {n}\n\nTHE AUTHOR'S COMMENT ON THIS PAGE\n{note}\n\n"
+            f"CONFIRMED NOTATION\n{notation_text(p.load('confirmed', {}), 1200)}\n\n"
+            f"TRANSCRIPTION OF THIS PAGE\n{before}")
+    res = router.chat("vision_best", prompts.CORRECT_PAGE, user, images=[_page_bytes(p, n)], max_out=4000, effort="medium",
+                      label=f"Correct page {n} from the author's comment", hooks=hooks)
+    text = clean_transcript(answer_transcript(res.text))
+    if not text.strip() or looping(text):
+        raise ValueError("The page could not be corrected this time. Try again, or edit its LaTeX by hand.")
+    if len(find_figures(text)) != len(find_figures(before)):
+        raise ValueError("Carrying out the comment would have added or removed a drawing, so nothing was changed. "
+                         "Use the choices for the drawing instead, or say more precisely what is wrong.")
+    changes = [c for c in parse_lines(extract_tag(res.text, "changes")) if c.strip().lower() not in ("none", "-")]
+    reply = re.sub(r"\s+", " ", extract_tag(res.text, "reply") or "").strip()[:600]
+    if text.strip() == before.strip():
+        changes = []
+    done = {"comment": note, "changes": changes[:30], "reply": reply or ("Corrected." if changes else "Nothing was changed."),
+            "before": before, "at": time.time()}
+    with p._lock:
+        tr = p.load("transcript", {"pages": {}})
+        cur = tr["pages"].get(str(n))
+        if not cur or cur["text"] != before:
+            raise ValueError("The page changed meanwhile. Try again.")
+        if changes:
+            cur["text"], cur["edited"] = text, True
+            cur["uncertain"] = [u for u in cur.get("uncertain", []) if not u.get("snippet") or u["snippet"] in text]
+        cur.setdefault("corrections", []).append(done)
+        p.save("transcript", tr)
+        notes = p.load("page_notes", {"pages": {}})       # the comment is settled (the one sent is what the author wrote)
+        notes["pages"].pop(str(n), None)
+        p.save("page_notes", notes)
+        if changes:                                   # what was confirmed is not what the page says now
+            checks = p.load("page_checks", {"pages": {}})
+            checks["pages"].pop(str(n), None)
+            p.save("page_checks", checks)
+    return {"page": n, "text": cur["text"], "correction": {k: v for k, v in done.items() if k != "before"},
+            "changed": bool(changes), "notes": page_notes(p)}
+
+
+def undo_correction(p: Project, n: int) -> dict:
+    """The last correction made from the author's comment is taken back; the comment comes back to be changed."""
+    with p._lock:
+        tr = p.load("transcript", {"pages": {}})
+        cur = tr["pages"].get(str(n))
+        if not cur or not cur.get("corrections"):
+            raise ValueError("There is no correction on this page to undo.")
+        last = cur["corrections"].pop()
+        cur["text"] = last["before"]
+        p.save("transcript", tr)
+        notes = p.load("page_notes", {"pages": {}})
+        notes["pages"][str(n)] = {"text": last["comment"], "at": time.time()}
+        p.save("page_notes", notes)
+    return {"page": n, "text": cur["text"], "notes": page_notes(p)}
+
+
 def adding_now(p: Project) -> dict | None:
     """While pages are added after the transcript was first checked: which pages are still being read, and whether
     figures are still being drawn. None when nothing is being added."""
@@ -1536,7 +1688,7 @@ def stage_transcribe(run: Run) -> None:
     old_flags = p.load("flags")                # present when pages are added after the transcript was checked
     fresh: list[int] = []
     typed_src = (p.load("typed") or {}).get("pages", {})
-    layers = p.load("textlayer", {}) or {}
+    layers = exact_layers(p)
     from . import memory
     hand = "" if p.state.get("meta", {}).get("test") else memory.quirks()
     for i, pg in enumerate(pages, 1):
@@ -1625,8 +1777,8 @@ def stage_transcribe(run: Run) -> None:
 
     for pg in pages:
         t = tr["pages"].get(str(pg["n"]), {}).get("text", "")
-        if not t or (to_check is not None and pg["n"] not in to_check):
-            continue
+        if not t or (to_check is not None and pg["n"] not in to_check) or str(pg["n"]) in typed_src:
+            continue                           # a typed page is its own source: nothing on it can be misread
         piece = f"=== page {pg['n']} ===\n{t}"
         if size + len(piece) > room and chunk:
             flush()
@@ -2231,13 +2383,20 @@ def submit_review(p: Project, data: dict) -> None:
              if v["text"].strip()]
     if not pages:
         raise ValueError("The transcript is empty.")
+    waiting = pending_comments(p)
+    if waiting:
+        raise ValueError("Your comment" + (" on page " if len(waiting) == 1 else "s on pages ") + ", ".join(map(str, waiting))
+                         + (" has" if len(waiting) == 1 else " have") + " not been carried out yet. Correct the page"
+                         + ("" if len(waiting) == 1 else "s") + " from your comments first.")
     present = {(f["page"], f["k"]) for f in transcript_figures(p)}
     open_figs = [f for f in (p.load("figures") or {}).get("items", [])
                  if (f["page"], f["k"]) in present and f.get("choice") not in ("tikz", "orig", "none", "explain")]
     if open_figs:
         raise ValueError("Please say for each figure whether it is the one you meant (still open: page "
                          + ", ".join(str(f["page"]) for f in open_figs[:8]) + ").")
-    p.save("approved", {"pages": pages, "at": time.time()})
+    corrections = {int(n): [{k: c[k] for k in ("comment", "changes", "reply")} for c in v.get("corrections", [])]
+                   for n, v in tr["pages"].items() if v.get("corrections")}
+    p.save("approved", {"pages": pages, "corrections": corrections, "at": time.time()})
     p.set_stage("review", status="done", finished=time.time())
     edited = sum(1 for v in tr["pages"].values() if v.get("edited"))
     emit(p.id, "log", stage="review", level="done", message=f"Transcript approved ({edited} page(s) edited by you).")

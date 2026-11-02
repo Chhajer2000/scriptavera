@@ -61,6 +61,36 @@ def _save(img: Image.Image, out_dir: Path, n: int) -> dict:
     }
 
 
+def _text_visible(page) -> bool:
+    """Whether a PDF page's text is what the reader sees. Notes written by hand on a tablet (GoodNotes, Notability,
+    OneNote) or scanned and run through OCR carry a hidden text layer: a machine's guess at the handwriting, under or
+    behind the strokes, which changes nothing on the page. The page is drawn with its text and without it; a page
+    whose look does not change has no text of its own. The page is changed in memory only."""
+    try:
+        import pypdfium2.raw as raw
+        from PIL import ImageChops
+        def look():
+            bm = page.render(scale=0.5)
+            try:
+                return bm.to_pil().convert("L")
+            finally:
+                bm.close()
+        before = look()
+        texts = [o for o in page.get_objects(max_depth=1) if o.type == raw.FPDF_PAGEOBJ_TEXT]
+        if not texts:
+            return False
+        for o in texts:
+            page.remove_obj(o)
+        page.gen_content()
+        for o in texts:                          # removed objects belong to no page any more: free them now
+            o.close()
+        after = look()
+        changed = ImageChops.difference(before, after).point(lambda v: 255 if v > 40 else 0).histogram()[255]
+        return changed / (before.width * before.height) >= 0.002
+    except Exception:  # noqa: BLE001 - when in doubt the page is read from its image, as handwriting is
+        return False
+
+
 def ingest(files: list[tuple[str, bytes]], out_dir: Path, start: int = 0) -> list[dict]:
     """Render every page of every file, in upload order, numbered from start + 1. Returns page records."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -86,8 +116,9 @@ def ingest(files: list[tuple[str, bytes]], out_dir: Path, start: int = 0) -> lis
                         layer = page.get_textpage().get_text_range()
                     except Exception:  # noqa: BLE001 - a page without a usable text layer is read from its image
                         layer = ""
-                    if len(re.sub(r"\s", "", layer)) >= 60:
+                    if len(re.sub(r"\s", "", layer)) >= 60 and _text_visible(page):
                         layers[str(n)] = layer[:8000]
+                        rec["text_layer"] = True        # words drawn as text by a computer, not a hidden reading of handwriting
                     page.close()
             finally:
                 pdf.close()

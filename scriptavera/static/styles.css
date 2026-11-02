@@ -317,7 +317,7 @@ details.more[open] > summary { margin-bottom: 12px; }
 .rv-head { padding: 12px 20px; border-bottom: 1px solid var(--rule-soft); display: flex; align-items: center; gap: 12px; }
 .rv-head h1 { font: 400 22px var(--tex); }
 .rv-pages { display: flex; gap: 5px; padding: 10px 20px; overflow-x: auto; border-bottom: 1px solid var(--rule-soft); flex: none; }
-.rv-p { min-width: 34px; height: 30px; border: 1px solid var(--rule); background: var(--paper); border-radius: 5px; cursor: pointer; font-variant-numeric: tabular-nums; position: relative; }
+.rv-p { min-width: 34px; height: 30px; border: 1px solid var(--btn-edge); background: var(--paper); box-shadow: 0 1px 1.5px rgba(24,33,43,.10); border-radius: 5px; cursor: pointer; font-variant-numeric: tabular-nums; position: relative; }
 .rv-p.on { background: var(--ink); color: #fff; border-color: var(--ink); }
 .rv-p.flag::after { content: ""; position: absolute; right: -3px; top: -3px; width: 9px; height: 9px; border-radius: 50%; background: var(--hl); border: 1px solid #b89f17; }
 .rv-p.edited { border-color: var(--blue); }
@@ -1034,3 +1034,169 @@ textarea.mono { font-family: var(--mono); font-size: 13px; width: 100%; }
   align-items: center;
   gap: 6px;
 }
+
+/* The review, page for page: the page in hand on the left, the notes as read in the middle, the handwritten pages on
+   the right. */
+#app.rv-wide { grid-template-columns: minmax(0, 1fr); }
+#app.rv-wide #rail { display: none; }
+.review.rv3 { display: flex; flex-direction: column; height: calc(100vh - 54px); }
+.rv3-top { display: flex; align-items: center; gap: 18px; padding: 10px 16px; background: var(--paper); border-bottom: 1px solid var(--rule); flex: none; }
+.rv3-title h1 { font: 400 21px var(--tex); white-space: nowrap; }
+.rv3-pages { flex: 1; min-width: 0; }
+.rv3-row { display: flex; gap: 4px; overflow-x: auto; padding: 3px 3px 4px; }
+.rv3-row .rv-p { min-width: 32px; height: 28px; flex: none; font-size: 13px; }
+.rv3-row .rv-p.s-doubt { background: var(--hl-soft); border-color: #d6b20c; color: #5b4a00; font-weight: 600; }
+.rv3-row .rv-p.s-ok { background: var(--green-soft); border-color: #8cc5a6; color: var(--green); }
+.rv3-row .rv-p.s-out { border-style: dashed; color: var(--graphite); opacity: .65; }
+.rv3-row .rv-p.s-reading { color: var(--graphite); font-style: italic; }
+.rv3-row .rv-p.noted::after { content: ""; position: absolute; right: -3px; bottom: -3px; width: 9px; height: 9px; border-radius: 50%; background: var(--blue); border: 1.5px solid #fff; }
+.rv3-row .rv-p.on { background: var(--ink); color: #fff; border-color: var(--ink); box-shadow: 0 0 0 2px var(--blue-soft); }
+.rv3-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--graphite); padding: 2px 3px 0; }
+.rv3-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.lg { display: inline-block; width: 11px; height: 11px; border-radius: 3px; border: 1px solid var(--rule); background: var(--paper); }
+.lg.s-doubt { background: var(--hl-soft); border-color: #d6b20c; }
+.lg.s-ok { background: var(--green-soft); border-color: #8cc5a6; }
+.lg.noted { border-radius: 50%; background: var(--blue); border-color: var(--blue); width: 9px; height: 9px; }
+.rv3-acts { display: flex; align-items: center; gap: 8px; flex: none; }
+.rv3-link { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--graphite); cursor: pointer; white-space: nowrap; }
+.rv3-banner { margin: 8px 16px 0; flex: none; }
+.rv3-cols { flex: 1; min-height: 0; display: grid; grid-template-columns: 350px minmax(0, 1.1fr) minmax(0, 1fr); }
+.rv3-cols > * { overflow: auto; min-height: 0; }
+.col-h { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: 10px; padding: 10px 2px; background: var(--desk); flex-wrap: wrap; }
+.col-h b { font-weight: 600; }
+
+/* the page in hand */
+.rv3-panel { background: var(--paper); border-right: 1px solid var(--rule); padding-bottom: 40px; }
+.pp-top { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: var(--paper); border-bottom: 1px solid var(--rule); }
+.pp-title { display: flex; align-items: baseline; gap: 6px; }
+.pp-k { font-size: 11.5px; color: var(--graphite); text-transform: uppercase; letter-spacing: .07em; }
+.pp-n { font: 400 25px var(--tex); line-height: 1; }
+.pp-state { font-size: 12.5px; padding: 2px 9px; border-radius: 10px; background: var(--rule-soft); white-space: nowrap; }
+.pp-state.s-doubt { background: var(--hl-soft); color: #6b5800; }
+.pp-state.s-ok { background: var(--green-soft); color: var(--green); }
+.pp-sec { display: block; padding: 12px 16px; border-bottom: 1px solid var(--rule-soft); }
+.pp-sec > p { margin-bottom: 8px; }
+.pp-h { display: block; font-weight: 600; margin-bottom: 4px; }
+.pp-note { width: 100%; resize: vertical; font: 14px/1.45 var(--ui); padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.pp-note:focus { border-color: var(--blue); outline: none; box-shadow: 0 0 0 2px var(--blue-soft); }
+.btn.wide { width: 100%; justify-content: center; }
+.pp-ok { display: flex; align-items: center; gap: 10px; color: var(--green); background: var(--green-soft); }
+.pp-ok span { flex: 1; }
+.pp-nav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pp-back { padding: 10px 16px; border-bottom: 1px solid var(--rule-soft); }
+.rv3-panel .qcard { margin: 10px 0 0; }
+.rv3-panel .autoline { margin: 12px 16px; }
+.rv3-panel .live { margin: 12px 16px; }
+.rv3-panel .approve-card { margin: 16px; }
+.rv3-panel details.pp-sec > summary { cursor: pointer; font-weight: 600; }
+
+/* the notes as read */
+.rv3-text { background: var(--desk); padding: 0 18px 60px; }
+.tsheet { background: var(--paper); border: 1px solid var(--rule); border-radius: 4px; margin: 0 0 18px; box-shadow: 0 1px 3px rgba(0,0,0,.05); scroll-margin-top: 48px; }
+.tsheet.s-doubt { border-left: 4px solid #d6b20c; }
+.tsheet.s-ok { border-left: 4px solid #6fb48f; }
+.tsheet.s-out { opacity: .75; }
+.tsheet.on { box-shadow: 0 0 0 2px var(--blue); }
+.ts-h { display: flex; align-items: center; gap: 6px; padding: 7px 12px 7px 16px; border-bottom: 1px solid var(--rule-soft); flex-wrap: wrap; }
+.ts-n { border: 0; background: none; padding: 0; margin-right: 6px; font: 400 17px var(--tex); color: var(--ink); cursor: pointer; }
+.ts-body { position: relative; padding: 12px 24px 16px; font: 16.5px/1.6 var(--tex); cursor: pointer; min-height: 56px; }
+.ts-body p { margin: .4em 0; }
+.ts-body mark, .ts-body .math.unc { background: var(--hl); }
+.ts-body .fig { display: block; font: 13.5px var(--ui); color: var(--graphite); border-left: 3px solid var(--rule); padding: 4px 10px; margin: .6em 0; }
+.ts-out { font: 14px var(--ui); color: var(--graphite); padding: 4px 0; cursor: default; }
+.ts-band { position: absolute; left: 0; right: 0; height: 36px; background: rgba(39,71,199,.09); border-left: 3px solid var(--blue); opacity: 0; pointer-events: none; }
+.ts-edit { padding: 0 16px 14px; }
+.ts-edit .rv-src { min-height: 220px; }
+.ts-note { margin: 0 16px 12px; padding: 8px 11px; background: var(--blue-soft); border-radius: 5px; font: 13.5px/1.45 var(--ui); white-space: pre-wrap; cursor: pointer; }
+.tfig { display: block; margin: .8em 0; padding: 8px 12px; border: 1px solid var(--rule); border-radius: 5px; background: #fafbf9; font: 13.5px/1.45 var(--ui); color: var(--graphite); }
+.tfig img { display: block; max-width: 100%; max-height: 300px; margin: 8px auto; background: #fff; }
+.tfig-h { display: block; font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.tfig-d { display: block; }
+.tfig.s-open { border-color: #d6b20c; background: var(--hl-soft); }
+.tfig.s-paper { border-color: #8cc5a6; }
+.tfig.s-gone { opacity: .6; }
+.tfig.s-gone .tfig-d { text-decoration: line-through; }
+
+/* the handwritten pages */
+.rv3-hand { background: #3b3f3c; }
+.rv3-hand .col-h { background: rgba(33,53,47,.97); color: var(--chalk); padding: 8px 12px; }
+.rv3-hand .col-h .btn { background: transparent; color: var(--chalk); border-color: var(--slate-3); }
+.rv3-hand .col-h .btn:hover { background: var(--slate-2); }
+.hs-list { width: calc(var(--hz, 1) * 100%); padding: 6px 16px 60px; }
+.hsheet { margin: 0 0 18px; }
+.hs-h { display: flex; gap: 8px; padding: 4px 2px 6px; font-size: 12.5px; color: var(--chalk-dim); }
+.hsheet.on .hs-h { color: #fff; font-weight: 600; }
+.hs-out { color: #e0b4ae; }
+.hs-img { position: relative; background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,.4); cursor: pointer; }
+.hs-img img { display: block; width: 100%; height: 100%; user-select: none; }
+.hsheet.on .hs-img { box-shadow: 0 0 0 3px #8ea2f2, 0 2px 12px rgba(0,0,0,.4); }
+.hsheet.out .hs-img { opacity: .55; }
+.hs-band { position: absolute; left: 0; width: 100%; background: rgba(255,228,92,.28); border: 2px solid #e2b800; border-radius: 4px; opacity: 0; pointer-events: none; }
+.hs-band.show, .ts-band.show { animation: rvband 2.6s ease forwards; }
+@keyframes rvband { 0% { opacity: 0; } 8% { opacity: 1; } 70% { opacity: 1; } 100% { opacity: 0; } }
+
+@media (max-width: 1350px) {
+  .rv3-cols { grid-template-columns: 310px minmax(0, 1fr) minmax(0, 1fr); }
+  .rv3-top { flex-wrap: wrap; }
+  .rv3-pages { order: 3; flex-basis: 100%; }
+}
+@media (max-width: 1000px) {
+  .review.rv3 { height: auto; }
+  .rv3-cols { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .rv3-panel { grid-column: 1 / -1; border-right: 0; border-bottom: 1px solid var(--rule); max-height: none; }
+  .rv3-text, .rv3-hand { height: 80vh; }
+}
+@media (max-width: 700px) {
+  .rv3-cols { grid-template-columns: minmax(0, 1fr); }
+  .rv3-text, .rv3-hand { height: 70vh; }
+}
+.ts-body .circled { display: inline-flex; align-items: center; justify-content: center; min-width: 1.5em; height: 1.5em; padding: 0 .25em; border: 1px solid currentColor; border-radius: 1em; font-size: .85em; line-height: 1; }
+.ts-body .ts-rule { display: block; border-top: 1px solid var(--rule); margin: .8em 0; }
+.pp-done { background: var(--blue-soft); }
+.pp-done.fresh, .tsheet.fresh { animation: rvfresh 2.4s ease; }
+@keyframes rvfresh { 0% { box-shadow: 0 0 0 3px #6fb48f; } 100% { box-shadow: 0 0 0 0 transparent; } }
+.pp-quote { font-style: italic; color: var(--graphite); margin: 2px 0 6px; white-space: pre-wrap; }
+.pp-changes { margin: 6px 0 0; padding-left: 18px; font-size: 13.5px; }
+.pp-changes li { margin: 2px 0; }
+.pp-note:disabled { background: var(--rule-soft); }
+.rail-kind { margin: 2px 12px 10px; padding: 6px 10px; border: 1px solid var(--slate-3); border-radius: 6px; font-size: 12px; color: var(--chalk-dim); }
+.step-num { display: inline-block; min-width: 1.75em; color: var(--chalk-dim); font-variant-numeric: tabular-nums; }
+
+/* ---------------------------------------------------------------- buttons: one look everywhere
+   The main action of a screen is solid blue. Every other button is tinted blue, with a blue edge and blue words, so
+   that it reads as a button on white paper, on the grey desk and on a coloured panel alike; no button is the colour of
+   what it stands on. On a panel that is itself tinted blue (or yellow, green, red) a button is white instead, and on
+   the dark slate it is a raised slate button with a light edge. Words underlined in a sentence stay links. */
+:root { --btn: #e9eefc; --btn-hover: #dae2fa; --btn-edge: #a9b8ea; --btn-ink: #1c3496; }
+.btn, .btn.quiet { background: var(--btn); border: 1px solid var(--btn-edge); color: var(--btn-ink); font-weight: 500;
+  box-shadow: 0 1px 1.5px rgba(24,33,43,.10); }
+.btn:hover:not(:disabled), .btn.quiet:hover:not(:disabled) { background: var(--btn-hover); border-color: var(--blue); color: var(--btn-ink); }
+.btn:active:not(:disabled) { transform: translateY(.5px); box-shadow: none; }
+.btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; box-shadow: 0 1px 2px rgba(28,52,150,.35); }
+.btn.primary:hover:not(:disabled) { background: var(--blue-deep); border-color: var(--blue-deep); color: #fff; }
+.btn.danger { background: var(--red-soft); border-color: #e2b6b1; color: var(--red); }
+.btn.danger:hover:not(:disabled) { background: #f6d9d5; border-color: var(--red); color: var(--red); }
+.btn.danger.solid { background: var(--red); border-color: var(--red); color: #fff; }
+.btn.danger.solid:hover:not(:disabled) { background: #a32c22; border-color: #a32c22; color: #fff; }
+.btn:disabled { opacity: .5; box-shadow: none; }
+:is(.banner, .live, .pp-done, .ts-note, .choice.on, .flag, .loc-status, .autoline, .dom.on, .trow.on, .prow.on, .dq-item.on, .jr-item, .pp-ok, .figcheck)
+  .btn:not(.primary):not(.danger) { background: #fff; }
+:is(.banner, .live, .pp-done, .ts-note, .choice.on, .flag, .loc-status, .autoline, .dom.on, .trow.on, .prow.on, .dq-item.on, .jr-item, .pp-ok, .figcheck)
+  .btn:not(.primary):not(.danger):hover:not(:disabled) { background: var(--btn); }
+:is(#rail, #topbar.homebar, .rv-tools, .rv3-hand .col-h, .lightbox) .btn:not(.primary),
+.home-btn, .hb-btn, .rail-foot button { background: var(--slate-2); color: var(--chalk); border: 1px solid #5d7d71; box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+:is(#rail, #topbar.homebar, .rv-tools, .rv3-hand .col-h, .lightbox) .btn:not(.primary):hover:not(:disabled),
+.home-btn:hover, .hb-btn:hover, .rail-foot button:hover { background: var(--slate-3); color: #fff; border-color: var(--chalk-dim); }
+.hb-btn.on { border-color: var(--hl); color: var(--hl); }
+.rail-foot button { border-radius: 7px; }
+/* a chip that does something is a small button: it has an edge; a chip that only says something has none */
+button.chip { border: 1px solid var(--btn-edge); box-shadow: 0 1px 1.5px rgba(24,33,43,.10); }
+button.chip:not(.blue):not(.green):not(.red):not(.hl) { background: var(--btn); color: var(--btn-ink); }
+button.chip.green { border-color: #8cc5a6; }
+button.chip.red { border-color: #e2b6b1; }
+button.chip.hl { border-color: #d6b20c; }
+button.chip:hover { filter: none; border-color: var(--blue); }
+.chip.big button.chip { border: 0; box-shadow: none; background: transparent; }
+.pick { border-color: var(--btn-edge); background: var(--btn); color: var(--btn-ink); }
+.pick:hover { border-color: var(--blue); }
+.pick.on { color: #fff; }

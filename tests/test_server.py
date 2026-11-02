@@ -175,6 +175,27 @@ assert "f(4)" not in [u["snippet"] for u in project(pid)["transcript"]["pages"][
 p_.save("dismissed", [])
 tr_["pages"]["1"]["uncertain"] = tr_["pages"]["1"]["uncertain"][:-2]; tr_["pages"]["1"]["text"] = text1
 p_.save("transcript", tr_); p_.save("flags", fl_)
+# a comment on any page, and a page confirmed as read; the comments go with the approved transcript
+notes = post(f"/api/projects/{pid}/page_note", {"page": 3, "comment": "  The arrow means 'implies'.  "})["notes"]
+assert notes["comments"]["3"]["text"] == "The arrow means 'implies'." and notes["confirmed"] == {}
+assert "3" in post(f"/api/projects/{pid}/page_note", {"page": 3, "confirmed": True})["notes"]["confirmed"]
+assert project(pid)["page_notes"]["confirmed"].keys() == {"3"}
+post(f"/api/projects/{pid}/page_note", {"page": 2, "comment": "temporary"}); post(f"/api/projects/{pid}/page_note", {"page": 2, "comment": ""})
+assert "2" not in project(pid)["page_notes"]["comments"]
+assert "Unknown page" in post(f"/api/projects/{pid}/page_note", {"page": 99, "comment": "x"}, 400)["error"]
+# a comment is carried out by the model; while one is waiting, the transcript cannot be approved
+assert "not been carried out" in post(f"/api/projects/{pid}/review", expect=400)["error"]
+before3 = project(pid)["transcript"]["pages"]["3"]["text"]
+word = next(w for w in before3.split() if w.isalpha() and len(w) > 3)
+post(f"/api/projects/{pid}/page_note", {"page": 3, "comment": f"{word} -> {word.upper()}"})
+r = post(f"/api/projects/{pid}/correct_page", {"page": 3})
+assert r["changed"] and word.upper() in r["text"] and r["notes"]["comments"] == {} and "3" not in r["notes"]["confirmed"], r
+assert project(pid)["transcript"]["pages"]["3"]["corrections"][-1]["comment"] == f"{word} -> {word.upper()}"
+r = post(f"/api/projects/{pid}/correct_page", {"page": 3, "undo": True})
+assert r["text"] == before3 and r["notes"]["comments"]["3"]["text"] == f"{word} -> {word.upper()}"
+r = post(f"/api/projects/{pid}/correct_page", {"page": 3, "comment": "The arrow means 'implies'."})
+assert not r["changed"] and "nothing" in r["correction"]["reply"].lower() and r["notes"]["comments"] == {}
+assert "Write your comment" in post(f"/api/projects/{pid}/correct_page", {"page": 3}, 400)["error"]
 b = project(pid)
 fig = b["figures"][0]
 assert fig["id"] == "f1" and fig["choice"] == "" and fig["tikz_ok"] in (True, None)
@@ -190,6 +211,7 @@ text5 = b["transcript"]["pages"]["5"]["text"]
 call("PUT", f"/api/projects/{pid}/transcript/5", json={"text": text5 + "\n\nNote added by the author."})
 post(f"/api/projects/{pid}/review")
 b = wait(pid, "scope")
+assert [c["comment"] for c in p_.load("approved")["corrections"]["3"]] == ["The arrow means 'implies'."]
 # ------------------------------------------------------------------ the assessment, and the author's plan
 assert b["assessment"]["results"]["R4"]["proof"] == "gap" and b["scope_default"]["results"]["R2"] == "credit" and b["state"]["stages"]["scope"]["status"] == "waiting"
 assert post(f"/api/projects/{pid}/scope", {"kind": "not_ready"})["scope"]["kind"] == "not_ready"

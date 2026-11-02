@@ -71,6 +71,12 @@ assert all(tr[n]["text"] == info["pages"][n] and tr[n]["model"] == "typed source
 labels = [c.get("label") or "" for c in p.calls(10000)]
 assert not any(l.startswith(("Scout page", "Transcribe page")) for l in labels), labels
 assert any(l.endswith("(typed)") for l in labels), "the notation is still catalogued, from the text"
+plan = store.source_plan(p.state, p.dir)
+assert plan["kind"] == "typed" and plan["hidden"] == ["transcribe", "figures", "review"], plan
+assert p.state["stages"]["review"]["status"] == "done" and p.state["stages"]["review"].get("skipped") and p.load("approved"), \
+    "typed notes: nothing to check, so the transcript is approved without stopping"
+assert not any(l == "Check transcript consistency" for l in labels), "a typed page cannot be misread"
+assert all(v["kind"] == "content" for v in p.load("scout").values())
 print("1. typed notes: an Overleaf zip read as the notes, no image read, the source kept as the transcript")
 
 # a second paper by the same author: the meanings confirmed in the first are proposed again, already accepted

@@ -33,9 +33,9 @@ try:
         pg = b.new_page(viewport={"width": 1440, "height": 900})
         pg.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
         pg.on("pageerror", lambda e: errors.append("PAGEERROR " + str(e)))
-        pg.goto(U); pg.click('.home-acts [data-act="newpaper"]'); pg.wait_for_selector(".dom")
+        pg.goto(U); pg.click('#main [data-act="newpaper"] >> nth=0'); pg.wait_for_selector(".dom")
         pg.click('.dom[data-id="math.NT"]'); time.sleep(0.2)
-        pg.set_input_files("#fileInput", str(PDF)); pg.wait_for_selector(".file")
+        pg.set_input_files("#fileInput", str(PDF)); pg.wait_for_selector(".upload-actions")
         pg.fill("#fproblem", "Bounds for sums of reciprocal powers by integral comparison.")
         pg.fill("#fkeywords", "partial sums, integral comparison")
         pg.fill('[data-bind="authors.0.name"]', "A. N. Author")      # the record of the notes names its author
@@ -50,12 +50,12 @@ try:
         pg.click('[data-act="confirm"]')
         pg.wait_for_selector(".review", timeout=120000)
         for _ in range(20):                                           # every item settled: Approve opens
-            left = pg.evaluate("(() => { const x = openItems()[0]; return x ? x.type + ':' + x.f.id : '' })()")
+            left = pg.evaluate("(() => { const x = openItems()[0]; return x ? x.type + ':' + x.f.id + ':' + x.n : '' })()")
             if not left:
                 break
-            t, i = left.split(":")
+            t, i, n = left.split(":"); pg.click(f'.rv3-row .rv-p[data-n="{n}"]'); time.sleep(0.3)
             pg.locator(f'#fig-{i} .choice[data-v="orig"]' if t == "fig" else f'#flag-{i} [data-act="dropflag"]').click(); time.sleep(0.4)
-        pg.click('[data-act="approve"]')
+        pg.click('.rv3-acts [data-act="approve"]')
         pg.wait_for_selector(".kinds", timeout=120000); time.sleep(0.3)
         pg.click('[data-act="scopesubmit"]')                            # the suggested plan
 
@@ -114,7 +114,7 @@ try:
         assert "Completed" in pg.inner_text(".pgroup") and "Paper ready" in pg.inner_text(".pcard") and "A new title" in pg.inner_text(".pcard")
         assert "20 of 20" in pg.inner_text(".pcard") and pg.locator(".pcard .tk.done").count() == 20
         pg.screenshot(path=str(OUT / "43_home_with_paper.png"))
-        pg.click('.home-acts [data-act="newpaper"]'); pg.wait_for_selector(".domain-search, .dom"); time.sleep(0.2)
+        pg.click('#main [data-act="newpaper"] >> nth=0'); pg.wait_for_selector(".domain-search, .dom"); time.sleep(0.2)
         pg.click('.crumbs [data-act="home"]'); pg.wait_for_selector(".pcard"); time.sleep(0.2)     # from the new-paper form, back home
         pg.click('.pcard [data-act="menu"]'); pg.click('.menu [data-act="rename"]')
         pg.fill("#renamebox", "Partial sums notes"); pg.click('[data-act="renamesave"]'); time.sleep(0.6)

@@ -267,14 +267,21 @@ function until(t) {
   return `(in ${(s / 3600).toFixed(1)} hours)`;
 }
 setInterval(() => { document.querySelectorAll("[data-until]").forEach((el) => { el.textContent = until(+el.dataset.until); }); }, 5000);
-function stageInfo(id) { return S.meta.stages.find((s) => s.id === id); }
+/* The steps this paper needs. What was uploaded decides it (store.source_plan): typed notes need no transcription,
+   no figures and no check of the transcript; a PDF made on a computer is asked only about its figures. */
+function plan() { return (S.b && S.b.source_plan) || { kind: "handwritten", hidden: [], names: {} }; }
+function shownStages() { const h = plan().hidden || []; return S.meta.stages.filter((s) => !h.includes(s.id)); }
+function stageInfo(id) {
+  const s = S.meta.stages.find((x) => x.id === id), name = (plan().names || {})[id];
+  return s && name ? { ...s, name } : s;
+}
 function st(id) { return (S.b && S.b.state.stages[id]) || { status: "pending" }; }
 function running() { return !!(S.b && S.b.state.running); }
 function domainNames(ids) { return (ids || []).map((i) => (S.meta.domains.find((d) => d.id === i) || {}).name).filter(Boolean); }
 function libPaper(key) { return ((S.b && S.b.library) || []).find((p) => p.key === key); }
 
 function autoView() {
-  const ids = S.meta.stages.map((s) => s.id);
+  const ids = shownStages().map((s) => s.id);
   if (S.b && S.b.adding && st("review").status !== "done") return "review";     // pages added after the first check
   const waiting = ids.find((i) => st(i).status === "waiting");
   if (waiting) return waiting;
@@ -307,7 +314,7 @@ async function refresh() {
       /* steps opened again by a repair (figures to be made again, a broken reading of a page): they carry on by
          themselves when the paper is opened */
       S.restarted[pid] = true;
-      const next = S.meta.stages.find((x) => st(x.id).status !== "done");
+      const next = shownStages().find((x) => st(x.id).status !== "done");
       api(`/api/projects/${pid}/run`, { method: "POST", body: {} })
         .then(() => { S.follow = true; history.replaceState(null, "", `#p/${pid}`); toast(`Carrying on from “${next ? next.name : "the next step"}”.`); refreshSoon(300); })
         .catch((e) => toast(e.message, true));
@@ -404,9 +411,12 @@ function drawRail() {
   if (!S.pid) { rail.innerHTML = ""; return; }
   let h = `<div class="rail-home"><button class="home-btn" data-act="home" title="All your papers, and where to start a new one">${ICON.home}<span>Home</span></button></div>`;
   if (S.b && !((S.b.state || {}).meta || {}).imported) {
-    h += `<div class="rail-sec">`;
+    const P = plan(), skipped = (P.hidden || []).length;
+    h += `<div class="rail-sec">${P.kind !== "handwritten" ? `<div class="rail-kind" title="${skipped ? esc("Not needed for these notes: " + S.meta.stages.filter((s) => P.hidden.includes(s.id)).map((s) => s.name.toLowerCase()).join(", ")) : ""}">${esc(P.label)}${skipped ? ` · ${plural(skipped, "step")} not needed` : ""}</div>` : ""}`;
+    let num = 0;
     for (const ph of S.meta.phases) {
-      const mine = S.meta.stages.filter((s) => s.phase === ph.id);
+      const mine = shownStages().filter((s) => s.phase === ph.id);
+      if (!mine.length) continue;
       const done = mine.filter((s) => st(s.id).status === "done").length;
       h += `<div class="phase"><span>${esc(ph.name)}</span><span class="phase-n">${done} of ${mine.length}</span></div><ol class="steps">`;
       for (const s of mine) {
@@ -418,8 +428,9 @@ function drawRail() {
         else if (x.status === "paused") note = "Paused until " + clock(x.resume_at);
         else if (x.status === "done" && x.skipped) note = "Nothing to decide";
         else if (x.status === "done" && x.model) note = x.model.split(":").pop();
+        num++;
         h += `<li><button class="step ${x.status} ${s.gate ? "gate" : ""} ${S.view === s.id ? "on" : ""}" data-act="view" data-view="${s.id}">
-          <span class="mark"></span><span><span class="step-name">${esc(s.name)}</span>
+          <span class="mark"></span><span><span class="step-name"><span class="step-num">${num}</span>${esc(stageInfo(s.id).name)}</span>
           <span class="step-note">${esc(note)}</span></span></button></li>`;
       }
       h += `</ol>`;
@@ -517,7 +528,7 @@ function paperStatus(p) {
 }
 function paperTicks(p) {
   /* One mark per step, grouped by phase, as in the list of steps inside the paper. */
-  const marks = S.meta.phases.map((ph) => `<span class="tk-ph">${S.meta.stages.map((s, i) => [s, i]).filter(([s]) => s.phase === ph.id)
+  const marks = S.meta.phases.map((ph) => `<span class="tk-ph">${S.meta.stages.map((s, i) => [s, i]).filter(([s]) => s.phase === ph.id && !(p.hidden || []).includes(s.id))
     .map(([s, i]) => `<i class="tk ${esc((p.stages || [])[i] || "pending")}"></i>`).join("")}</span>`).join("");
   return `<div class="pc-steps"><span class="pc-ticks" role="img" aria-label="${p.done} of ${p.total} steps done">${marks}</span>
     <span class="pc-count">${p.done} of ${p.total}</span></div>`;
@@ -1415,16 +1426,222 @@ function viewConfirm() {
 }
 
 /* ----------------------------------------------------------- review gate
-   One list for the whole transcript. Every doubt and every figure is an item; an answered item leaves the list
-   "To check" for "Settled" (with a tick); when nothing is left, "Approve" opens. The page image on the left
-   follows the item being answered. */
+   Three columns, page for page. On the left, what the page in hand asks of the author: its doubts and drawings, a
+   comment, and confirming the page. In the middle, the notes as they were read: page n of the notes is page n here,
+   with each drawing where it stands. On the right, the handwritten pages. A click on a line in either column brings
+   the same place in the other into view. */
 function initReview() {
-  S.review = { pid: S.pid, n: reviewPages()[0] || 1, zoom: 1, tab: "todo", dropped: {}, skip: {}, own: {}, figBusy: "",
-    figMode: "", watch: [], local: [] };
+  let wide = true; try { wide = localStorage.getItem("scriptavera-rv-wide") !== "0"; } catch (e) { /* ignore */ }
+  S.review = { pid: S.pid, n: reviewPages()[0] || 1, zoom: 1, mode: "page", dropped: {}, skip: {}, own: {}, figBusy: "",
+    figMode: "", watch: [], local: [], edit: 0, link: false, wide, draft: {}, conf: {}, quiet: {}, cache: {}, busy: {}, fresh: 0 };
   const first = openItems()[0]; if (first) S.review.n = first.n;
+}
+function pageNotes() {
+  const pn = S.b.page_notes || (S.b.page_notes = {});
+  pn.comments = pn.comments || {}; pn.confirmed = pn.confirmed || {};
+  return pn;
+}
+function commentOn(n) { const R = S.review; return R.draft[n] !== undefined ? R.draft[n] : ((pageNotes().comments[n] || {}).text || ""); }
+function confirmedPage(n) { const R = S.review; return R.conf[n] !== undefined ? R.conf[n] : !!pageNotes().confirmed[n]; }
+function allPages() {
+  /* Every page of the notes, left-out ones too, so that page n in the middle is always page n on the right. */
+  const known = ((S.b.state || {}).pages || []).slice().sort((a, b) => a.n - b.n);
+  return known.length ? known : reviewPages().map((n) => ({ n }));
+}
+function pendingPages() {
+  /* Pages with a comment that has not been carried out yet: the transcript goes no further while there is one. */
+  return allPages().filter((pg) => !pg.skip && S.b.transcript.pages[pg.n] && commentOn(pg.n).trim()).map((pg) => pg.n);
+}
+function lastCorrection(n) { const c = (S.b.transcript.pages[n] || {}).corrections || []; return c[c.length - 1] || null; }
+function groupOpen(open) { const by = {}; open.forEach((x) => (by[x.n] = by[x.n] || []).push(x)); return by; }
+function pageState(pg, openBy) {
+  if (pg.skip) return "out";
+  if (!S.b.transcript.pages[pg.n]) return "reading";
+  if ((openBy[pg.n] || []).length) return "doubt";
+  return confirmedPage(pg.n) ? "ok" : "none";
+}
+function nextNeeding(n, openBy) {
+  /* The next page with something left to check, after this one (and then from the start). */
+  const ps = Object.keys(openBy).map(Number).filter((x) => x !== n).sort((a, b) => a - b);
+  return ps.find((x) => x > n) || ps[0] || 0;
+}
+function nextUnconfirmed(n) {
+  return (allPages().find((pg) => pg.n > n && !pg.skip && S.b.transcript.pages[pg.n] && !confirmedPage(pg.n)) || {}).n || 0;
+}
+function pageRow(openBy) {
+  return allPages().map((pg) => {
+    const s = pageState(pg, openBy), c = commentOn(pg.n).trim();
+    const t = { out: "left out", reading: "being read", doubt: `${plural((openBy[pg.n] || []).length, "item")} to check`, ok: "confirmed", none: "not confirmed yet" }[s] + (c ? ", your comment not carried out yet" : "");
+    return `<button class="rv-p s-${s} ${pg.n === S.review.n ? "on" : ""} ${c ? "noted" : ""}" data-act="rvpage" data-n="${pg.n}" title="Page ${pg.n}: ${t}" aria-label="Page ${pg.n}, ${t}">${pg.n}</button>`;
+  }).join("");
+}
+function figInText(n, k, desc) {
+  /* A drawing in the middle column, where it stands on the page: the redrawn figure or the drawing cut from the page,
+     what was decided about it, and what it shows. */
+  const f = (S.b.figures || []).find((x) => x.page === n && x.k === k);
+  const v = f ? Math.round(f.drawn || 0) : 0, box = f && Array.isArray(f.box) && f.box.length === 4 ? f.box : null;
+  const [label, cls] = !f ? ["Drawing", "none"] : figOpen(f) ? ["your decision is needed", "open"]
+    : ({ tikz: ["printed, redrawn", "paper"], orig: ["printed, your own drawing", "paper"], explain: ["not printed: it explains your argument", "expl"], none: ["left out", "gone"] }[f.choice] || ["Drawing", "none"]);
+  let img = "";
+  if (f && f.choice !== "none") {
+    if (f.tikz_ok && f.drawn && f.choice !== "orig" && f.choice !== "explain") img = `<img src="/api/projects/${S.pid}/figure/${f.id}?kind=tikz&v=${v}" alt="The redrawn figure" loading="lazy">`;
+    else if (box || f.drawn) img = `<img src="/api/projects/${S.pid}/figure/${f.id}?v=${v}" alt="Your drawing, cut from page ${n}" loading="lazy">`;
+  }
+  return `<span class="tfig s-${cls}" ${box ? `data-box="${box.join(",")}"` : ""} ${f ? `data-fid="${f.id}"` : ""}><span class="tfig-h">Figure${f && f.of > 1 ? ` ${k + 1}` : ""}${f ? " · " + label : ""}</span>${img}<span class="tfig-d">${inner(mixed(desc))}</span></span>`;
+}
+/* LaTeX the transcriber wrote outside dollar signs ("\underline{Thm}", "\begin{center}", "\xrightarrow{...}"), shown as
+   it would print: text commands as formatting, anything else typeset as mathematics. Only the display: the page's
+   LaTeX is not changed. */
+const BARE_TEXT = { underline: "u", textbf: "b", textit: "i", emph: "i", textsl: "i", text: "", textrm: "", textup: "", textsf: "", textnormal: "", mbox: "", texttt: "code" };
+const BARE_PLAIN = { "&": "&", "%": "%", "_": "_", "#": "#", "{": "{", "}": "}", ",": " ", ";": " ", ":": " ", "!": "", " ": " ",
+  quad: " ", qquad: "  ", ldots: "…", dots: "…", S: "§", newline: "\n", par: "\n\n", noindent: "", centering: "", indent: "",
+  hfill: " ", medskip: "\n", bigskip: "\n", smallskip: "", linebreak: "\n", newpage: "", clearpage: "", textendash: "–", textemdash: "—" };
+function braceEnd(s, k) {
+  if (s[k] !== "{") return -1;
+  for (let q = k, d = 0; q < s.length; q++) { if (s[q] === "\\") { q++; continue; } if (s[q] === "{") d++; else if (s[q] === "}" && !--d) return q + 1; }
+  return -1;
+}
+function bareLatex(s, put) {
+  let out = "", i = 0;
+  while (i < s.length) {
+    if (s[i] !== "\\") { out += s[i++]; continue; }
+    if (s[i + 1] === "\\") { i += 2; if (s[i] === "[") { const e = s.indexOf("]", i); if (e > 0 && e - i < 12) i = e + 1; } out += "\n"; while (s[i] === " ") i++; continue; }
+    if (s[i + 1] === "[" || s[i + 1] === "(") {                 /* \[ ... \] and \( ... \) */
+      const close = s[i + 1] === "[" ? "\\]" : "\\)", e = s.indexOf(close, i + 2);
+      if (e > 0) { const d = s[i + 1] === "[" ? "$$" : "$"; out += d + s.slice(i + 2, e) + d; i = e + 2; continue; }
+    }
+    const m = /^\\([A-Za-z]+|[^A-Za-z])/.exec(s.slice(i)); if (!m) { out += s[i++]; continue; }
+    const name = m[1]; let k = i + m[0].length;
+    if (name.length === 1 && !/[A-Za-z]/.test(name)) { out += name === "$" ? put("$") : (name in BARE_PLAIN ? BARE_PLAIN[name] : name); i = k; continue; }
+    if (s[k] === "[") { const e = s.indexOf("]", k); if (e > 0 && e - k < 40) k = e + 1; }
+    const args = [];
+    for (let e; s[k] === "{" && (e = braceEnd(s, k)) > 0; k = e) args.push(s.slice(k + 1, e - 1));
+    if (name === "begin" || name === "end") {
+      const env = args[0] || "";
+      if (/^(center|flushleft|flushright|quote|quotation|minipage)$/.test(env)) { i = k; out += "\n"; continue; }
+      if (name === "begin") {                               /* an environment of mathematics written without dollar signs */
+        const end = `\\end{${env}}`, e = s.indexOf(end, k);
+        if (e > 0) { out += "$$" + s.slice(i, e + end.length) + "$$"; i = e + end.length; continue; }
+      }
+      i = k; continue;
+    }
+    if (name in BARE_TEXT && args.length) {
+      const tag = BARE_TEXT[name], h = inner(mixed(bareLatex(args[0], put)));
+      out += put(tag ? `<${tag}>${h}</${tag}>` : h); i = k; continue;
+    }
+    if (name === "textcircled" && args.length) { out += put(`<span class="circled">${esc(args[0])}</span>`); i = k; continue; }
+    if (name === "rule") { out += put('<span class="ts-rule"></span>'); i = k; continue; }
+    if (/^(vspace|hspace|label|vskip|hskip)$/.test(name)) { i = k; continue; }
+    if (name in BARE_PLAIN && !args.length) { out += BARE_PLAIN[name]; i = k; continue; }
+    let e = k;                                              /* mathematics: the command, its arguments, and _{..} ^{..} after it */
+    while (/[_^]/.test(s[e] || "")) {
+      e++;
+      if (s[e] === "{") { const g = braceEnd(s, e); if (g < 0) break; e = g; }
+      else if (s[e] === "\\") { const mm = /^\\[A-Za-z]+/.exec(s.slice(e)); e += mm ? mm[0].length : 1; }
+      else e++;
+    }
+    out += "$" + s.slice(i, e).replace(/\n/g, " ") + "$"; i = e;
+  }
+  return out;
+}
+function tidyBare(text, put) {
+  return String(text).split(/(\$\$[\s\S]+?\$\$|\$[^$\n]+?\$)/g).map((part, j) => j % 2 ? part : bareLatex(part, put)).join("");
+}
+function pageTextHtml(n) {
+  /* One page as it was read, with its doubtful passages highlighted and its drawings in place. Kept until the page,
+     its doubts or its drawings change, so that the whole transcript is not typeset again at every click. */
+  const R = S.review, text = String(S.b.transcript.pages[n].text || ""), marks = reviewFlags(n).map((f) => f.snippet);
+  const key = JSON.stringify([text, marks, (S.b.figures || []).filter((f) => f.page === n).map((f) => [f.k, f.choice, f.drawn, f.tikz_ok, f.box])]);
+  if (R.cache[n] && R.cache[n].key === key) return R.cache[n].html;
+  const figs = [], re = /\[FIGURE(?:\s+f\d+)?\s*:/g;
+  let out = "", pos = 0, m, k = 0;
+  while ((m = re.exec(text))) {
+    let depth = 1, j = m.index + m[0].length;
+    while (j < text.length && depth) { if (text[j] === "[") depth++; else if (text[j] === "]") depth--; j++; }
+    if (depth) break;
+    figs.push(figInText(n, k++, text.slice(m.index + m[0].length, j - 1).trim()));
+    out += text.slice(pos, m.index) + `\u0003${figs.length - 1}\u0003`;
+    pos = j; re.lastIndex = j;
+  }
+  const toks = [], put = (h) => { toks.push(h); return `\u0004${toks.length - 1}\u0004`; };
+  let html = mixed(tidyBare(out + text.slice(pos), put), marks).replace(/\u0003(\d+)\u0003/g, (m0, i) => figs[+i] || "");
+  for (let r = 0; r < 4 && html.includes("\u0004"); r++) html = html.replace(/\u0004(\d+)\u0004/g, (m0, i) => toks[+i] || "");
+  R.cache[n] = { key, html };
+  return html;
+}
+function sheetHtml(pg, openBy) {
+  const n = pg.n, R = S.review, rec = S.b.transcript.pages[n], s = pageState(pg, openBy), c = commentOn(n).trim();
+  const chips = (s === "doubt" ? `<span class="chip hl">${plural(openBy[n].length, "item")} to check</span>` : "")
+    + (s === "ok" ? '<span class="chip green">✓ Confirmed</span>' : "") + (rec && (rec.corrections || []).length ? '<span class="chip blue">Corrected from your comment</span>' : rec && rec.edited ? '<span class="chip blue">Changed by you</span>' : "")
+    + (R.busy[n] ? '<span class="chip"><span class="spinner"></span> Correcting…</span>' : "");
+  const body = pg.skip ? `<div class="ts-out">Left out as ${pg.kind === "blank" ? "a blank page" : pg.kind === "cover" ? "a cover page" : "not part of the notes"}. <button class="linkbtn" data-act="zoom" data-n="${n}">Look at it, or include it</button></div>`
+    : !rec ? `<div class="ts-out"><span class="spinner"></span> This page is being read.</div>` : pageTextHtml(n);
+  return `<section class="tsheet s-${s} ${n === R.n ? "on" : ""} ${R.fresh === n ? "fresh" : ""}" id="ts-${n}" data-n="${n}">
+    <div class="ts-h"><button class="ts-n" data-act="rvpage" data-n="${n}">Page ${n}</button>${chips}<span class="tb-space"></span>
+      ${rec && !pg.skip ? `<button class="btn small quiet" data-act="rvedit" data-n="${n}" aria-expanded="${R.edit === n}">${R.edit === n ? "Done" : "Edit the LaTeX"}</button>` : ""}</div>
+    <div class="ts-body" id="tb-${n}" data-n="${n}">${body}<div class="ts-band"></div></div>
+    ${R.edit === n && rec ? `<div class="ts-edit"><textarea class="rv-src" data-src="${n}" id="rvsrc-${n}" spellcheck="false" aria-label="The LaTeX of page ${n}">${esc(rec.text)}</textarea>
+      <div class="muted small">Mathematics between $…$ (inline) or $$…$$ (displayed). Saved as you type, and shown above. Only the mathematics needs your eye: spelling and grammar are corrected when the paper is written.</div></div>` : ""}
+    ${c ? `<div class="ts-note" data-act="rvpage" data-n="${n}"><b>Your comment, not carried out yet:</b> ${esc(c)}</div>` : ""}</section>`;
+}
+function handHtml(pg) {
+  const n = pg.n;
+  return `<div class="hsheet ${n === S.review.n ? "on" : ""} ${pg.skip ? "out" : ""}" id="hs-${n}" data-n="${n}">
+    <div class="hs-h"><span>Page ${n}</span>${pg.skip ? '<span class="hs-out">left out</span>' : ""}</div>
+    <div class="hs-img" data-n="${n}" style="aspect-ratio:${pg.w || 1000} / ${pg.h || 1400}"><img src="/api/projects/${S.pid}/page/${n}" alt="Your handwritten page ${n}" loading="lazy" draggable="false"><div class="hs-band"></div></div></div>`;
+}
+function panelHtml(open, done, openBy) {
+  const R = S.review;
+  if (R.mode === "approve") return `<div class="pp-back"><button class="btn small quiet" data-act="rvmode" data-v="page">‹ Back to page ${R.n}</button></div>${approveTab(open, done)}`;
+  const list = allPages(), pg = list.find((x) => x.n === R.n) || { n: R.n }, n = pg.n, s = pageState(pg, openBy), mine = openBy[n] || [];
+  const rec = S.b.transcript.pages[n], c = commentOn(n), i = list.findIndex((x) => x.n === n);
+  const pend = pendingPages();
+  const nFlags = mine.filter((x) => x.type === "flag").length, nFigs = mine.length - nFlags, next = nextNeeding(n, openBy);
+  const state = { out: "Left out of the notes", reading: "Being read now", doubt: `${plural(mine.length, "item")} to check`, ok: "✓ Confirmed by you", none: "Not confirmed yet" }[s];
+  let h = `<div class="pp-top"><button class="btn small" data-act="rvstep" data-d="-1" ${i <= 0 ? "disabled" : ""} aria-label="Previous page">‹</button>
+      <div class="pp-title"><span class="pp-k">Page</span> <span class="pp-n">${n}</span></div>
+      <button class="btn small" data-act="rvstep" data-d="1" ${i >= list.length - 1 ? "disabled" : ""} aria-label="Next page">›</button>
+      <span class="tb-space"></span><span class="pp-state s-${s}">${state}</span></div>` + liveReading();
+  if (pg.skip) h += `<div class="pp-sec"><p>This page was left out as ${pg.kind === "blank" ? "blank" : "a cover or a blank page"}. Include it if it has your work on it.</p>
+      <button class="btn small" data-act="zoom" data-n="${n}">Look at it, or include it</button></div>`;
+  else if (!rec) h += `<div class="pp-sec muted"><span class="spinner"></span> This page is being read. It appears in the middle as soon as it is ready.</div>`;
+  else {
+    if (mine.length) h += `<div class="pp-sec"><div class="pp-h">${nFlags ? `${nFlags === 1 ? "One passage" : nFlags + " passages"} may be misread` : ""}${nFlags && nFigs ? "; " : ""}${nFigs ? `${nFigs === 1 ? "a drawing needs" : nFigs + " drawings need"} your decision` : ""}</div>
+      <p class="muted small">${nFlags ? "Highlighted in the middle. Answer each one here, or confirm the page as it was read." : "Shown in the middle where it stands on the page."}</p>
+      ${mine.map((x) => x.type === "fig" ? figureCard(x.f) : flagCard(x.f, rec.text)).join("")}</div>`;
+    const auto = (S.b.figures || []).filter((f) => f.page === n && f.choice === "explain" && f.auto);
+    if (auto.length) h += `<div class="autoline">${auto.length === 1 ? "One drawing on this page only explains" : plural(auto.length, "drawing") + " on this page only explain"} your argument, so ${auto.length === 1 ? "it is" : "they are"} not printed. The writers still read ${auto.length === 1 ? "it" : "them"}, to understand the proof.</div>`;
+    const last = lastCorrection(n), busy = !!R.busy[n];
+    if (last) h += `<div class="pp-sec pp-done ${R.fresh === n ? "fresh" : ""}"><div class="pp-h">${last.changes && last.changes.length ? "Corrected from your comment" : "Your comment was read; nothing needed changing"}</div>
+      <div class="pp-quote">“${esc(last.comment)}”</div>
+      <div>${explained(last.reply)}</div>
+      ${last.changes && last.changes.length ? `<ul class="pp-changes">${last.changes.map((x) => `<li>${changeLine(x)}</li>`).join("")}</ul>` : ""}
+      <div class="row" style="margin-top:6px"><span class="muted small grow">${last.changes && last.changes.length ? "The middle column shows the page as corrected. Compare it with your page." : ""}</span>
+        <button class="btn small quiet" data-act="rvundo" data-n="${n}" ${busy ? "disabled" : ""}>Undo</button></div></div>`;
+    h += `<div class="pp-sec"><label class="pp-h" for="pnote-${n}">${last ? "Anything still wrong on page " + n + "?" : "Is anything wrong on page " + n + "?"}</label>
+      <textarea id="pnote-${n}" class="pp-note" rows="4" data-pnote="${n}" ${busy ? "disabled" : ""} placeholder="Say what is wrong, the way you would tell a colleague: “line 3 is p-1, not p-2”, “the sum starts at k = 0”, “the arrow points to the kernel”. The page is corrected from your comment, and only what you say is changed.">${esc(c)}</textarea>
+      <div class="muted small" id="pnote-st-${n}">${busy ? "" : R.draft[n] !== undefined ? "Saving…" : c ? "Saved. Not carried out yet." : "Leave it empty if the page is right."}</div></div>`;
+    h += busy
+      ? `<div class="pp-sec"><button class="btn primary wide" disabled><span class="spinner"></span> Correcting page ${n} from your comment…</button>
+          <div class="muted small" style="margin-top:6px">Your page is read again with your comment. This takes up to a minute.</div></div>`
+      : c.trim()
+      ? `<div class="pp-sec"><button class="btn primary wide" data-act="rvcorrect" data-n="${n}">Correct page ${n} from my comment</button>
+          <div class="muted small" style="margin-top:6px">Your page is read again with your comment, and only what you say is changed. You see the result in the middle before anything goes further.</div></div>`
+      : confirmedPage(n) && !mine.length
+      ? `<div class="pp-sec pp-ok"><span>✓ You confirmed that the middle column is what you wrote on page ${n}.</span><button class="btn small quiet" data-act="rvconfirm" data-n="${n}" data-undo="1">Undo</button></div>`
+      : `<div class="pp-sec"><button class="btn ${nFigs ? "" : "primary"} wide" data-act="rvconfirm" data-n="${n}" ${nFigs ? "disabled" : ""}>Page ${n} is right: confirm it</button>
+        <div class="muted small" style="margin-top:6px">${nFigs ? "First decide on the drawing above." : nFlags ? `The middle column is what you wrote on this page; ${nFlags === 1 ? "the doubtful passage is" : "the doubtful passages are"} kept as read.` : "The middle column is what you wrote on this page."}</div></div>`;
+  }
+  const nextC = pend.filter((x) => x !== n)[0];
+  h += `<div class="pp-sec pp-nav">${nextC ? `<button class="btn small" data-act="rvpage" data-n="${nextC}">Next page with your comment: ${nextC} ›</button>` : next ? `<button class="btn small" data-act="rvpage" data-n="${next}">Next page with a doubt: ${next} ›</button>` : '<span class="muted small">No page has a doubt left.</span>'}
+      <span class="tb-space"></span>${pend.length ? "" : `<button class="btn small ${open.length ? "" : "primary"}" data-act="rvmode" data-v="approve">Approve…</button>`}</div>`;
+  const here = done.filter((x) => x.n === n);
+  if (here.length) h += `<details class="more pp-sec"><summary>Settled on this page (${here.length})</summary>${here.map(settledRow).join("")}</details>`;
+  return h;
 }
 function reviewPages() { return Object.keys(((S.b || {}).transcript || {}).pages || {}).map(Number).sort((a, b) => a - b); }
 function reviewFlags(n) {
+  if (plan().kind !== "handwritten") return [];         /* words taken from the file: nothing to ask about the reading */
   const tr = S.b.transcript.pages[n] || { uncertain: [] };
   const out = tr.uncertain.map((u, i) => ({ kind: "unc", id: `u${n}-${i}`, snippet: u.snippet, issue: u.issue, alt: u.alt, every: u.every }));
   (S.b.flags || []).forEach((f, i) => { if (f.page === n) out.push({ kind: "check", id: `c${i}`, snippet: f.snippet, issue: f.issue, alt: f.suggestion, every: f.every }); });
@@ -1531,22 +1748,6 @@ function answerFlag(f, value, how) {
   api(`/api/projects/${S.pid}/doubt`, { method: "POST", body: ans }).catch((e) => toast(e.message, true));
   advanceReview(how === "kept" ? "Kept as read." : "Changed on the page.");
 }
-function advanceReview(said) {
-  /* After an answer: the next item's page is shown; with nothing left, the Approve tab opens. */
-  const open = openItems(), R = S.review;
-  if (!open.length) { R.tab = "approve"; toast(`${said} Everything is checked: approve the transcript when you are ready.`); }
-  else { R.n = open[0].n; toast(`${said} Moved to Settled. ${plural(open.length, "item")} left to check.`); }
-  render();
-  const r = $(".rv-body"); if (r) r.scrollTop = 0;
-}
-function showPage(n) {
-  /* Change the page on the left without redrawing the answers on the right. */
-  if (!S.review || S.review.n === n) return;
-  S.review.n = n;
-  const img = $("#rvimg"); if (img) { img.src = `/api/projects/${S.pid}/page/${n}`; img.alt = `Your handwritten page ${n}`; }
-  const lab = $("#rvpgno"); if (lab) lab.textContent = `Page ${n}`;
-  document.querySelectorAll(".rv-left .rv-p").forEach((b) => b.classList.toggle("on", +b.dataset.n === n));
-}
 function leftOutBanner(style) {
   /* One quiet line: pages left out as a cover or a blank page. Pages with anything read on them are put back
      automatically, so this is only for a last look. */
@@ -1629,11 +1830,15 @@ function settledRow(x) {
       <button class="btn small quiet" data-act="rvtext" data-n="${x.n}">Edit the page</button></div>`;
 }
 function approveTab(open, done) {
+  const pend = pendingPages();
+  if (pend.length) return `<div class="rv-empty"><b>Your comment${pend.length === 1 ? " on page " + pend[0] + " is" : "s on pages " + pend.join(", ") + " are"} not carried out yet.</b>
+      <p class="muted">The paper is written from the transcript as corrected, so the pages are corrected from your comments first.</p>
+      <button class="btn primary" data-act="rvcorrectall">Correct ${pend.length === 1 ? "page " + pend[0] : plural(pend.length, "page")} from your comment${pend.length === 1 ? "" : "s"}</button></div>`;
   const P = reviewPages(), edited = P.filter((n) => S.b.transcript.pages[n].edited), figs = S.b.figures || [];
   const kept = figs.filter((f) => f.choice === "tikz" || f.choice === "orig").length, out = figs.filter((f) => f.choice === "none").length;
   const expl = figs.filter((f) => f.choice === "explain").length;
   if (open.length) return `<div class="rv-empty"><b>${plural(open.length, "item")} still to check.</b><p class="muted">The paper is written from the approved transcript, so answer them first.</p>
-      <button class="btn primary" data-act="rvtab" data-v="todo">Go to To check</button></div>`;
+      <button class="btn primary" data-act="rvpage" data-n="${open[0].n}">Go to page ${open[0].n}</button></div>`;
   const adding = S.b.adding;
   return `<div class="approve-card"><div class="big-tick">✓</div><h2>Everything is checked</h2>
     <ul class="sumlist"><li>${plural(P.length, "page")} read${adding ? ", and more still being read" : ""}</li>
@@ -1644,64 +1849,189 @@ function approveTab(open, done) {
     <p class="muted small">Approving starts the writing: the whole of your notes is read together. The transcript cannot be changed after that without redoing the later steps.</p>
     <button class="btn primary big" data-act="approve" ${S.busy || running() ? "disabled" : ""}>${running() ? "Wait: a page is still being read" : "Approve the transcript and continue"}</button></div>`;
 }
+function advanceReview(said) {
+  /* After an answer the page stays in hand: what is left on it, or that it can now be confirmed. */
+  const R = S.review, n = R.n, all = openItems(), left = all.filter((x) => x.n === n).length;
+  toast(left ? `${said} ${plural(left, "item")} left on page ${n}.` : all.length ? `${said} Nothing left to check on page ${n}: confirm it when it is right.`
+    : `${said} No doubt is left. Confirm the pages you have checked, then approve.`);
+  render();
+}
+/* Keeping the two columns together. A place on a page is a fraction of its height; the middle and the right are
+   matched page for page, and inside a page by the drawings found on it (their place in the text and on the page are
+   both known), and in proportion between them. */
+function anchorsOf(n) {
+  const tb = document.getElementById(`tb-${n}`), pts = [];
+  if (tb && tb.offsetHeight) $$(".tfig[data-box]", tb).forEach((el) => {
+    const b = el.dataset.box.split(",").map(Number);
+    pts.push([el.offsetTop / tb.offsetHeight, b[0] / 1000], [(el.offsetTop + el.offsetHeight) / tb.offsetHeight, b[2] / 1000]);
+  });
+  const out = [[0, 0.02]];
+  pts.sort((a, b) => a[0] - b[0]).forEach((p) => { const l = out[out.length - 1]; if (p[0] > l[0] && p[1] > l[1] && p[0] < 1 && p[1] < 0.98) out.push(p); });
+  out.push([1, 0.98]);
+  return out;
+}
+function mapFrac(pts, x, from) {
+  const to = 1 - from;
+  x = Math.max(pts[0][from], Math.min(pts[pts.length - 1][from], x));
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    if (x <= b[from]) return a[to] + (b[to] - a[to]) * ((x - a[from]) / ((b[from] - a[from]) || 1));
+  }
+  return pts[pts.length - 1][to];
+}
+const textToHand = (n, f) => mapFrac(anchorsOf(n), f, 0);
+const handToText = (n, f) => mapFrac(anchorsOf(n), f, 1);
+function quietScroll(col, y, smooth) {
+  /* A scroll the app makes: not taken for the author's own when the columns scroll together. */
+  S.review.quiet[col.id] = Date.now() + (smooth ? 900 : 150);
+  col.scrollTo({ top: Math.max(0, y), behavior: smooth ? "smooth" : "auto" });
+}
+function colY(col, el) { return el.getBoundingClientRect().top - col.getBoundingClientRect().top + col.scrollTop; }
+function headH(col) { const h = $(".col-h", col); return h ? h.offsetHeight : 0; }
+function flash(el) { if (!el) return; el.classList.remove("show"); void el.offsetWidth; el.classList.add("show"); }
+function goPage(n) {
+  /* Page n at the top of both columns. */
+  for (const [cid, sel] of [["rvtext", `#ts-${n}`], ["rvhand", `#hs-${n}`]]) {
+    const col = document.getElementById(cid), el = $(sel);
+    if (col && el) quietScroll(col, colY(col, el) - headH(col) - 6, true);
+  }
+}
+function selectPage(n) {
+  const R = S.review, changed = R.n !== n || R.mode !== "page";
+  R.n = n; R.mode = "page";
+  if (changed) { render(); const p = $("#rvpanel"); if (p) p.scrollTop = 0; }
+}
+function showOnHand(n, a, b, box) {
+  /* Bring a place of handwritten page n into view and mark it: a band across the page, or the drawing's own box. */
+  const col = $("#rvhand"), img = $(`#hs-${n} .hs-img`); if (!col || !img) return;
+  const band = $(".hs-band", img);
+  band.style.top = a * 100 + "%"; band.style.height = Math.max(0.02, b - a) * 100 + "%";
+  if (box) { band.style.left = box[1] / 10 + "%"; band.style.width = (box[3] - box[1]) / 10 + "%"; } else { band.style.left = "0"; band.style.width = "100%"; }
+  flash(band);
+  quietScroll(col, colY(col, img) + ((a + b) / 2) * img.offsetHeight - col.clientHeight * 0.4, true);
+}
+function showOnText(n, f) {
+  const col = $("#rvtext"), tb = $(`#tb-${n}`); if (!col || !tb) return;
+  const band = $(".ts-band", tb); if (band) { band.style.top = Math.max(0, f * tb.offsetHeight - 18) + "px"; flash(band); }
+  quietScroll(col, colY(col, tb) + f * tb.offsetHeight - col.clientHeight * 0.4, true);
+}
+function pickFromText(n, f, fig) {
+  selectPage(n);
+  const box = fig && fig.dataset.box ? fig.dataset.box.split(",").map(Number) : null;
+  if (box) showOnHand(n, box[0] / 1000, box[2] / 1000, box);
+  else { const y = textToHand(n, f); showOnHand(n, y - 0.04, y + 0.04); }
+  const tb = $(`#tb-${n}`), band = tb && $(".ts-band", tb);
+  if (band) { band.style.top = Math.max(0, f * tb.offsetHeight - 18) + "px"; flash(band); }
+}
+function pickFromHand(n, f) {
+  selectPage(n);
+  showOnText(n, handToText(n, f));
+  const img = $(`#hs-${n} .hs-img`), band = img && $(".hs-band", img);
+  if (band) { band.style.top = (f - 0.04) * 100 + "%"; band.style.height = "8%"; band.style.left = "0"; band.style.width = "100%"; flash(band); }
+}
+function followScroll(from) {
+  /* The columns scroll together: the place at a third of the height of one is brought to the same height in the other. */
+  const src = document.getElementById(from), dst = document.getElementById(from === "rvtext" ? "rvhand" : "rvtext");
+  if (!src || !dst) return;
+  const line = src.getBoundingClientRect().top + src.clientHeight * 0.3;
+  const el = $$(from === "rvtext" ? ".ts-body" : ".hs-img", src).find((e) => e.getBoundingClientRect().bottom >= line);
+  if (!el) return;
+  const r = el.getBoundingClientRect(), n = +el.dataset.n, f = Math.max(0, Math.min(1, (line - r.top) / (r.height || 1)));
+  const g = from === "rvtext" ? textToHand(n, f) : handToText(n, f);
+  const target = $(from === "rvtext" ? `#hs-${n} .hs-img` : `#tb-${n}`); if (!target) return;
+  quietScroll(dst, colY(dst, target) + g * target.offsetHeight - dst.clientHeight * 0.3, false);
+}
+function paintNoteMarks(n) {
+  /* A comment typed: its mark in the row of pages and under the page in the middle, without redrawing the screen. */
+  const c = commentOn(n).trim();
+  $$(`.rv3-row .rv-p[data-n="${n}"]`).forEach((b) => b.classList.toggle("noted", !!c));
+  const sh = $(`#ts-${n}`); if (!sh) return;
+  let nt = $(".ts-note", sh);
+  if (!c) { if (nt) nt.remove(); return; }
+  if (!nt) { nt = document.createElement("div"); nt.className = "ts-note"; nt.dataset.act = "rvpage"; nt.dataset.n = n; sh.appendChild(nt); }
+  nt.innerHTML = `<b>Your comment, not carried out yet:</b> ${esc(c)}`;
+}
+async function correctPage(n, quiet) {
+  /* The author's comment is sent with the page; the page comes back corrected and is shown in the middle. */
+  const R = S.review, text = commentOn(n).trim();
+  if (!text) { toast("Write what is wrong on the page first.", true); return false; }
+  clearTimeout(savePageNote.t); savePageNote.t = null;
+  R.busy[n] = true; render();
+  try {
+    const r = await api(`/api/projects/${S.pid}/correct_page`, { method: "POST", body: { page: n, comment: text } });
+    const rec = S.b.transcript.pages[n];
+    rec.text = r.text; if (r.changed) rec.edited = true;
+    (rec.corrections = rec.corrections || []).push(r.correction);
+    S.b.page_notes = r.notes; delete R.conf[n];
+    const typed = R.draft[n];
+    delete R.draft[n];
+    if (typed !== undefined && typed.trim() && typed.trim() !== text) { R.draft[n] = typed; savePageNote.n = n; savePageNote(); }   // typed more meanwhile: a new comment
+    delete R.busy[n]; R.fresh = n; render();
+    setTimeout(() => { if (S.review && S.review.fresh === n) S.review.fresh = 0; }, 3000);
+    if (!quiet) toast(r.changed ? `Page ${n} is corrected. Compare it with your page; if something is still wrong, say so.` : `Nothing was changed on page ${n}. ${r.correction.reply}`);
+    return true;
+  } catch (e) { delete R.busy[n]; render(); toast(e.message, true); return false; }
+}
+async function savePageNote() {
+  const n = savePageNote.n; clearTimeout(savePageNote.t); savePageNote.t = null;
+  const R = S.review; if (!R || !n || R.draft[n] === undefined) return;
+  const text = R.draft[n];
+  try {
+    const r = await api(`/api/projects/${S.pid}/page_note`, { method: "POST", body: { page: n, comment: text } });
+    S.b.page_notes = r.notes; if (R.draft[n] === text) delete R.draft[n];
+    const s = $(`#pnote-st-${n}`); if (s) s.textContent = text.trim() ? "Saved. Not carried out yet." : "Leave it empty if the page is right.";
+  } catch (e) { toast(e.message, true); }
+}
+function changeLine(x) {
+  const m = String(x || "").split(/\s*(?:->|→)\s*/);
+  return m.length === 2 ? `${readable(m[0])} <span class="muted">→</span> ${readable(m[1])}` : explained(x);
+}
+function mainButton(open) {
+  /* The one button that moves on: while a comment is waiting it carries the comments out instead, and says so. */
+  const pend = pendingPages(), busy = Object.keys(S.review.busy).length;
+  if (busy) return `<button class="btn small primary" disabled><span class="spinner"></span> Correcting…</button>`;
+  if (pend.length) return `<button class="btn small primary" data-act="rvcorrectall">Correct ${pend.length === 1 ? "page " + pend[0] : plural(pend.length, "page")} from your comment${pend.length === 1 ? "" : "s"}</button>`;
+  if (open.length) return `<button class="btn small" data-act="rvmode" data-v="approve">${plural(open.length, "item")} left to check</button>`;
+  return `<button class="btn small primary" data-act="approve" ${S.busy || running() ? "disabled" : ""}>Approve and continue ›</button>`;
+}
 function viewReview() {
   if (!S.b.transcript || !Object.keys(S.b.transcript.pages).length) return `<div class="wrap"><div class="empty"><strong>Not reached yet</strong>This step opens once the final transcription has finished.</div></div>`;
   if (st("review").status === "pending" && !st("review").since && !S.b.adding)
     return `<div class="wrap"><div class="empty"><strong>Not reached yet</strong>This step opens once the steps before it have finished: ${esc(((S.meta.stages.find((x) => st(x.id).status !== "done") || {}).name || "").toLowerCase())} comes first.</div></div>`;
   if (!S.review || S.review.pid !== S.pid) initReview();
-  const R = S.review, pages = reviewPages();
+  const R = S.review, pages = reviewPages(), list = allPages();
   /* a page that was being read has arrived: show it */
   const a = S.b.adding;
   if (a && a.pages.length) R.watch = a.pages.slice();
   else if (R.watch.length && (!a || !a.pages.length) && pages.includes(R.watch[0])) {
-    const n = R.watch[0]; R.watch = []; R.n = n; R.tab = "todo";
-    setTimeout(() => toast(`Page ${n} is read. ${figsOn(n).length ? "Its drawings are being judged and drawn; any that need you appear in To check." : "Compare it with the image."}`), 0);
+    const n = R.watch[0]; R.watch = []; R.n = n; R.mode = "page";
+    setTimeout(() => { toast(`Page ${n} is read. ${figsOn(n).length ? "Its drawings are being judged and drawn; any that need you appear on the left." : "Compare it with your page on the right."}`); goPage(n); }, 0);
   }
-  if (!pages.includes(R.n)) R.n = pages[0];
-  const open = openItems(), done = settledItems(), total = open.length + done.length;
-  const tab = (id, label, n) => `<button role="tab" class="dq-tab ${R.tab === id ? "on" : ""}" data-act="rvtab" data-v="${id}" aria-selected="${R.tab === id}">${label}${n !== null ? `<span class="dq-n">${n}</span>` : ""}</button>`;
-  let body;
-  if (R.tab === "settled") {
-    body = done.length ? done.map(settledRow).join("") : `<div class="rv-empty"><p class="muted">Nothing settled yet. What you answer in To check moves here, with a tick.</p></div>`;
-  } else if (R.tab === "text") {
-    const rec = S.b.transcript.pages[R.n];
-    body = `<div class="rv-pages">${pages.map((n) => `<button class="rv-p ${n === R.n ? "on" : ""} ${S.b.transcript.pages[n].edited ? "edited" : ""}" data-act="rvpage" data-n="${n}" title="Page ${n}">${n}</button>`).join("")}</div>
-      <p class="muted small">Page ${R.n}, as it will go into the paper. Compare it with the image on the left.</p>${leftOutBanner("")}
-      <div class="rv-rendered" id="rvout">${mixed(rec.text, reviewFlags(R.n).map((f) => f.snippet))}</div>
-      <details class="more" style="margin-top:12px" ${R.srcOpen ? "open" : ""}><summary>Change something on this page by hand (the page's LaTeX source)</summary>
-        <textarea class="rv-src" id="rvsrc" spellcheck="false" aria-label="Transcript source for page ${R.n}">${esc(rec.text)}</textarea>
-        <div class="muted small">Mathematics goes between $…$ (inline) or $$…$$ (displayed). Changes save as you type. Only the mathematics needs your eye: spelling and grammar are corrected when the paper is written.</div></details>`;
-  } else if (R.tab === "approve") {
-    body = approveTab(open, done);
-  } else {
-    const groups = {};
-    open.forEach((x) => { (groups[x.n] = groups[x.n] || []).push(x); });
-    const auto = (S.b.figures || []).filter((f) => f.choice === "explain" && f.auto && pages.includes(f.page));
-    const autoLine = auto.length ? `<div class="autoline"><b>${auto.length === 1 ? "One drawing only explains" : plural(auto.length, "drawing") + " only explain"} your argument</b>
-      (page${auto.length > 1 ? "s" : ""} ${[...new Set(auto.map((f) => f.page))].join(", ")}), so ${auto.length === 1 ? "it is" : "they are"} not printed and not redrawn. The writers still read ${auto.length === 1 ? "it" : "them"}, to understand the proof.
-      <button class="linkbtn" data-act="rvtab" data-v="settled">See why</button></div>` : "";
-    body = liveReading() + autoLine + (open.length
-      ? Object.keys(groups).map(Number).sort((x, y) => x - y).map((n) => `<div class="qgroup"><div class="qgroup-h"><span>Page ${n}</span>
-          <button class="btn small quiet" data-act="rvshow" data-n="${n}">Show this page</button></div>
-          ${groups[n].map((x) => x.type === "fig" ? figureCard(x.f) : flagCard(x.f, S.b.transcript.pages[n].text)).join("")}</div>`).join("")
-      : `<div class="rv-empty"><div class="big-tick">✓</div><b>Nothing left to check.</b><p class="muted">${total ? "Every doubt and figure is settled." : "Nothing on the pages was doubtful."} Still, glance at each page under Page text before approving.</p>
-          <button class="btn primary" data-act="rvtab" data-v="approve">Go to Approve</button></div>`);
-  }
-  const idx = pages.indexOf(R.n);
-  return `<div class="review"><div class="rv-left"><div class="rv-tools"><button class="btn small" data-act="rvprev" ${idx <= 0 ? "disabled" : ""} aria-label="Previous page">‹</button>
-      <span id="rvpgno">Page ${R.n}</span><button class="btn small" data-act="rvnext" ${idx >= pages.length - 1 ? "disabled" : ""} aria-label="Next page">›</button><span class="tb-space"></span>
-      <button class="btn small" data-act="zoomout" aria-label="Zoom out">−</button><button class="btn small" data-act="zoomin" aria-label="Zoom in">+</button></div>
-      <div class="rv-pages dark">${pages.map((n) => `<button class="rv-p ${n === R.n ? "on" : ""} ${reviewFlags(n).length || figsOn(n).some(figOpen) ? "flag" : ""}" data-act="rvpage" data-n="${n}" title="Page ${n}">${n}</button>`).join("")}</div>
-      <div class="rv-img"><img id="rvimg" src="/api/projects/${S.pid}/page/${R.n}" alt="Your handwritten page ${R.n}" style="width:${R.zoom * 100}%"></div></div>
-    <div class="rv-right"><div class="rv-head"><div class="grow"><h1>Check what was read</h1>
-        <div class="dq-prog"><div style="width:${total ? Math.round((done.length / total) * 100) : 100}%"></div></div>
-        <div class="muted small">${total ? `${done.length} of ${total} settled` : "Nothing was flagged."}${S.b.adding ? " · reading more now" : ""}</div></div></div>
-      ${st("review").status === "done" ? `<div class="banner blue" style="margin:10px 20px 0"><div class="grow">You approved this already. Approving again writes the paper again from the transcript.</div></div>` : ""}
-      <div class="dq-tabs rv-tabs" role="tablist">${tab("todo", "To check", open.length)}${tab("settled", "Settled", done.length)}${tab("text", "Page text", null)}${tab("approve", "Approve", null)}</div>
-      <div class="rv-body">${body}</div>
-      <div class="rv-foot"><span class="muted small" id="rvsaved"></span><span class="tb-space"></span>
-        ${R.tab === "approve" ? "" : `<span class="muted small">${open.length ? `${plural(open.length, "item")} to check` : "All checked"}</span>
-        <button class="btn ${open.length ? "" : "primary"}" data-act="rvtab" data-v="approve">Approve…</button>`}</div></div></div>`;
+  if (!list.some((pg) => pg.n === R.n)) R.n = pages[0];
+  const open = openItems(), done = settledItems(), openBy = groupOpen(open);
+  const readable = list.filter((pg) => !pg.skip && S.b.transcript.pages[pg.n]);
+  const conf = readable.filter((pg) => confirmedPage(pg.n)).length, doubtPages = Object.keys(openBy).length;
+  return `<div class="review rv3">
+    <div class="rv3-top">
+      <div class="rv3-title"><h1>${plan().kind === "text_pdf" ? "Your figures" : "Check what was read"}</h1>
+        <div class="muted small">${conf} of ${plural(readable.length, "page")} confirmed · ${doubtPages ? `${plural(doubtPages, "page")} with something to check` : "nothing left to check"}${a ? " · reading more now" : ""}</div></div>
+      <div class="rv3-pages"><div class="rv3-row" role="toolbar" aria-label="Pages of your notes">${pageRow(openBy)}</div>
+        <div class="rv3-legend"><span><i class="lg s-doubt"></i>to check</span><span><i class="lg s-ok"></i>confirmed</span><span><i class="lg noted"></i>your comment, not carried out yet</span><span><i class="lg s-none"></i>not confirmed yet</span></div></div>
+      <div class="rv3-acts"><label class="rv3-link"><input type="checkbox" id="rvlink" ${R.link ? "checked" : ""}> Scroll together</label>
+        ${st("review").status === "done" ? "" : `<button class="btn small quiet" data-act="rvwide">${R.wide ? "Show the steps" : "Hide the steps"}</button>`}
+        ${mainButton(open)}</div>
+    </div>
+    ${st("review").status === "done" ? `<div class="banner blue rv3-banner"><div class="grow">You approved this already. Approving again writes the paper again from the transcript.</div></div>` : ""}
+    <div class="rv3-cols">
+      <aside class="rv3-panel" id="rvpanel" aria-label="Page ${R.n}">${panelHtml(open, done, openBy)}</aside>
+      <section class="rv3-text" id="rvtext" aria-label="Your notes as read">
+        <div class="col-h"><b>Your notes, as read</b><span class="muted small">Page for page with your notes. Click a line to see it on your page.</span></div>
+        ${list.map((pg) => sheetHtml(pg, openBy)).join("")}</section>
+      <section class="rv3-hand" id="rvhand" aria-label="Your handwritten notes" style="--hz:${R.zoom}">
+        <div class="col-h dark"><b>Your handwritten notes</b><span class="tb-space"></span>
+          <button class="btn small" data-act="zoomout" aria-label="Zoom out">−</button><button class="btn small" data-act="zoomin" aria-label="Zoom in">+</button></div>
+        <div class="hs-list">${list.map(handHtml).join("")}</div></section>
+    </div></div>`;
 }
 
 /* ------------------------------------------------- the topic, confirmed after the first search */
@@ -2623,17 +2953,29 @@ function render() {
   else h = viewStage(S.view);
   h = testBanner() + h;
   const keep = main.scrollTop, same = main.dataset.view === S.view + "|" + S.pid + "|" + S.tab;
-  const inner2 = $(".rv-right", main), keepInner = inner2 ? inner2.scrollTop : 0;
+  const cols = ["rvpanel", "rvtext", "rvhand"].map((id) => { const e = document.getElementById(id); return [id, e ? e.scrollTop : 0]; });
+  const act = document.activeElement, focusId = act && act.id && main.contains(act) && /^(TEXTAREA|INPUT)$/.test(act.tagName) ? act.id : "";
+  const sel = focusId ? [act.selectionStart, act.selectionEnd] : null;
   main.innerHTML = h;
   main.dataset.view = S.view + "|" + S.pid + "|" + S.tab;
   main.scrollTop = same ? keep : 0;
-  const again = $(".rv-right", main); if (again && same) again.scrollTop = keepInner;
+  if (same) cols.forEach(([id, y]) => { const e = document.getElementById(id); if (e) e.scrollTop = y; });
+  if (focusId) { const e = document.getElementById(focusId); if (e) { e.focus({ preventScroll: true }); try { e.setSelectionRange(sel[0], sel[1]); } catch (x) { /* ignore */ } } }
+  /* the steps are put aside while the transcript waits for the author, for room; once it is approved they stay */
+  $("#app").classList.toggle("rv-wide", S.view === "review" && !!S.review && S.review.pid === S.pid && !!S.review.wide && !!$(".rv3", main) && st("review").status !== "done");
   if (HOSTED.on) HOSTED.paintButtons();             // Google's sign-in buttons, where the page has room for one
   renderMath(main);
   drawLog();
   if (S.view === "new" && S.form && S.form.files && S.form.files.length) renderUploadPreview();
   if (S.view === "assemble" && S.tab === "latex" && S.b && S.b.paper) loadTex();
   if (S.edit) { const el = $(`.paper [data-block="${S.edit.target}"], .paper [data-part="${S.edit.target}"]`); if (el) el.classList.add("on"); }
+}
+function zoomHand(d) {
+  const R = S.review, col = $("#rvhand"); if (!R || !col) return;
+  const z = Math.max(0.5, Math.min(3, R.zoom + d)); if (z === R.zoom) return;
+  const mid = (col.scrollTop + col.clientHeight / 2) / (col.scrollHeight || 1);
+  R.zoom = z; col.style.setProperty("--hz", z);
+  quietScroll(col, mid * col.scrollHeight - col.clientHeight / 2, false);
 }
 async function loadTex() {
   try { const r = await fetch(`/api/projects/${S.pid}/download/main.tex`); const el = $("#texsrc"); if (el) el.textContent = await r.text(); } catch (e) { /* ignore */ }
@@ -2854,7 +3196,7 @@ const ACT = {
           <button class="btn primary" data-act="skippage" data-n="${n}" data-force="1">Include it and redo from the review</button></div></div>`);
       }
       closeDialog();
-      if (r.reading) { S.follow = true; if (S.review) S.review.tab = "todo"; history.replaceState(null, "", `#p/${S.pid}`); }
+      if (r.reading) { S.follow = true; if (S.review) S.review.mode = "page"; history.replaceState(null, "", `#p/${S.pid}`); }
       await refresh();
       toast(skip ? "Page left out. Redo a step for this to take effect on finished steps."
         : r.reading ? `Page ${n} is being read now. Only this page is read; everything else is kept.` : `Page ${n} included.`);
@@ -3095,11 +3437,67 @@ const ACT = {
     catch (e) { toast(e.message, true); }
     S.busy = ""; render();
   },
-  rvpage(el) { S.review.n = +el.dataset.n; render(); const r = $(".rv-right"); if (r) r.scrollTop = 0; },
-  rvprev() { const p = Object.keys(S.b.transcript.pages).map(Number).sort((a, b) => a - b); S.review.n = p[Math.max(0, p.indexOf(S.review.n) - 1)]; render(); const r = $(".rv-right"); if (r) r.scrollTop = 0; },
-  rvnext() { const p = Object.keys(S.b.transcript.pages).map(Number).sort((a, b) => a - b); S.review.n = p[Math.min(p.length - 1, p.indexOf(S.review.n) + 1)]; render(); const r = $(".rv-right"); if (r) r.scrollTop = 0; },
-  zoomin() { S.review.zoom = Math.min(3, S.review.zoom + 0.25); $("#rvimg").style.width = S.review.zoom * 100 + "%"; },
-  zoomout() { S.review.zoom = Math.max(0.5, S.review.zoom - 0.25); $("#rvimg").style.width = S.review.zoom * 100 + "%"; },
+  rvpage(el) { const n = +el.dataset.n; selectPage(n); goPage(n); },
+  rvstep(el) {
+    const list = allPages().map((x) => x.n), i = list.indexOf(S.review.n), n = list[Math.max(0, Math.min(list.length - 1, i + +el.dataset.d))];
+    if (n) { selectPage(n); goPage(n); }
+  },
+  rvmode(el) { S.review.mode = el.dataset.v; render(); const p = $("#rvpanel"); if (p) p.scrollTop = 0; },
+  rvwide() { const R = S.review; R.wide = !R.wide; try { localStorage.setItem("scriptavera-rv-wide", R.wide ? "1" : "0"); } catch (e) { /* ignore */ } render(); },
+  async rvedit(el) {
+    const R = S.review, n = +el.dataset.n;
+    if (saveTranscript.t) { clearTimeout(saveTranscript.t); saveTranscript.t = null; await saveTranscript(saveTranscript.n, S.b.transcript.pages[saveTranscript.n].text); }
+    R.edit = R.edit === n ? 0 : n; R.n = n; R.mode = "page"; render();
+    const x = $(`#rvsrc-${n}`); if (x) x.focus({ preventScroll: true });
+  },
+  async rvcorrect(el) { await correctPage(+el.dataset.n); },
+  async rvcorrectall() {
+    const pend = pendingPages();
+    for (let i = 0; i < pend.length; i++) {
+      selectPage(pend[i]); goPage(pend[i]);
+      if (pend.length > 1) toast(`Correcting page ${pend[i]} (${i + 1} of ${pend.length})…`);
+      if (!await correctPage(pend[i], pend.length > 1)) return;
+    }
+    if (pend.length > 1) toast(`${plural(pend.length, "page")} corrected from your comments. Compare each with your page.`);
+  },
+  async rvundo(el) {
+    const R = S.review, n = +el.dataset.n;
+    try {
+      const r = await api(`/api/projects/${S.pid}/correct_page`, { method: "POST", body: { page: n, undo: true } });
+      const rec = S.b.transcript.pages[n]; rec.text = r.text; (rec.corrections || []).pop();
+      S.b.page_notes = r.notes; delete R.draft[n]; R.fresh = 0; render();
+      toast(`The correction is undone; your comment is back, to change or to carry out again.`);
+    } catch (e) { toast(e.message, true); }
+  },
+  async rvconfirm(el) {
+    const R = S.review, n = +el.dataset.n;
+    if (!el.dataset.undo && commentOn(n).trim()) return toast("Your comment on this page is not carried out yet: correct the page from it first.", true);
+    if (savePageNote.t) await savePageNote();
+    if (el.dataset.undo) {
+      R.conf[n] = false; render();
+      try { const r = await api(`/api/projects/${S.pid}/page_note`, { method: "POST", body: { page: n, confirmed: false } }); S.b.page_notes = r.notes; }
+      catch (e) { toast(e.message, true); }
+      delete R.conf[n]; render(); return;
+    }
+    if (figsOn(n).some(figOpen)) return toast("First decide on the drawing on this page.", true);
+    reviewFlags(n).forEach((f) => {                        /* confirming the page keeps its doubtful passages as read */
+      R.dropped[f.key] = true;
+      const ans = { page: n, snippet: f.snippet, alt: f.alt || "", how: "kept", value: "", issue: f.issue || "" };
+      R.local.push(ans);
+      api(`/api/projects/${S.pid}/doubt`, { method: "POST", body: ans }).catch((e) => toast(e.message, true));
+    });
+    R.conf[n] = true;
+    api(`/api/projects/${S.pid}/page_note`, { method: "POST", body: { page: n, confirmed: true } })
+      .then((r) => { S.b.page_notes = r.notes; delete R.conf[n]; })
+      .catch((e) => { delete R.conf[n]; toast(e.message, true); render(); });
+    const doubt = nextNeeding(n, groupOpen(openItems())), next = doubt || nextUnconfirmed(n);
+    if (next) {
+      selectPage(next); goPage(next);
+      toast(doubt ? `Page ${n} confirmed. Page ${next} has the next item to check.` : `Page ${n} confirmed. Nothing is left to check; page ${next} is the next one not confirmed.`);
+    } else { render(); toast(openItems().length ? `Page ${n} confirmed.` : `Page ${n} confirmed. Approve the transcript when you are ready.`); }
+  },
+  zoomin() { zoomHand(0.25); },
+  zoomout() { zoomHand(-0.25); },
   async topicok() { await topicSubmit("confirm"); },
   async topicrefine() {
     const T = topicState();
@@ -3177,10 +3575,9 @@ const ACT = {
   dropflag(el) { const f = findFlag(el.dataset.id); if (f) answerFlag(f, "", "kept"); },
   usealt(el) { const f = findFlag(el.dataset.id); if (f) answerFlag(f, f.alt, "suggested"); },
   useown(el) { const f = findFlag(el.dataset.id); if (f && (S.review.own[f.key] || "").trim()) answerFlag(f, S.review.own[f.key], "own"); },
-  rvtab(el) { S.review.tab = el.dataset.v; render(); const r = $(".rv-body"); if (r) r.scrollTop = 0; },
-  rvshow(el) { showPage(+el.dataset.n); },
-  rvtext(el) { S.review.tab = "text"; S.review.n = +el.dataset.n; render(); },
-  async figreopen(el) { await setFigure(el.dataset.id, { choice: "" }); S.review.tab = "todo"; const f = (S.b.figures || []).find((x) => x.id === el.dataset.id); if (f) S.review.n = f.page; render(); },
+  rvtab(el) { S.review.mode = el.dataset.v === "approve" ? "approve" : "page"; render(); },
+  rvtext(el) { const n = +el.dataset.n; S.review.edit = n; selectPage(n); render(); goPage(n); },
+  async figreopen(el) { await setFigure(el.dataset.id, { choice: "" }); S.review.mode = "page"; const f = (S.b.figures || []).find((x) => x.id === el.dataset.id); if (f) S.review.n = f.page; render(); },
   ownread(el) {
     const f = findFlag(el.dataset.id); if (!f) return;
     if (S.review.own[f.key] === undefined) S.review.own[f.key] = ""; else delete S.review.own[f.key];
@@ -3196,13 +3593,13 @@ const ACT = {
     const id = el.dataset.id;
     const ok = await setFigure(id, { print: true }, "print");
     if (ok) {
-      const f = (S.b.figures || []).find((x) => x.id === id); S.review.tab = "todo"; if (f) S.review.n = f.page; render();
+      const f = (S.b.figures || []).find((x) => x.id === id); S.review.mode = "page"; if (f) S.review.n = f.page; render();
       const card = $(`#fig-${id}`); if (card) card.scrollIntoView({ block: "start" });
     }
   },
   async figtext(el) {
     const id = el.dataset.id, why = $(`#figwhy-${id}`), note = why ? why.value.trim() : "";
-    if (saveTranscript.t) { clearTimeout(saveTranscript.t); saveTranscript.t = null; const n = S.review.n; await saveTranscript(n, S.b.transcript.pages[n].text); }
+    if (saveTranscript.t) { clearTimeout(saveTranscript.t); saveTranscript.t = null; const n = saveTranscript.n; await saveTranscript(n, S.b.transcript.pages[n].text); }
     S.review.figBusy = id; S.review.figMode = "text"; render();
     try {
       const r = await api(`/api/projects/${S.pid}/figure/${id}`, { method: "POST", body: { astext: note } });
@@ -3214,8 +3611,9 @@ const ACT = {
   },
   figredraw(el) { const why = $(`#figwhy-${el.dataset.id}`); setFigure(el.dataset.id, { redraw: why ? why.value.trim() : "" }, true); },
   async approve() {
+    if (S.review && S.review.pid === S.pid && pendingPages().length) return ACT.rvcorrectall();
     const open = openItems();
-    if (open.length) { S.review.tab = "todo"; S.review.n = open[0].n; render(); return toast(`${plural(open.length, "item")} still to check. The first one is shown.`, true); }
+    if (open.length) { selectPage(open[0].n); render(); goPage(open[0].n); return toast(`${plural(open.length, "item")} still to check. The first one is shown.`, true); }
     S.busy = "approve"; render();
     try { await api(`/api/projects/${S.pid}/review`, { method: "POST", body: {} }); S.follow = true; history.replaceState(null, "", `#p/${S.pid}`); toast("Approved. Now the whole of the notes is read together."); await refresh(); }
     catch (e) { toast(e.message, true); }
@@ -3400,6 +3798,14 @@ document.addEventListener("click", (ev) => {
 });
 document.addEventListener("input", (ev) => {
   const el = ev.target;
+  if (el.dataset && el.dataset.pnote && S.review) {
+    const n = +el.dataset.pnote, had = !!commentOn(n).trim(); S.review.draft[n] = el.value; paintNoteMarks(n);
+    if (had !== !!el.value.trim()) render();
+    const s = $(`#pnote-st-${n}`); if (s) s.textContent = "Saving…";
+    if (savePageNote.t && savePageNote.n !== n) savePageNote();
+    clearTimeout(savePageNote.t); savePageNote.n = n; savePageNote.t = setTimeout(savePageNote, 700);
+    return;
+  }
   if (el.dataset.fdeclare !== undefined || el.dataset.frecorder !== undefined) return;     // handled on "change"
   if (el.dataset.bind) {
     bindPath(S.form, el.dataset.bind, el.value);
@@ -3457,16 +3863,17 @@ document.addEventListener("input", (ev) => {
     const pv = $(`#ownpv-${f.id}`); if (pv) pv.innerHTML = el.value.trim() ? "It will read: " + readable(el.value) : "";
     const b = $(`#flag-${f.id} [data-act="useown"]`); if (b) b.disabled = !el.value.trim();
   }
-  else if (el.id === "rvsrc") {
-    const n = S.review.n, rec = S.b.transcript.pages[n];
+  else if (el.dataset.src) {
+    const n = +el.dataset.src, rec = S.b.transcript.pages[n];
+    if (saveTranscript.t && saveTranscript.n !== n) { clearTimeout(saveTranscript.t); const m = saveTranscript.n; saveTranscript(m, S.b.transcript.pages[m].text); }
     rec.text = el.value; rec.edited = true;
-    $("#rvout").innerHTML = mixed(rec.text, reviewFlags(n).map((f) => f.snippet));
-    const s = $("#rvsaved"); if (s) s.textContent = "Saving…";
-    clearTimeout(saveTranscript.t); saveTranscript.t = setTimeout(() => saveTranscript(n, rec.text), 700);
+    const tb = $(`#tb-${n}`); if (tb) { tb.innerHTML = pageTextHtml(n) + '<div class="ts-band"></div>'; renderMath(tb); }
+    clearTimeout(saveTranscript.t); saveTranscript.n = n; saveTranscript.t = setTimeout(() => { saveTranscript.t = null; saveTranscript(n, rec.text); }, 700);
   }
 });
 document.addEventListener("change", (ev) => {
   const el = ev.target;
+  if (el.id === "rvlink" && S.review) { S.review.link = el.checked; if (el.checked) followScroll("rvtext"); return; }
   if (el.dataset.fdeclare !== undefined && S.form) { S.form.declare = el.checked; return; }
   if (el.dataset.optin !== undefined && S.form) { S.form.optIn = el.checked; return; }
   if (el.id === "svkeyswhere") { HOSTED.keysWhere(el.checked); return; }
@@ -3493,15 +3900,27 @@ document.addEventListener("change", (ev) => {
     const f = findFlag(el.dataset.occ); if (!f) return;
     const s = (S.review.skip[f.key] = S.review.skip[f.key] || {});
     if (el.checked) delete s[el.dataset.i]; else s[el.dataset.i] = true;
-    const body = $(".rv-body"), keep = body ? body.scrollTop : 0; render(); const b2 = $(".rv-body"); if (b2) b2.scrollTop = keep;
+    render();
   }
 });
-document.addEventListener("toggle", (ev) => {
-  if (S.review && ev.target.matches && ev.target.matches(".rv-body details")) S.review.srcOpen = ev.target.open;
+document.addEventListener("click", (ev) => {
+  /* The review: a click on a line of your notes as read shows the same place on your page, and the other way round. */
+  if (S.view !== "review" || !S.review || !ev.target.closest) return;
+  if (ev.target.closest("button, a, input, textarea, select, label, summary, [data-act]")) return;
+  if (String(window.getSelection ? window.getSelection() : "").trim()) return;       // selecting text, not pointing
+  const tb = ev.target.closest("#rvtext .ts-body");
+  if (tb && tb.dataset.n) { const r = tb.getBoundingClientRect(); return pickFromText(+tb.dataset.n, (ev.clientY - r.top) / r.height, ev.target.closest(".tfig")); }
+  const hi = ev.target.closest("#rvhand .hs-img");
+  if (hi) { const r = hi.getBoundingClientRect(); return pickFromHand(+hi.dataset.n, (ev.clientY - r.top) / r.height); }
+});
+document.addEventListener("scroll", (ev) => {
+  const R = S.review, col = ev.target;
+  if (!R || !R.link || S.view !== "review" || !col.id || (col.id !== "rvtext" && col.id !== "rvhand")) return;
+  if ((R.quiet[col.id] || 0) > Date.now() || R.linkRaf) return;
+  R.linkRaf = requestAnimationFrame(() => { R.linkRaf = 0; followScroll(col.id); });
 }, true);
-document.addEventListener("pointerdown", (ev) => {
-  const card = ev.target.closest && ev.target.closest(".rv-right [data-page]");
-  if (card && S.view === "review") showPage(+card.dataset.page);              // the page image follows the item in hand
+document.addEventListener("focusout", (ev) => {
+  if (ev.target.dataset && ev.target.dataset.pnote && savePageNote.t) savePageNote();
 });
 document.addEventListener("dragover", (ev) => { const d = ev.target.closest && ev.target.closest("#drop"); if (d) { ev.preventDefault(); d.classList.add("over"); } });
 document.addEventListener("dragleave", (ev) => { const d = ev.target.closest && ev.target.closest("#drop"); if (d) d.classList.remove("over"); });

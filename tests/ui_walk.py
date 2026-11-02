@@ -45,24 +45,22 @@ try:
         pg.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
         pg.on("pageerror", lambda e: errors.append("PAGEERROR " + str(e)))
         pg.goto(U)
-        pg.wait_for_selector(".home-empty")                       # no papers yet: the home page offers the two ways in
+        pg.wait_for_selector(".home-empty")                       # no papers yet: the home page offers the way in
         shot(pg, "00_home_empty")
-        hs = [pg.locator(f'.home-acts [data-act="{a}"]').bounding_box()["height"] for a in ("newpaper", "importpaper")]
-        assert hs[0] == hs[1], f"the two buttons on the home page differ in height: {hs}"
-        pg.click('.home-acts [data-act="newpaper"]')
+        pg.click('#main [data-act="newpaper"] >> nth=0')
         pg.wait_for_selector(".dom")
         assert pg.evaluate("location.hash") == "#new" and pg.locator('.crumbs [data-act="home"]').count() == 1
         shot(pg, "01_home")
         pg.click('.dom[data-id="math.CA"]')
         pg.fill('[data-bind="subarea"]', "explicit bounds for sums")
         pg.set_input_files("#fileInput", str(PDF))
-        pg.wait_for_selector(".file")
+        pg.wait_for_selector(".upload-actions")
         pg.click('[data-act="create"]'); time.sleep(0.3)                   # refused: the problem and the keywords are required
         assert "Describe the problem" in pg.inner_text("#toast")
         pg.fill("#fproblem", "Explicit bounds for the partial sums of the series of reciprocal powers.")
         pg.fill("#fkeywords", "partial sums, reciprocal powers, integral comparison")
         pg.fill('[data-bind="keypapers"]', "10.9999/example.2015.1")
-        pg.wait_for_selector(".file")
+        pg.wait_for_selector(".upload-actions")
         pg.fill("#formjq", "analysis"); pg.press("#formjq", "Enter")
         pg.wait_for_selector(".jr-item"); shot(pg, "02_home_journal", full=True)
         pg.locator(".jr-item").first.click()
@@ -115,37 +113,54 @@ try:
         assert pg.inner_text("#gatecount").startswith("3 of 3"), "answers lost on reload"
         pg.click('[data-act="confirm"]')
 
-        # ---- second stop: transcript and figures, as one list of items to check
-        pg.wait_for_selector(".review", timeout=180000); time.sleep(0.6)
+        # ---- second stop: the notes as read, page for page beside the handwritten pages
+        pg.wait_for_selector(".review.rv3", timeout=180000); time.sleep(0.6)
+        go = lambda n: (pg.click(f'.rv3-row .rv-p[data-n="{n}"]'), time.sleep(0.4))
+        fpage = pg.evaluate("S.b.figures.find((f) => f.id === 'f1').page")
+        assert pg.locator("#rvtext .tsheet").count() == pg.locator("#rvhand .hsheet").count() == pg.evaluate("S.b.state.pages.length"), "one page in the middle for each page of the notes"
+        go(fpage)
         assert pg.locator("#fig-f1").count() == 1 and "is the redrawn version what you drew" in pg.inner_text("#fig-f1") and pg.locator('#fig-f1 [data-act="figtext"]').count() == 1
+        assert pg.locator(f"#tb-{fpage} .tfig").count() >= 1, "the drawing stands in the text where it is on the page"
         shot(pg, "07_review_figure")
-        pg.click('[data-act="rvtab"][data-v="approve"]'); time.sleep(0.3)
-        assert "still to check" in pg.inner_text(".rv-body") and pg.locator('[data-act="approve"]').count() == 0, "no approving with items open"
-        pg.click('[data-act="rvtab"][data-v="todo"]'); time.sleep(0.3)
+        assert "left to check" in pg.inner_text(".rv3-acts")
+        pg.click('.rv3-acts [data-act="rvmode"][data-v="approve"]'); time.sleep(0.3)
+        assert "still to check" in pg.inner_text("#rvpanel") and pg.locator('[data-act="approve"]').count() == 0, "no approving with items open"
+        pg.click('#rvpanel [data-act="rvmode"][data-v="page"]'); time.sleep(0.3)
         pg.fill("#figwhy-f1", "The rectangles should start at 1."); pg.click('#fig-f1 [data-act="figredraw"]')
         pg.wait_for_function("document.querySelector('#toast') && /Drawn again|could not be redrawn/.test(document.querySelector('#toast').textContent)", timeout=60000)
         drawn = pg.locator('#fig-f1 .choice[data-v="tikz"]').is_enabled()
         pg.locator(f'#fig-f1 .choice[data-v="{"tikz" if drawn else "orig"}"]').click(); time.sleep(0.6)
-        assert pg.locator("#fig-f1").count() == 0 and "Moved to Settled" in pg.inner_text("#toast"), "an answered figure leaves To check"
-        pg.click('[data-act="rvtab"][data-v="settled"]'); time.sleep(0.3)
-        assert "goes into the paper" in pg.inner_text(".rv-body") and pg.locator(".srow .dq-mark.ok").count() >= 1
-        pg.locator(".rv-body .capwrap summary").first.click(); time.sleep(0.2)
+        assert pg.locator("#fig-f1").count() == 0, "an answered figure leaves the items to check"
+        pg.locator("#rvpanel > details.pp-sec > summary").click(); time.sleep(0.3)
+        assert "goes into the paper" in pg.inner_text("#rvpanel") and pg.locator("#rvpanel .srow .dq-mark.ok").count() >= 1
+        pg.locator("#rvpanel .capwrap summary").first.click(); time.sleep(0.2)
         pg.fill('[data-figcap="f1"]', "Rectangles of width $1$ under the graph of a decreasing function."); pg.locator('[data-figcap="f1"]').blur(); time.sleep(0.4)
         assert pg.locator("#cappv-f1 .katex").count() >= 1 and "$" not in pg.inner_text("#cappv-f1"), "the caption is shown typeset"
         shot(pg, "07b_review_figure_answered")
-        pg.click('[data-act="rvtab"][data-v="todo"]'); time.sleep(0.3)
+        # a click on a line in the middle shows the same page on the right, and the other way round
+        tb = pg.locator("#tb-3"); tb.scroll_into_view_if_needed(); bb = tb.bounding_box()
+        pg.mouse.click(bb["x"] + 40, bb["y"] + bb["height"] * 0.5); time.sleep(1.2)
+        assert pg.evaluate("S.review.n") == 3
+        hb = pg.evaluate("(() => { const c = document.getElementById('rvhand'), r = document.querySelector('#hs-3 .hs-img').getBoundingClientRect(), cr = c.getBoundingClientRect(); return r.top < cr.bottom && r.bottom > cr.top; })()")
+        assert hb, "page 3 of the handwritten notes is in view"
+        hi = pg.locator("#hs-2 .hs-img"); hi.scroll_into_view_if_needed(); time.sleep(0.3); bb = hi.bounding_box()
+        pg.mouse.click(bb["x"] + 50, bb["y"] + bb["height"] * 0.2); time.sleep(1.2)
+        assert pg.evaluate("S.review.n") == 2
+        go(5)
         p5 = '.qcard.flag[data-page="5"]'
         assert pg.locator(p5).count() == 2, "a doubtful reading and a possible misreading on page 5"
         flags_text = " ".join(pg.locator(p5).all_inner_texts())
         assert "\\log" not in flags_text and "$" not in flags_text and "suggested reading:" not in flags_text, flags_text   # no LaTeX source
         assert pg.locator(f"{p5} .katex").count() >= 4 and pg.locator(f"{p5} code").count() == 0
+        assert pg.locator("#tb-5 mark, #tb-5 .math.unc").count() >= 1, "the doubtful passages are highlighted in the middle"
         shot(pg, "08_review_page5")
         pg.locator(f'.qcard.flag.red[data-page="5"] [data-act="dropflag"]').click(); time.sleep(0.5)       # 'correct as read' is remembered
-        assert pg.evaluate("S.review.n") != 5 or pg.locator(p5).count() == 1
-        pg.reload(); pg.wait_for_selector(".review"); time.sleep(0.4)
+        assert pg.locator(p5).count() == 1
+        pg.reload(); pg.wait_for_selector(".review.rv3"); time.sleep(0.4); go(5)
         assert pg.locator(p5).count() == 1 and pg.locator('.qcard.flag.red[data-page="5"]').count() == 0
         assert pg.evaluate("settledItems().filter((x) => x.type === 'flag').length") >= 1, "the answer is listed under Settled after a reload"
         # a reading that occurs in two places: both ticked, one unticked, nothing changed yet
+        go(2)
         p2 = '.qcard.flag[data-page="2"]'
         assert pg.locator(f"{p2} .occ-row").count() == 2 and "in all 2 places" in pg.inner_text(p2)
         pg.locator(f"{p2} .occ-row input >> nth=1").uncheck(); time.sleep(0.3)
@@ -155,6 +170,7 @@ try:
         pg.locator(f'{p2} [data-act="dropflag"]').click(); time.sleep(0.4)
         assert pg.locator(p2).count() == 0
         # the author's own reading, typed right in the card, and Enter to use it
+        go(4)
         p4 = '.qcard.flag[data-page="4"]'
         assert pg.locator(p4).count() == 1
         pg.locator(f'{p4} [data-act="ownread"]').click(); time.sleep(0.2)
@@ -163,18 +179,37 @@ try:
         shot(pg, "08b_own_reading")
         pg.locator(f"{p4} [data-own]").press("Enter"); time.sleep(0.6)
         assert pg.locator(p4).count() == 0 and "s>1" in pg.evaluate("S.b.transcript.pages[4].text")
-        pg.reload(); pg.wait_for_selector(".review"); time.sleep(0.4)
+        pg.reload(); pg.wait_for_selector(".review.rv3"); time.sleep(0.4); go(4)
         assert pg.locator(p4).count() == 0 and "s>1" in pg.evaluate("S.b.transcript.pages[4].text"), "the answer was not kept"
+        go(6)
         assert pg.locator('.qcard.flag[data-page="6"]').count() == 0, "the doubt about a plural must not be shown"
+        # a comment on a page: while it waits, nothing moves on; the button corrects the page from it instead
+        go(1)
+        pg.locator("#pnote-1").press_sequentially("The sum starts at n = 1.", delay=5); time.sleep(1.4)
+        assert pg.locator('.rv3-row .rv-p[data-n="1"].noted').count() == 1 and "not carried out yet" in pg.inner_text("#ts-1")
+        assert "Correct page 1 from your comment" in pg.inner_text(".rv3-acts") and pg.locator('.rv3-acts [data-act="approve"]').count() == 0
+        assert pg.locator('[data-act="rvconfirm"][data-n="1"]').count() == 0 and pg.locator('[data-act="rvcorrect"][data-n="1"]').count() == 1
+        pg.reload(); pg.wait_for_selector(".review.rv3"); time.sleep(0.4)
+        assert "Correct page 1 from your comment" in pg.inner_text(".rv3-acts"), "the comment is kept, and still waits"
+        go(1)
+        pg.click('[data-act="rvcorrect"][data-n="1"]')
+        pg.wait_for_selector("#rvpanel .pp-done", timeout=60000); time.sleep(0.4)
+        assert pg.input_value("#pnote-1") == "" and "Correct page" not in pg.inner_text(".rv3-acts"), "a comment carried out no longer waits"
+        assert "The sum starts at n = 1." in pg.inner_text("#rvpanel .pp-done")
+        pg.click('[data-act="rvconfirm"][data-n="1"]'); time.sleep(0.8)
+        pg.reload(); pg.wait_for_selector(".review.rv3"); time.sleep(0.4)
+        assert "s-ok" in pg.get_attribute('.rv3-row .rv-p[data-n="1"]', "class")
+        go(1)
+        shot(pg, "08e_comment_confirmed")
         for _ in range(20):                                           # whatever is left: kept as read
-            left = pg.evaluate("(() => { const x = openItems()[0]; return x ? x.type + ':' + x.f.id : '' })()")
+            left = pg.evaluate("(() => { const x = openItems()[0]; return x ? x.type + ':' + x.f.id + ':' + x.n : '' })()")
             if not left:
                 break
-            t, i = left.split(":")
+            t, i, n = left.split(":"); go(n)
             pg.locator(f'#fig-{i} .choice[data-v="orig"]' if t == "fig" else f'#flag-{i} [data-act="dropflag"]').click(); time.sleep(0.5)
-        assert pg.evaluate("S.review.tab") == "approve" and "Everything is checked" in pg.inner_text(".rv-body"), "with nothing left, Approve opens"
+        assert "Approve and continue" in pg.inner_text(".rv3-acts"), "with nothing left and no comment waiting, the button moves on"
         shot(pg, "08d_approve")
-        pg.click('[data-act="approve"]')
+        pg.click('.rv3-acts [data-act="approve"]')
 
         # ---- the assessment of the notes; the author's plan for the paper
         pg.wait_for_selector(".kinds", timeout=240000); time.sleep(0.5)
