@@ -326,6 +326,7 @@ function connect(pid) {
     if (e.type === "log") {
       S.logs.push(e); if (S.logs.length > 400) S.logs.shift();
       drawLog();
+  if (S.view === "new" && S.form && S.form.files && S.form.files.length) renderUploadPreview();
       if (e.level === "error" || e.level === "gate" || e.level === "done") refreshSoon(150);
     } else if (e.type === "progress") {
       if (S.b && S.b.state.stages[e.stage]) S.b.state.stages[e.stage].progress = { done: e.done, total: e.total, note: e.note };
@@ -572,19 +573,19 @@ function researchSuiteGrid() {
       <div class="suite-card-icon">${ICON.slides}</div>
       <h3>Conference Presentations</h3>
       <p>Transform theorems, proofs, and definitions into professional LaTeX Beamer presentation slides for seminars and conferences.</p>
-      <button class="btn" data-act="slidesguide">${ICON.slides}Presentation slides</button>
+      <button class="btn primary" data-act="slidesguide">${ICON.slides}Presentation slides</button>
     </div>
     <div class="suite-card">
       <div class="suite-card-icon">${ICON.review}</div>
       <h3>Reviewer Comments</h3>
       <p>Address referee critiques point by point, carry out proof corrections, and draft formal author response letters.</p>
-      <button class="btn" data-act="rebuttalguide">${ICON.review}Reviewer rebuttal</button>
+      <button class="btn primary" data-act="rebuttalguide">${ICON.review}Reviewer rebuttal</button>
     </div>
     <div class="suite-card">
       <div class="suite-card-icon">${ICON.shield}</div>
       <h3>Proof &amp; Priority Audit</h3>
       <p>Verify mathematical AST consistency, cross check citations on arXiv, and seal scans with RFC 3161 timestamps.</p>
-      <button class="btn" data-act="auditguide">${ICON.shield}Integrity audit</button>
+      <button class="btn primary" data-act="auditguide">${ICON.shield}Integrity audit</button>
     </div>
   </div>`;
 }
@@ -636,6 +637,164 @@ function freeTierNotice() {
     ? `<div class="flag hl" style="margin:10px 0">Data protection: this service is reading notes with free-tier AI keys at the moment. With a free-tier key the provider may use what is sent to improve its models, and people may review it, so unpublished work can leak. Do not upload notes you need kept confidential until this notice is gone.</div>`
     : `<div class="flag hl" style="margin:10px 0"><b>Data protection: you are using a free-tier API key.</b> With a free-tier key the provider may use what is sent to improve its models, and people may review it, so your unpublished notes can leak. Use a paid-tier key for data protection (for Gemini, a key from a Google Cloud project with billing turned on), and turn on Private mode in Settings.</div>`;
 }
+const previewCache = new Map();
+let pdfjsLib = null;
+
+async function getPdfJs() {
+  if (pdfjsLib) return pdfjsLib;
+  try {
+    pdfjsLib = await import("/static/vendor/pdfjs/pdf.min.mjs");
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/vendor/pdfjs/pdf.worker.min.mjs";
+    return pdfjsLib;
+  } catch (e) {
+    console.error("PDF.js load error:", e);
+    return null;
+  }
+}
+
+async function renderUploadPreview() {
+  const canvas = $("#uploadCanvas");
+  const loading = $("#previewLoading");
+  if (!canvas || !S.form || !S.form.files || !S.form.files.length) return;
+  const file = S.form.files[0];
+  const fileKey = file.name + "|" + file.size + "|" + file.lastModified;
+
+  if (previewCache.has(fileKey)) {
+    const cached = previewCache.get(fileKey);
+    const img = new Image();
+    img.onload = () => {
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      canvas.style.display = "block";
+      if (loading) loading.style.display = "none";
+    };
+    img.src = cached;
+    return;
+  }
+
+  if (file.type.startsWith("image/") || /\.(jpe?g|png|webp|bmp)$/i.test(file.name)) {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const maxW = 340, maxH = 460;
+      let w = img.width, h = img.height;
+      if (w > maxW || h > maxH) {
+        const ratio = Math.min(maxW / w, maxH / h);
+        w *= ratio;
+        h *= ratio;
+      }
+      canvas.width = Math.round(w);
+      canvas.height = Math.round(h);
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      canvas.style.display = "block";
+      if (loading) loading.style.display = "none";
+      try { previewCache.set(fileKey, canvas.toDataURL()); } catch (e) {}
+      URL.revokeObjectURL(url);
+    };
+    img.onerror = () => {
+      if (loading) loading.textContent = "Image ready: " + file.name;
+    };
+    img.src = url;
+    return;
+  }
+
+  if (/\.pdf$/i.test(file.name) || file.type === "application/pdf") {
+    try {
+      const lib = await getPdfJs();
+      if (!lib) throw new Error("PDF.js unavailable");
+      const buffer = await file.arrayBuffer();
+      const task = lib.getDocument({ data: new Uint8Array(buffer), isEvalSupported: false, enableXfa: false });
+      const doc = await task.promise;
+      const page = await doc.getPage(1);
+      const unscaled = page.getViewport({ scale: 1 });
+      const maxW = 340, maxH = 460;
+      const scale = Math.min(maxW / unscaled.width, maxH / unscaled.height, 1.4);
+      const viewport = page.getViewport({ scale: Math.max(scale, 0.4) });
+      canvas.width = Math.round(viewport.width);
+      canvas.height = Math.round(viewport.height);
+      const ctx = canvas.getContext("2d");
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      canvas.style.display = "block";
+      if (loading) loading.style.display = "none";
+      try { previewCache.set(fileKey, canvas.toDataURL()); } catch (e) {}
+    } catch (e) {
+      console.warn("Could not render PDF preview canvas:", e);
+      canvas.width = 280;
+      canvas.height = 360;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, 280, 360);
+      ctx.strokeStyle = "#cbd5e1";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(0, 0, 280, 360);
+      ctx.fillStyle = "#2563eb";
+      ctx.font = "bold 20px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("PDF Document", 140, 160);
+      ctx.fillStyle = "#64748b";
+      ctx.font = "14px sans-serif";
+      ctx.fillText(file.name.slice(0, 22), 140, 190);
+      ctx.fillText("Page 1 Ready", 140, 215);
+      canvas.style.display = "block";
+      if (loading) loading.style.display = "none";
+    }
+    return;
+  }
+
+  canvas.width = 280;
+  canvas.height = 200;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#f8fafc";
+  ctx.fillRect(0, 0, 280, 200);
+  ctx.strokeStyle = "#cbd5e1";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(0, 0, 280, 200);
+  ctx.fillStyle = "#0f172a";
+  ctx.font = "bold 18px monospace";
+  ctx.textAlign = "center";
+  ctx.fillText(file.name.slice(0, 22), 140, 95);
+  ctx.fillStyle = "#2563eb";
+  ctx.font = "14px sans-serif";
+  ctx.fillText("LaTeX / Text Source", 140, 125);
+  canvas.style.display = "block";
+  if (loading) loading.style.display = "none";
+}
+
+function uploadBoxHtml(f) {
+  if (!f.files.length) {
+    return `<div class="drop" data-act="pick" id="drop" tabindex="0" role="button">
+      <div style="font-size:32px;margin-bottom:8px">📄</div>
+      <strong style="font-size:18px">Drop notes or paper here</strong>
+      <span class="muted" style="margin-top:4px">Click or drop handwritten scans, page photos, PDF, typed text, or LaTeX papers (.tex / .zip)</span>
+    </div>`;
+  }
+  const first = f.files[0];
+  const totalMb = f.files.reduce((acc, x) => acc + x.size, 0) / 1048576;
+  return `<div class="drop has-files" id="drop" tabindex="0">
+    <div class="upload-badge">
+      <span class="upload-badge-check">✓</span>
+      <strong>Uploaded: ${esc(first.name)}</strong>
+      <span class="muted small">(${(first.size / 1048576).toFixed(2)} MB)</span>
+    </div>
+    <div class="preview-stage">
+      <div id="previewLoading" class="preview-loading muted small" style="padding:16px">Loading page 1 preview…</div>
+      <canvas id="uploadCanvas" class="upload-preview-canvas" style="display:none"></canvas>
+    </div>
+    <div class="upload-preview-meta">
+      <span class="meta-label">First Page Preview</span>
+      <span class="muted small">· ${f.files.length} file${f.files.length > 1 ? "s" : ""} selected (${totalMb.toFixed(2)} MB total)</span>
+    </div>
+    <div class="upload-actions">
+      <button type="button" class="btn primary" data-act="pick">${ICON.plus}Add more pages or files</button>
+      <button type="button" class="btn small quiet" data-act="clearfiles">Remove all</button>
+    </div>
+    ${f.files.length > 1 ? `<div class="file-chips">${f.files.map((x, i) => `<div class="file-chip"><span>${esc(x.name)} <span class="muted small">(${(x.size / 1048576).toFixed(1)} MB)</span></span><button type="button" class="chip" data-act="rmfile" data-i="${i}" aria-label="Remove ${esc(x.name)}" style="border:none;background:none;cursor:pointer;padding:0 2px;font-size:15px;line-height:1;color:var(--graphite)">×</button></div>`).join("")}</div>` : ""}
+  </div>`;
+}
+
 function viewNew() {
   const f = S.form;
   HOSTED.prefill(f);
@@ -704,10 +863,8 @@ function viewNew() {
         </div></div>
       <div class="sec"><h2>Your notes</h2><p>A scanned PDF, or photos of the pages in order. Blank pages and covers are skipped automatically. Typed notes work too: a .tex file, an Overleaf project downloaded as a .zip, Markdown or plain text. Their text is taken exactly as written, so nothing has to be read from an image.</p>
         <div class="row" style="margin-bottom:8px"><button class="btn small" data-act="phone" data-for="new">Take photos with your phone</button></div>
-        <div class="drop" data-act="pick" id="drop" tabindex="0" role="button"><strong>Drop notes or paper here</strong>
-          <span class="muted">Click or drop handwritten scans, page photos, PDF, typed text, or LaTeX papers (.tex / .zip)</span></div>
+        ${uploadBoxHtml(f)}
         <input type="file" id="fileInput" hidden multiple accept=".pdf,image/*,.tex,.ltx,.zip,.md,.markdown,.txt">
-        <div class="files">${files}</div>
         ${freeTierNotice()}
         ${HOSTED.recordLine() !== null ? `<p class="muted small" style="margin-top:10px">${esc(HOSTED.recordLine())}</p>` : `<p class="muted small" style="margin-top:10px">Before anything else is done with them, your files are kept unchanged and a record of them is made: their fingerprints, signed with your key${S.meta && S.meta.settings && S.meta.settings.proof_timestamps === false ? "" : " and timestamped by independent services"}. It is evidence of when your notes existed. Only the fingerprints leave this computer for that, never the notes.</p>`}</div>
       <div class="sec"><h2>Authors, and your declaration</h2><p>As arXiv asks with every submission, the record of your notes says who wrote them, who makes the record, and that the details are correct. All of it is signed and timestamped with the record. The authors also appear on the paper.</p>
@@ -2580,6 +2737,7 @@ const ACT = {
   domopen() { S.domOpen = true; render(); },
   domclose() { S.domOpen = false; S.domQuery = ""; render(); },
   pick() { $("#fileInput").click(); },
+  clearfiles() { S.form.files = []; previewCache.clear(); render(); },
   rmfile(el) { S.form.files.splice(+el.dataset.i, 1); render(); },
   addauthor() { S.form.authors.push({ name: "", affiliation: "", email: "", orcid: "" }); render(); },
   rmauthor(el) {

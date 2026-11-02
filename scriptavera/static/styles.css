@@ -939,3 +939,98 @@ textarea.mono { font-family: var(--mono); font-size: 13px; width: 100%; }
     gap: 20px;
   }
 }
+
+/* Upload preview & dropzone with files */
+.drop.has-files {
+  border: 2px solid var(--blue);
+  background: #ffffff;
+  padding: 24px 20px 20px;
+  cursor: default;
+  box-shadow: 0 4px 16px rgba(43, 87, 151, 0.08);
+}
+.drop.has-files.over {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+.upload-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #166534;
+  padding: 6px 16px;
+  border-radius: 999px;
+  font-size: 14px;
+  margin-bottom: 14px;
+}
+.upload-badge strong {
+  font-family: inherit;
+  font-weight: 600;
+  color: #15803d;
+  font-size: 14px;
+  margin: 0;
+}
+.upload-badge-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #22c55e;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: bold;
+}
+.preview-stage {
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 10px auto;
+}
+.upload-preview-canvas {
+  max-height: 400px;
+  max-width: 100%;
+  border-radius: 6px;
+  border: 1px solid var(--rule);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+  background: #ffffff;
+  display: block;
+}
+.upload-preview-meta {
+  font-size: 13px;
+  color: var(--graphite);
+  margin-top: 8px;
+}
+.meta-label {
+  font-weight: 600;
+  color: var(--ink);
+}
+.upload-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  align-items: center;
+  margin-top: 16px;
+}
+.file-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rule-soft);
+}
+.file-chip {
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 20px;
+  padding: 4px 12px;
+  font-size: 12.5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
