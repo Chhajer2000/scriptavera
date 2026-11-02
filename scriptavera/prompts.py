@@ -56,7 +56,7 @@ Return one JSON object and nothing else:
  "missing": "what is still unclear and would be settled by reading more pages"
 }}
 
-Confidence guide: 0.9 the topic and the specific problem are both clear; 0.7 the topic is clear and the specific problem partly clear; 0.5 only the general area is clear; below 0.4 unclear.
+Confidence guide: 0.85 to 0.95 when the subfield, core objects, and problem direction are clear (do not penalize for missing formulas or proofs, which are skipped in this scout pass); 0.7 when only the subfield is clear; 0.5 when only the broad area is clear; below 0.4 unclear.
 Stay inside the declared field unless the notes clearly belong elsewhere.
 Plain text only: no LaTeX and no backslashes."""
 

@@ -447,7 +447,7 @@ def _scout_order(pages: list[dict]) -> list[int]:
     return head + spread
 
 
-SCOUT_LEAST = 8            # pages read before the topic is decided (all of them, if there are fewer)
+SCOUT_LEAST = 4            # pages read before the topic is decided (all of them, if there are fewer)
 SCOUT_CONFIDENCE = 0.85    # and read on until the topic is at least this clear
 
 
