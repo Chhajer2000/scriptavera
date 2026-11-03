@@ -42,12 +42,22 @@ STAGES: list[dict] = [
      "desc": "The whole of your notes read together: problem, results, how they depend on each other"},
     {"id": "assess", "phase": "write", "name": "Assessment of the notes",
      "desc": "For every result: is it fully proved, is the proof incomplete, or is it already in the literature; and does the main claim stand"},
-    {"id": "scope", "phase": "write", "name": "Your plan for the paper",
-     "desc": "You decide what kind of paper to write and how incomplete or known results are presented", "gate": True},
-    {"id": "intro", "phase": "write", "name": "Introduction",
-     "desc": "A first introduction, written from that understanding and the papers read; you approve the final one at the end"},
-    {"id": "structure", "phase": "write", "name": "Structure and first draft",
-     "desc": "Order of definitions, lemmas and theorems decided; each section written; formulas audited"},
+    {"id": "scope", "phase": "write", "name": "Your statements",
+     "desc": "Every definition, lemma, proposition and theorem written as a statement for the paper; you check each one, "
+             "answer the questions about unclear ones, and decide what kind of paper to write", "gate": True},
+    {"id": "outline", "phase": "write", "name": "Your structure",
+     "desc": "The skeleton of the paper: sections, and every statement in the order it is presented, each before it is "
+             "used; the proofs are written at the next step", "gate": True},
+    {"id": "proofs", "phase": "write", "name": "Proofs",
+     "desc": "Each proof written on its own from your argument, with the statements it uses, and checked against your "
+             "argument; a proof that fails the check is written again"},
+    {"id": "proofcheck", "phase": "write", "name": "Your review of the proofs",
+     "desc": "The paper with its proofs: you read what was added to your arguments and decide where a statement may be false",
+     "gate": True},
+    {"id": "draft", "phase": "write", "name": "First draft",
+     "desc": "The text that joins the results, then the introduction and the abstract, written from the finished paper"},
+    {"id": "draftcheck", "phase": "write", "name": "Your first draft",
+     "desc": "You read the first draft with its introduction and abstract", "gate": True},
     {"id": "simplify", "phase": "revise", "name": "Shorter arguments",
      "desc": "The draft re-read for arguments used twice and proofs that can be shortened"},
     {"id": "verify", "phase": "revise", "name": "Proof check",
@@ -62,7 +72,7 @@ STAGES: list[dict] = [
      "desc": "You choose the title from the suggestions, approve the introduction and choose the papers it cites", "gate": True},
 ]
 STAGE_IDS = [s["id"] for s in STAGES]
-LAYOUT = 7                      # bumped whenever the list of stages, or what a stage makes, changes
+LAYOUT = 8                      # bumped whenever the list of stages, or what a stage makes, changes
 
 # What each stage writes. Redoing a stage removes its own files and those of every later stage.
 ARTIFACTS: dict[str, list[str]] = {
@@ -77,9 +87,12 @@ ARTIFACTS: dict[str, list[str]] = {
     "review": ["approved"],
     "understand": ["dossier"],
     "assess": ["assessment", "novelty"],
-    "scope": ["scope"],
-    "intro": ["intro"],
-    "structure": ["plan", "body", "audit", "structure_partial", "outline"],
+    "scope": ["scope", "statements"],
+    "outline": ["outline"],
+    "proofs": ["proofs"],
+    "proofcheck": ["proofs_ok"],
+    "draft": ["plan", "body", "audit", "intro", "abstract_draft", "structure_partial", "connect_partial"],
+    "draftcheck": ["draft_ok"],
     "simplify": ["simplify"],
     "verify": ["verify"],
     "referee": ["referee"],
@@ -293,6 +306,15 @@ def migrate(p: Project) -> None:
         before = st.get("layout") or 0
 
         def f(s):
+            # the first draft used to be written section by section from the pages, in the steps "intro" and
+            # "structure": a draft made that way is kept, and the steps that now make it count as done; a paper not
+            # that far yet goes back to its statements, which the old plan step did not have
+            old_draft = s["stages"].get("structure", {}).get("status") == "done"
+            if "structure" in s["stages"] and not old_draft and s["stages"].get("scope", {}).get("status") == "done":
+                s["stages"]["scope"] = {"status": "pending", "reset": time.time()}
+            if old_draft:
+                for sid in ("outline", "proofs", "proofcheck", "draft", "draftcheck"):
+                    s["stages"].setdefault(sid, {"status": "done", "finished": time.time(), "migrated": True})
             for sid in list(s["stages"]):
                 if sid not in STAGE_IDS:
                     s["stages"].pop(sid)                  # a step that no longer exists
@@ -355,7 +377,7 @@ def _repair_readings(p: Project) -> None:
     steps are open again carries on by itself when it is next opened. A name made from a file name loses its
     underscores."""
     import re
-    from .texutil import answer_transcript, clean_transcript, looping
+    from .texutil import answer_transcript, clean_transcript, looping, same_commands
     st = p.state
     name = (st.get("meta") or {}).get("name") or ""
     if "_" in name and " " not in name.strip():
@@ -375,6 +397,8 @@ def _repair_readings(p: Project) -> None:
             new = old
             if re.search(r"</?(?:transcript|uncertain|changes)\b|</?(?:u|b|i|br|em|strong|mark|span)\b[^<>]{0,80}>", old, re.I):
                 new = clean_transcript(answer_transcript(old))
+            if same_commands(new) != new or re.search(r"\\(?:begin\{(?:itemize|enumerate|description)\}|rule\{)", new):
+                new = clean_transcript(new)       # an invented command, or a list or rule of a LaTeX document
             if looping(new):
                 del tr["pages"][n]
                 reread.append(int(n))

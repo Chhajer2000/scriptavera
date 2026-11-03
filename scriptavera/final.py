@@ -88,7 +88,8 @@ def build_outputs(p: Project, paper: dict, compile_now: bool = True) -> dict:
                         for x in library.values() if x.get("read") and x["key"] not in cited]
     paper["html"] = paperlib.render_html(paper, refs, fig_url_for(p, False))
     paper["lint"] = paperlib.lint(paper)
-    paper["audit"] = fidelity.audit(audit_pages(approved_pages(p)), paperlib.blocks_to_latex(paper["blocks"]),
+    from .drafting import approved_source           # the statements and proofs the author approved, when written so
+    paper["audit"] = fidelity.audit(audit_pages(approved_source(p) or approved_pages(p)), paperlib.blocks_to_latex(paper["blocks"]),
                                     waived=paper.get("waived", ""), approved=paper.get("approved_text", ""))
     out = p.dir / "out"
     out.mkdir(exist_ok=True)
@@ -552,6 +553,13 @@ def stage_assemble(run: Run) -> None:
 
     # 4. the abstract, from the finished text, at the length the journal asks for
     run.progress(3, 6, "writing the abstract")
+    ad = p.load("abstract_draft") or {}
+    if not front.get("abstract") and ad.get("abstract"):      # written with the first draft, and read by the author
+        front.update(abstract=ad["abstract"], keywords=ad.get("keywords", []), msc=ad.get("msc", []))
+        holder = {"abstract": front["abstract"]}
+        if fit_abstract(run.ask, holder, prof):
+            front["abstract"] = holder["abstract"]
+        p.save("front", front)
     if not front.get("abstract"):
         system = prompts.ABSTRACT.format(field=run.field, length=journals.length_phrase(prof).capitalize(),
                                          keywords=journals.keywords_phrase(prof))

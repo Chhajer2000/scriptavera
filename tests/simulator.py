@@ -537,6 +537,70 @@ page: 1
                 "<main>established</main>\n<main_note>The main theorem is proved; the lower bound for the harmonic sums has a gap.</main_note>\n"
                 "<unfinished>none</unfinished>\n<recommend>article</recommend>\n"
                 "<recommend_note>The main result is proved and is not in the papers read; one auxiliary bound needs its last step.</recommend_note>")
+    # ---- the paper written statement by statement
+    if label.startswith("Write the statements"):
+        clean = os.environ.get("SCRIPTAVERA_MOCK_CLEAN") == "1"
+        q4 = "none" if clean else "On page 5 the last display ends with $\\log n$. Is the bound you mean $\\log(n+1)$ or $\\log n$?"
+        return "\n".join(f"<item>\nid: {i}\nkind: {k}\nname: none\nplacement: {pl}\nstatement: {s}\nquestion: {q}\n</item>" for i, k, pl, s, q in (
+            ("D1", "definition", "preliminaries", r"For a real number $s > 0$ and an integer $n \ge 1$ we put \emph{$H_n^{(s)} = \sum_{k=1}^{n} \frac{1}{k^s}$}.", "none"),
+            ("R1", "lemma", "main", r"For all $n \ge 1$ we have $H_n^{(2)} \le 2 - \frac{1}{n}$.", "none"),
+            ("R2", "lemma", "preliminaries", r"For all $n \ge 1$ we have $H_n^{(1)} \le 1 + \log n$.", "none"),
+            ("R3", "theorem", "main", r"Let $s > 1$. Then for all $n \ge 1$ we have $H_n^{(s)} \le \frac{s}{s-1}$. In particular $\zeta(s) \le \frac{s}{s-1}$.", "none"),
+            ("R4", "proposition", "main", r"For all $n \ge 1$ we have $H_n^{(1)} \ge \log(n+1)$.", q4),
+            ("R5", "corollary", "main", r"For all $n \ge 1$ we have $\log(n+1) \le H_n^{(1)} \le 1 + \log n$.", "none")))
+    if re.match(r"Rewrite R\d+ with your answer", label):
+        return "<statement>For all $n \\ge 1$ we have $H_n^{(1)} \\ge \\log(n+1)$.</statement>\n<question>none</question>"
+    if label.startswith("Plan the structure"):
+        return ("<section>\ntitle: Preliminaries\nitems: D1, R2\npurpose: The partial sums and the known upper bound.\n</section>\n"
+                "<section>\ntitle: Upper bounds\nitems: R1, R3\npurpose: The bounds for the exponent two and the main theorem.\n</section>\n"
+                "<section>\ntitle: The harmonic sums\nitems: R5, R4\npurpose: The lower bound and the two-sided estimate.\n</section>")
+    if label.startswith("Write the proof of"):
+        rid = re.search(r"\((R\d+)\)", label).group(1)
+        page = {"R1": 2, "R2": 3, "R3": 4, "R4": 5}.get(rid)
+        if page:
+            arg = user.split("THE AUTHOR'S ARGUMENT, FROM THE NOTES\n", 1)[-1].split("\n\nWHAT THE ASSESSMENT FOUND", 1)[0]
+            mine = re.search(rf"%%% page {page}\n(.*?)(?=\n%%% page|\Z)", arg, flags=re.S)
+            try:                             # the author's argument as given, the way the simulated writer sets it
+                body = typeset(page, [], mine.group(1).strip() if mine else None).split("\\begin{proof}\n", 1)[1].split("\n\\end{proof}", 1)[0]
+            except (IndexError, ValueError, AttributeError):
+                body = typeset(page, []).split("\\begin{proof}\n", 1)[1].split("\n\\end{proof}", 1)[0]
+        elif "Prove it without the lemma" in user:      # the author's other argument, given at the structure step
+            body = "Compare each term directly with the integral; the upper bound is Lemma~\\ref{res:R2}."
+        else:
+            body = "Combine Lemma~\\ref{res:R2} and Proposition~\\ref{res:R4}."
+        added = "none"
+        if rid == "R3" and "WHAT THE REFEREE FOUND" not in user:
+            body = body.replace(*ALTERED) + " FIRSTTRY"
+        if rid == "R4":
+            added = "The sum is compared with the integral over $[1, n+1]$; the notes stop at $\\log n$."
+        return f"<proof>\n{body}\n</proof>\n<added>\n{added}\n</added>\n<uses>none</uses>\n<doubt>none</doubt>"
+    if label.startswith("Write the text of"):
+        return "<body>\nThis follows from the definition.\n</body>"
+    if label.startswith("Check the proof of"):
+        rid = re.search(r"\((R\d+)\)", label).group(1)
+        written = user.split("THE WRITTEN PROOF\n", 1)[1]
+        if "FIRSTTRY" in written:
+            return ("<follows>yes</follows>\n<departures>none</departures>\n<added>none</added>\n<author>complete</author>\n"
+                    "<proof>wrong: the integral is evaluated with $s+1$ in the denominator instead of $s-1$</proof>\n"
+                    "<statement>holds</statement>\n<verdict>rewrite</verdict>\n<fix>Evaluate the integral correctly.</fix>")
+        if rid == "R4":
+            return ("<follows>yes</follows>\n<departures>none</departures>\n<added>\nthe comparison over $[1, n+1]$ || correct\n</added>\n"
+                    "<author>gap: the last display of page 5 gives $\\log n$, not $\\log(n+1)$</author>\n<proof>correct</proof>\n"
+                    "<statement>holds</statement>\n<verdict>review</verdict>\n<fix>none</fix>")
+        return ("<follows>yes</follows>\n<departures>none</departures>\n<added>none</added>\n<author>complete</author>\n"
+                "<proof>correct</proof>\n<statement>holds</statement>\n<verdict>accept</verdict>\n<fix>none</fix>")
+    if label.startswith("Judge your reply about"):
+        reply = user.split("THE AUTHOR'S REPLY\n", 1)[1]
+        if "another argument" in reply:
+            return ("<verdict>avoided</verdict>\n<reply>Your argument works: the comparison can be made directly, so the proof does not need it.</reply>\n"
+                    "<instruction>Prove it without the lemma, by comparing each term directly with the integral.</instruction>")
+        return ("<verdict>needed</verdict>\n<reply>The notes use it in the last step on page 6, and your reply does not replace that step.</reply>\n"
+                "<instruction>none</instruction>")
+    if label.startswith("Join the results of section"):
+        n = len(re.findall(r"\[\[SLOT \d+\]\]", user))
+        sec = re.search(r'Section \d+, "([^"]+)"', user).group(1)
+        return "\n".join(f'<slot k="{k}">' + (f"In this section we treat {sec.lower()}." if k == 1 else "") + "</slot>"
+                         for k in range(1, n + 1))
     if label.startswith("Rewrite the introduction for the chosen citations"):
         intro = user.split("INTRODUCTION\n", 1)[1].split("\n\nPAPERS TO CITE", 1)[0]
         chosen = re.findall(r"(?m)^\[([A-Za-z0-9]+)\]", user.split("PAPERS TO CITE", 1)[1])

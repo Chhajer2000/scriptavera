@@ -7,12 +7,31 @@ import json, os, pathlib, subprocess, sys, tempfile, time
 from playwright.sync_api import sync_playwright
 from helpers import ROOT, pages_pdf
 
+
+def through_writing_ui(pg, timeout=240000):
+    """The author's stops in the writing of the paper, on the screen: the statements (each question answered),
+    the structure, the proofs, the first draft."""
+    pg.wait_for_selector(".stabs", timeout=timeout); time.sleep(0.4)
+    for _ in range(10):
+        box = pg.locator("textarea[data-sanswer]")
+        if not box.count():
+            break
+        box.first.fill("The bound is log(n+1); the last display is a slip.")
+        pg.locator('[data-act="stmtanswer"]').first.click(); time.sleep(1.0)
+    pg.click('[data-act="stmtsubmit"]')
+    pg.wait_for_selector(".otitle", timeout=timeout); time.sleep(0.3)
+    pg.click('[data-act="oconfirm"]')
+    pg.wait_for_selector('[data-act="papprove"]:not([disabled])', timeout=timeout); time.sleep(0.3)
+    pg.click('[data-act="papprove"]')
+    pg.wait_for_selector('[data-act="dapprove"]', timeout=timeout); time.sleep(0.3)
+    pg.click('[data-act="dapprove"]')
+
 OUT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else tempfile.mkdtemp(prefix="scriptavera_shots_"))
 OUT.mkdir(parents=True, exist_ok=True)
 PORT = "8792"
 work = pathlib.Path(tempfile.mkdtemp(prefix="scriptavera_ui2_"))
 PDF = work / "notes.pdf"; PDF.write_bytes(pages_pdf())
-env = dict(os.environ, SCRIPTAVERA_MOCK="1", SCRIPTAVERA_MOCK_DELAY="0.02", SCRIPTAVERA_MOCK_FAIL="busy:Write section 3", SCRIPTAVERA_MOCK_RESET="7",
+env = dict(os.environ, SCRIPTAVERA_MOCK="1", SCRIPTAVERA_MOCK_DELAY="0.02", SCRIPTAVERA_MOCK_FAIL="busy:Write the proof of Theorem", SCRIPTAVERA_MOCK_RESET="7",
            SCRIPTAVERA_PORT=PORT, SCRIPTAVERA_NO_BROWSER="1", SCRIPTAVERA_WORK=str(work))
 SERVER = f"""
 import sys, os, pathlib; sys.path.insert(0, {str(ROOT)!r})
@@ -56,10 +75,9 @@ try:
             t, i, n = left.split(":"); pg.click(f'.rv3-row .rv-p[data-n="{n}"]'); time.sleep(0.3)
             pg.locator(f'#fig-{i} .choice[data-v="orig"]' if t == "fig" else f'#flag-{i} [data-act="dropflag"]').click(); time.sleep(0.4)
         pg.click('.rv3-acts [data-act="approve"]')
-        pg.wait_for_selector(".kinds", timeout=120000); time.sleep(0.3)
-        pg.click('[data-act="scopesubmit"]')                            # the suggested plan
+        through_writing_ui(pg, 120000)                                  # the statements, structure, proofs and draft as suggested
 
-        # the strongest writer is resting when the third section is due: the step waits and says so; no weaker model is offered
+        # the strongest writer is resting when the main theorem is due: the step waits and says so; no weaker model is offered
         pg.wait_for_function("[...document.querySelectorAll('.banner')].some(b => /waiting for the strongest models/.test(b.innerText))", timeout=120000)
         time.sleep(0.3)
         pg.screenshot(path=str(OUT / "40_waiting_for_strongest.png"))
@@ -75,10 +93,10 @@ try:
         assert pg.locator('#rail .home-btn').count() == 1
         assert "Paused until" in pg.inner_text(".step.paused")
         pg.wait_for_selector("#deccount", timeout=120000)               # it restarts by itself when the strong model is back
-        pg.click('.step[data-view="structure"]'); time.sleep(0.4)
+        pg.click('.step[data-view="proofs"]'); time.sleep(0.4)
         text = pg.inner_text("#main")
         assert "stood in" not in text and "with your permission" not in text, text[:600]     # no weaker model did any of it
-        calls = json.loads(pg.evaluate("JSON.stringify(S.b.calls.filter(c => (c.stage === 'structure' || c.stage === 'simplify') && c.ok).map(c => c.model))"))
+        calls = json.loads(pg.evaluate("JSON.stringify(S.b.calls.filter(c => (c.stage === 'proofs' || c.stage === 'simplify') && c.ok).map(c => c.model))"))
         assert calls and set(calls) == {"sim-text"}, calls                # only the strongest model wrote and checked
         print("waited for the strongest model, never a weaker one, then restarted by itself")
 
@@ -125,8 +143,7 @@ try:
         # redoing from a step: nothing on the screen speaks of versions of the app
         (work / "projects" / pid / "out_before_update").mkdir()
         pg.click('[data-act="redo"][data-stage="understand"]'); pg.click('[data-act="cfyes"]')
-        pg.wait_for_selector(".kinds", timeout=120000); time.sleep(0.3)
-        pg.click('[data-act="scopesubmit"]')
+        through_writing_ui(pg, 120000)
         pg.wait_for_selector("#deccount", timeout=120000)
         pg.click('.step[data-view="understand"]'); time.sleep(0.4)
         assert "version" not in pg.inner_text("#main").lower(), pg.inner_text("#main")[:400]

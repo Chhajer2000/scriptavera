@@ -87,16 +87,14 @@ writing.submit_scope(p, {"kind": "article", "results": {"R4": "keep", "R2": "kee
 pipeline.start(p); wait(p, "decide")
 tex = paperlib.blocks_to_latex(p.load("body")["blocks"])
 assert "EXPLANATORY" not in tex and "insertfigure{f2}" not in tex and "insertfigure{f1}" in tex and "rectangle of height" not in tex, tex
-assert any("[EXPLANATORY DRAWING:" in v for k, v in simulator.SEEN.items() if k.startswith("Write section")), "the writer read it"
+assert any("[EXPLANATORY DRAWING:" in v for k, v in simulator.SEEN.items() if k.startswith("Write the proof of")), "the writer read it"
 missing = json.dumps((p.load("audit") or {}).get("missing", []))
 assert "1/x" not in missing and "1/k" not in missing, missing
-rec = p.load("completion")["items"]["res:R2"]
-assert rec["status"] == "ready" and rec["drawings"] == 1, rec.get("reason")
-for label in ("Complete the sketch of Lemma 3.2", "Check the completion of Lemma 3.2 against the sketch"):
-    assert "THE AUTHOR'S DRAWINGS FOR THIS PROOF" in simulator.SEEN[label] and "rectangle of height $1/k$" in simulator.SEEN[label], label
-from scriptavera import revision
-assert set(D.for_results(p, revision.result_units(p.load("body")["blocks"]))) == {"res:R2"}, "only the proof it was drawn for"
-print("3. the draft never prints the explanation; the writer read it, and the sketch of Lemma 3.2 was completed with it")
+seen = next(v for k, v in simulator.SEEN.items() if k.startswith("Write the proof of") and "(R2)" in k)
+assert "rectangle of height $1/k$" in seen and "EXPLANATORY DRAWING" in seen, "the writer of that proof read the drawing"
+assert "rectangle of height" not in p.load("proofs")["items"]["R2"]["text"], "and did not print it"
+assert "res:R2" not in ((p.load("completion") or {}).get("items") or {}), "a proof written in full is not completed again"
+print("3. the draft never prints the explanation; the writer of the proof it explains read it")
 
 # ---- the author prints an explanation after all; one the text relies on is asked about
 q = new_project()

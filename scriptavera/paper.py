@@ -18,7 +18,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from .texutil import (DISPLAY_ENVS, check_balance, clean_fragment, escape_percent, escape_specials, find_group,
+from .texutil import (SAME_AS, DISPLAY_ENVS, check_balance, clean_fragment, escape_percent, escape_specials, find_group,
                       latex_escape, split_math)
 
 THEOREM_ENVS = {
@@ -52,6 +52,7 @@ MACROS = {
     "\\Var": "\\operatorname{Var}", "\\Cov": "\\operatorname{Cov}", "\\dist": "\\operatorname{dist}",
     "\\vol": "\\operatorname{vol}", "\\spn": "\\operatorname{span}", "\\coker": "\\operatorname{coker}",
 }
+MACROS.update({"\\" + k: "\\" + v for k, v in SAME_AS.items()})   # invented names of standard symbols
 _BLOCK_ENVS = set(THEOREM_ENVS) | {"proof", "figurenote"}
 
 # Commands that come from a package the paper does not load by default: using one loads the package. (Without

@@ -515,7 +515,8 @@ function ago(t) {
 }
 /* What each step that waits for the author asks of them, as the line on the paper's card. */
 const GATE_ASK = { topiccheck: "Check the topic and the papers found", confirm: "Confirm the notation", review: "Check the transcription",
-  scope: "Choose the plan for the paper", decide: "Decide on the proposed changes", finish: "Choose the title, check the citations" };
+  scope: "Check the statements", outline: "Confirm the structure", proofcheck: "Review the proofs",
+  draftcheck: "Read the first draft", decide: "Decide on the proposed changes", finish: "Choose the title, check the citations" };
 function paperStatus(p) {
   /* What a paper is doing now, in a few words, and the colour that goes with it. */
   if (p.imported) return ["LaTeX paper", "plain"];
@@ -1128,7 +1129,7 @@ function issueCard(c, form) {
 
 /* ---------------------------------------------------------- stage screen */
 const STAGE_ROLE = { scout: "vision_fast", survey: "vision_best", transcribe: "vision_best", figures: "vision_best", search1: "fast", reading: "reader",
-  understand: "reason", intro: "writer", structure: "writer", simplify: "reason", verify: "reason", referee: "reason", assemble: "writer" };
+  understand: "reason", scope: "reason", outline: "reason", proofs: "reason", draft: "writer", simplify: "reason", verify: "reason", referee: "reason", assemble: "writer" };
 
 function figCheck(f) {
   /* What the two checks of a redrawn figure found: the program's overlay of the redrawing on the drawing, and the
@@ -1222,25 +1223,6 @@ function stageBody(id) {
   } else if (id === "assess") {
     if (S.b.assessment) h += `<div class="sec"><h2>What the assessment found</h2>${assessSummary()}</div>${noveltyView()}
       <div class="sec"><h2>Each result</h2><p>How far your notes prove it, and whether it already appears in the papers that were read.</p>${assessRows(false)}</div>`;
-  } else if (id === "intro") {
-    const it = S.b.intro;
-    if (it) h += `<div class="sec"><h2>Introduction</h2><p>Written from the understanding of the whole paper. Every statement about earlier work carries a citation of a paper that was read; a claim without a source is left out. It is copy-edited once more in the final version.</p>
-      <div class="tex-block serif">${latexLite(it.text)}</div>
-      ${(it.notes || []).map((n) => `<div class="flag">${rich(n)}</div>`).join("")}</div>`;
-  } else if (id === "structure") {
-    const pl = S.b.plan, dr = S.b.draft;
-    if (pl) h += `<div class="sec"><h2>Structure of the paper</h2><p>Decided after the whole of the notes was understood: every definition and lemma stands before the place it is used.</p>
-      <table class="grid-table"><thead><tr><th>Section</th><th>Presents</th><th>From your pages</th><th>Purpose</th></tr></thead><tbody>
-      <tr><td>1. Introduction</td><td class="muted">the problem, earlier work, the main results</td><td>–</td><td class="muted">written first</td></tr>
-      ${pl.sections.map((s, i) => `<tr><td>${i + 2}. ${rich(s.title)}</td><td>${esc(s.items.join(", ")) || "–"}</td><td>${s.pages[0]}${s.pages.length > 1 ? "–" + s.pages[s.pages.length - 1] : ""}</td><td>${rich(s.purpose)}</td></tr>`).join("")}</tbody></table></div>`;
-    if (dr) {
-      const a = dr.audit || { total: 0, preserved: 0, altered: [], missing: [], added: [] };
-      const bad = a.altered.length + a.missing.length;
-      h += `<div class="sec"><h2>First draft</h2><p>${plural(dr.sections, "section")}, ${plural(dr.results, "result")}, ${plural(dr.proofs, "proof")}. This is the draft that is now re-read three times; it is not yet the final wording.</p>
-        <div class="row"><span class="chip ${bad ? "hl" : "green"}">${a.preserved} of ${a.total} formulas identical to your notes</span>
-          ${bad ? `<span class="chip red">${bad} to look at in the final version</span>` : ""}</div>
-        <details class="more" style="margin-top:14px" open><summary>Read the first draft</summary><div id="draftHost">${dr.html}</div></details></div>`;
-    }
   } else if (id === "simplify") {
     const sm = (S.b.revision || {}).simplify;
     if (sm && sm.found) {
@@ -1310,7 +1292,7 @@ function viewStage(id) {
     ${x.model ? `<span class="muted small">Model: ${esc(x.model)}</span>` : (plan && plan.primary ? `<span class="muted small">Will use ${esc(plan.primary)} (${esc(plan.name)})${plan.strict ? "; never a weaker model" : ""}</span>` : "")}</div>
     ${x.status === "running" || p ? `<div class="bar" id="bar"><i style="width:${barPct(p)}%"></i></div>
       <div class="muted small" id="barnote">${p ? esc(p.note || "") + (p.total ? ` (${p.done} of ${p.total})` : "") : ""}</div>` : ""}</div>`;
-  h += stageBody(id);
+  h += stageBody(id) + writingStageBody(id);
   h += `<div class="sec"><h2>Who did what</h2><p>Each AI call in this step, newest first.</p><div id="calls" data-stage="${id}">${callsTable(id, 12)}</div>
     <h3>Log</h3><div class="log" id="log" data-stage="${id}"></div></div></div></div>`;
   return h;
@@ -2279,26 +2261,340 @@ function assessSummary() {
       <div style="margin-top:6px">Suggested: <b>${k[0].toLowerCase()}</b>.${A.recommend_note ? " " + inner(latexLite(A.recommend_note)) : ""}</div></div></div>
     ${(A.unfinished || []).length ? `<div class="dlabel" style="margin-top:12px">Left open in your notes</div>${A.unfinished.map((u) => `<div class="flag">${inner(latexLite(u))}</div>`).join("")}` : ""}`;
 }
-function viewScope() {
-  const A = S.b.assessment, x = st("scope");
-  if (!A) return `<div class="wrap"><div class="empty"><strong>Not reached yet</strong>This step opens once your notes have been assessed.</div></div>`;
-  const D = scopeState();
-  const kinds = Object.entries(KIND_INFO).map(([k, v]) => `<button class="kind ${D.kind === k ? "on" : ""}" data-act="scopekind" data-v="${k}" aria-pressed="${D.kind === k}">
-      <b>${esc(v[0])}${A.recommend === k ? ' <span class="chip blue">suggested</span>' : ""}</b><span>${esc(v[1])}</span></button>`).join("");
-  return `<div class="wrap" style="padding-bottom:0"><div class="head"><h1>Your plan for the paper</h1>
-      <p>Before anything is written, your notes were assessed: how far each result is proved, and whether it already appears in the papers that were read.
-        You decide what kind of paper this becomes. Nothing here changes your mathematics; it decides how it is presented.</p></div>
-    ${x.stopped ? `<div class="banner"><div class="grow"><b>Stopped here, as you chose.</b> Nothing more is written for this paper. When your notes are complete, start a new paper with them.
-      You can also choose another kind of paper below and continue.</div></div>` : ""}
-    ${x.status === "done" ? `<div class="banner blue"><div class="grow">You decided this already. Deciding again writes the paper again.</div></div>` : ""}
-    <div class="sheet"><div class="sec"><h2>What the assessment found</h2>${assessSummary()}
-      <p class="muted small" style="margin-top:8px">“Not found in the papers read” is not proof of novelty: only the papers found and read were compared. Whether each proof is correct is checked later, step by step.</p></div>
-      <div class="sec"><h2>Your results</h2><p>Where a proof is incomplete or a result is already known, say how it should appear.</p>${assessRows(true)}</div>
+/* ------------------------------------------------- the paper written statement by statement (steps 12 to 17) */
+const ITEM_KINDS = ["definition", "lemma", "proposition", "theorem", "corollary", "conjecture", "example", "remark", "question"];
+const KIND_LABEL = { definition: "Definition", lemma: "Lemma", proposition: "Proposition", theorem: "Theorem", corollary: "Corollary",
+  conjecture: "Conjecture", example: "Example", remark: "Remark", question: "Question" };
+const STAB = [["definitions", "Definitions"], ["lemmas", "Lemmas"], ["propositions", "Propositions"], ["theorems", "Theorems"],
+  ["corollaries", "Corollaries"], ["other", "Other"], ["out", "Left out"]];
+const PROVED_KINDS = ["lemma", "proposition", "theorem", "corollary"];
+function W() { return (S.b && S.b.writing) || {}; }
+function lite(t) {
+  /* a statement as the paper shows it: \emph around a formula is the formula (latexLite reads formulas first) */
+  return latexLite(String(t || "").replace(/\\(?:emph|textit)\{((?:[^{}]|\{[^{}]*\})*\$(?:[^{}]|\{[^{}]*\})*)\}/g, "$1"));
+}
+function wItem(id) { return (W().items || []).find((x) => x.id === id); }
+function wNum(id) { return (W().numbers || {})[id] || ""; }
+function numRefs(t) {
+  /* references to statements shown with their numbers, as in the paper */
+  return String(t || "").replace(/\\(?:eq|c)?ref\{(?:res|def):([A-Za-z0-9]+)\}/g, (m, id) => wNum(id) || id)
+    .replace(/\\insertfigure\{([A-Za-z0-9_]+)\}/g, "[the figure $1]").replace(/~/g, " ");
+}
+function tabOf(x) {
+  if (x.treatment === "omit") return "out";
+  return Object.entries(W().tabs || {}).find(([, kinds]) => kinds.includes(x.kind))?.[0] || "other";
+}
+function wPaper(key) { return key ? paperRef(key) : ""; }
+function itemHead(x, withNum) {
+  const n = withNum && wNum(x.id);
+  return `<b>${esc(KIND_LABEL[x.kind] || x.kind)}${n ? " " + esc(n) : ""}</b>${x.name ? ` <span class="muted">(${esc(x.name)})</span>` : ""}
+    <span class="muted small">${esc(x.id)}${(x.pages || []).length ? `, notes p. ${x.pages.join(", ")}` : ""}</span>
+    ${x.role === "main" && PROVED_KINDS.includes(x.kind) ? '<span class="chip blue">main result</span>' : ""}`;
+}
+async function wPost(path, body, busy) {
+  S.busy = busy || "writing"; render();
+  try {
+    const r = await api(`/api/projects/${S.pid}/${path}`, { method: "POST", body });
+    if (r.writing) S.b.writing = r.writing;
+    S.busy = ""; render();
+    return r;
+  } catch (e) { S.busy = ""; render(); toast(e.message, true); return null; }
+}
+
+/* step 12: the statements */
+function statementCard(x) {
+  const ed = S.wEdit === x.id, open = !x.settled && x.treatment !== "omit";
+  const a = PROOF_INFO[x.proof] || null;
+  const pick = (v, label, disabled) => `<button class="pick ${x.treatment === v ? "on" : ""}" data-act="stmttreat" data-id="${esc(x.id)}" data-v="${v}"
+      aria-pressed="${x.treatment === v}" ${disabled || S.busy ? "disabled" : ""}>${label}</button>`;
+  const kinds = ITEM_KINDS.map((k) => `<option value="${k}" ${k === x.kind ? "selected" : ""}>${KIND_LABEL[k]}</option>`).join("");
+  return `<div class="dcard stmt ${open ? "ask" : ""}" id="stmt-${esc(x.id)}">
+    <div class="dcard-h">${itemHead(x, false)}<span class="tb-space"></span>
+      <label class="small muted">Kind <select data-skind="${esc(x.id)}" ${S.busy ? "disabled" : ""}>${kinds}</select></label>
+      <button class="btn small" data-act="stmtplace" data-id="${esc(x.id)}" ${S.busy ? "disabled" : ""}>${x.placement === "preliminaries" ? "In the preliminaries" : "In the main part"}</button></div>
+    ${ed ? `<textarea class="stmt-edit" rows="5" data-sedit="${esc(x.id)}">${esc(S.wDraft != null ? S.wDraft : x.statement)}</textarea>
+        <div class="row" style="margin-top:6px"><button class="btn primary small" data-act="stmtsave" data-id="${esc(x.id)}" ${S.busy ? "disabled" : ""}>Save the statement</button>
+        <button class="btn small" data-act="stmtcancel">Cancel</button><span class="muted small">LaTeX, as in the paper.</span></div>`
+      : `<div class="tex-block">${lite(x.statement)}</div>
+        <div class="row" style="margin-top:6px"><button class="btn small" data-act="stmtedit" data-id="${esc(x.id)}" ${S.busy ? "disabled" : ""}>Edit the statement</button>
+          ${x.edited ? '<span class="chip">edited by you</span>' : ""}</div>`}
+    ${(x.changed || []).length ? `<div class="flag small">These formulas of your notes are not in the statement as written. Check that nothing changed:
+        ${x.changed.map((f) => `<span class="math">${tex(f)}</span>`).join(" · ")}</div>` : ""}
+    ${x.cut && x.treatment === "omit" ? `<div class="flag small"><b>Suggested to leave out:</b> ${esc(x.cut)}</div>` : ""}
+    ${open ? `<div class="askbox"><div class="dlabel">A question about this statement</div><div>${inner(latexLite(x.question))}</div>
+        <textarea rows="2" data-sanswer="${esc(x.id)}" placeholder="Your answer, in a sentence">${esc((S.wAns || {})[x.id] || "")}</textarea>
+        <div class="row" style="margin-top:6px"><button class="btn primary small" data-act="stmtanswer" data-id="${esc(x.id)}" ${S.busy ? "disabled" : ""}>${S.busy === "ans-" + x.id ? "Rewriting the statement…" : "Answer and rewrite the statement"}</button>
+          <button class="btn small" data-act="stmtkeep" data-id="${esc(x.id)}" ${S.busy ? "disabled" : ""}>The statement is right as written</button></div></div>` : ""}
+    ${(x.asked || []).map((q) => `<div class="small muted" style="margin-top:6px">Asked: ${inner(latexLite(q.question))} You answered: ${esc(q.answer)}</div>`).join("")}
+    <details class="more small"><summary>Your notes${(x.pages || []).length ? ", p. " + x.pages.join(", ") : ""}</summary>
+      <div class="tex-block plain">${latexLite(x.original)}</div>${x.words && x.words !== x.original ? `<div class="muted small">In your words: ${inner(latexLite(x.words))}</div>` : ""}</details>
+    ${a && PROVED_KINDS.includes(x.kind) ? `<div class="row" style="margin-top:8px;gap:6px"><span class="chip ${a[1]}">${a[0]}</span>
+        ${x.known && x.known !== "new" ? `<span class="chip blue">Already in ${wPaper(x.key)}</span>` : ""}</div>
+        ${x.where ? `<p class="small" style="margin-top:4px">${inner(latexLite(x.where))}${x.proof !== "complete" ? " The proof will be completed from your argument and marked for you to read." : ""}</p>` : ""}` : ""}
+    <div class="picks" role="group" aria-label="How ${esc(x.id)} appears in the paper">
+      ${pick("keep", x.kind === "conjecture" ? "Keep it as a conjecture" : "Keep it in the paper")}
+      ${PROVED_KINDS.includes(x.kind) ? pick("conjecture", "State it as a conjecture") : ""}
+      ${x.key ? pick("credit", "Present it as known, credited to that paper") : ""}
+      ${pick("omit", "Leave it out")}</div></div>`;
+}
+function viewStatements() {
+  const x = st("scope"), w = W();
+  if (!w.items || x.status === "running" || x.status === "paused" || x.status === "error") return viewStage("scope");
+  const items = w.items, tab = S.stab && STAB.some(([k]) => k === S.stab) ? S.stab : (items.find((i) => !i.settled && i.treatment !== "omit") ? tabOf(items.find((i) => !i.settled && i.treatment !== "omit")) : "theorems");
+  const count = (k) => items.filter((i) => tabOf(i) === k).length, asks = (k) => items.filter((i) => tabOf(i) === k && !i.settled && i.treatment !== "omit").length;
+  const shown = items.filter((i) => tabOf(i) === tab);
+  const qs = (w.open_questions || []).length, kind = S.wKind || w.kind || "article";
+  const kinds = Object.entries(KIND_INFO).map(([k, v]) => `<button class="kind ${kind === k ? "on" : ""}" data-act="stmtkind" data-v="${k}" aria-pressed="${kind === k}">
+      <b>${esc(v[0])}${(S.b.assessment || {}).recommend === k ? ' <span class="chip blue">suggested</span>' : ""}</b><span>${esc(v[1])}</span></button>`).join("");
+  return `<div class="wrap" style="padding-bottom:0"><div class="head"><h1>Your statements</h1>
+      <p>Every definition, lemma, proposition and theorem of your notes, written as it will stand in the paper. Nothing else is written yet.
+        Check each one: change its kind, edit it, state it as a conjecture or leave it out. A research paper keeps the idea of your notes, not everything in them:
+        what the paper does not need is suggested to be left out, with the reason. Where a statement was unclear, you are asked.</p></div>
+    ${x.stopped ? `<div class="banner"><div class="grow"><b>Stopped here, as you chose.</b> Nothing more is written for this paper. Choose another kind of paper below to continue.</div></div>` : ""}
+    ${x.status === "done" ? `<div class="banner blue"><div class="grow">You confirmed these already. Confirming again writes the paper again from here.</div></div>` : ""}
+    <div class="sheet">${S.b.assessment ? `<div class="sec"><h2>What the assessment found</h2>${assessSummary()}</div>` : ""}
+      <div class="sec"><div class="tabs stabs" role="tablist">${STAB.map(([k, label]) => `<button class="tab ${k === tab ? "on" : ""}" role="tab" aria-selected="${k === tab}" data-act="stab" data-v="${k}">
+          ${label} <span class="chip">${count(k)}</span>${asks(k) ? `<span class="chip hl" title="questions for you">${asks(k)} ?</span>` : ""}</button>`).join("")}</div>
+        ${shown.length ? shown.map(statementCard).join("") : `<p class="muted">${tab === "out" ? "Nothing is left out." : "None."}</p>`}
+        ${tab === "out" && (w.unused || []).length ? `<p class="small muted" style="margin-top:10px">Pages of your notes that no statement comes from: ${w.unused.join(", ")}. Their material is not in the paper.</p>` : ""}</div>
       <div class="sec"><h2>What kind of paper</h2><div class="kinds">${kinds}</div>
         <label class="field" style="margin-top:14px"><span>Anything the writing should know (optional)</span>
-          <textarea rows="2" data-scopenote placeholder="For example: the lower bound is a remark, not a main result">${esc(D.note)}</textarea></label></div></div></div>
-    <div class="gatebar"><span class="muted small">${esc(KIND_INFO[D.kind][0])}</span><span class="tb-space"></span>
-      <button class="btn primary big" data-act="scopesubmit" ${S.busy || running() ? "disabled" : ""}>${S.busy === "scope" ? "Saving…" : D.kind === "not_ready" ? "Stop here" : "Write the paper this way"}</button></div>`;
+          <textarea rows="2" data-wnote placeholder="For example: keep the paper short; Theorem A is the main result">${esc(S.wNote != null ? S.wNote : (w.note || ""))}</textarea></label></div></div></div>
+    <div class="gatebar"><span class="muted small">${qs ? `${plural(qs, "question")} still open` : `${items.filter((i) => i.treatment !== "omit").length} statements in the paper, ${count("out")} left out`}</span><span class="tb-space"></span>
+      <button class="btn primary big" data-act="stmtsubmit" ${S.busy || running() || (qs && kind !== "not_ready") ? "disabled" : ""}>${S.busy === "stmtsubmit" ? "Saving…"
+        : kind === "not_ready" ? "Stop here" : qs ? `Answer ${plural(qs, "question")} first` : "Confirm the statements"}</button></div>`;
+}
+
+/* step 13: the structure */
+function pendingRefusal() {
+  const c = W().chat || [];
+  return c.slice().reverse().find((m) => m.who === "app" && m.move && !m.resolved);
+}
+function outlineRow(x, si, k, nsec) {
+  const d = (W().proofs || {})[x.id];
+  const what = x.treatment === "credit" ? `Stated with a citation of ${wPaper(x.key)}; no proof of ours.`
+    : x.kind === "conjecture" || x.treatment === "conjecture" ? "Stated as a conjecture, without proof."
+    : PROVED_KINDS.includes(x.kind) ? "Proof: written in the next step." : ["example", "remark"].includes(x.kind) ? "Its explanation is written in the next step." : "";
+  const moves = Array.from({ length: nsec }, (_, i) => i).filter((i) => i !== si).map((i) => `<option value="${i}">to section ${i + 2}</option>`).join("");
+  return `<div class="orow"><div class="orow-h">${itemHead(x, true)}<span class="tb-space"></span>
+      <button class="btn small" data-act="omove" data-id="${esc(x.id)}" data-to="up" ${S.busy ? "disabled" : ""} aria-label="Move up">↑</button>
+      <button class="btn small" data-act="omove" data-id="${esc(x.id)}" data-to="down" ${S.busy ? "disabled" : ""} aria-label="Move down">↓</button>
+      ${moves ? `<select data-omove="${esc(x.id)}" ${S.busy ? "disabled" : ""}><option value="">Move…</option>${moves}</select>` : ""}</div>
+    <div class="tex-block">${lite(x.statement)}</div>${what ? `<div class="muted small">${what}</div>` : ""}</div>`;
+}
+function viewOutline() {
+  const x = st("outline"), w = W(), secs = w.outline || [];
+  if (!secs.length || x.status === "running" || x.status === "paused" || x.status === "error") return viewStage("outline");
+  const by = Object.fromEntries((w.items || []).map((i) => [i.id, i]));
+  return `<div class="wrap" style="padding-bottom:0"><div class="head"><h1>Your structure</h1>
+      <p>The skeleton of the paper: its sections and every statement in the order it is presented, each before any statement that uses it.
+        The proofs are written at the next step, one by one, each with the statements before it. The introduction and the abstract are written last, from the finished paper.</p></div>
+    ${x.status === "done" ? `<div class="banner blue"><div class="grow">You confirmed this structure already. Confirming again writes the proofs again.</div></div>` : ""}
+    <div class="sheet"><div class="sec"><div class="osec"><h2>1. Introduction</h2><p class="muted small">Written at the end, from the finished paper.</p></div>
+      ${secs.map((s, si) => `<div class="osec"><div class="row"><h2>${si + 2}.</h2><input class="otitle" data-otitle="${si}" value="${esc(s.title)}" aria-label="Title of section ${si + 2}" ${S.busy ? "disabled" : ""}></div>
+        ${s.purpose ? `<p class="muted small">${esc(s.purpose)}</p>` : ""}
+        ${s.items.filter((i) => by[i]).map((i, k) => outlineRow(by[i], si, k, secs.length)).join("")}</div>`).join("")}</div>
+      ${(w.leave_out || []).length ? `<div class="sec"><h2>Suggested to leave out</h2><p>Statements the paper can do without, found while ordering them. Leaving one out takes it out of the proofs that listed it.</p>
+        ${w.leave_out.map((o) => by[o.id] ? `<div class="flag"><div class="row">${itemHead(by[o.id], true)}<span class="tb-space"></span>
+          <button class="btn small" data-act="odrop" data-id="${esc(o.id)}" ${S.busy ? "disabled" : ""}>Leave it out</button></div>
+          <div class="small">${esc(o.why)}</div></div>` : "").join("")}</div>` : ""}
+      <div class="sec" id="ochat"><h2>Talk about the structure</h2><p>Ask for other sections or another order. When a move is refused because one statement uses another,
+        say why it does not need it, or give another argument for that step: if your argument holds, the order is changed and that proof is written with your argument.</p>
+        ${(w.chat || []).length ? `<div class="chat">${w.chat.map((m) => `<div class="msg ${m.who}"><div class="msg-who">${m.who === "you" ? "You" : m.who === "app" ? "Scriptavera" : "Reply"}</div>
+          <div>${inner(lite(numRefs(m.text)))}</div></div>`).join("")}</div>` : ""}
+        <textarea rows="3" data-oinstr placeholder="${pendingRefusal() ? "Why it does not need it, or your other argument for that step" : "For example: put the examples in a section of their own at the end"}">${esc(S.oInstr || "")}</textarea>
+        <div class="row" style="margin-top:6px"><button class="btn primary small" data-act="otalk" ${S.busy ? "disabled" : ""}>${S.busy === "otalk" ? (pendingRefusal() ? "Checking your argument…" : "Planning again…") : "Send"}</button>
+          ${pendingRefusal() ? `<button class="btn small" data-act="odismiss" ${S.busy ? "disabled" : ""}>Leave the order as it is</button>` : ""}</div></div></div></div>
+    <div class="gatebar"><span class="muted small">${plural(secs.length, "section")} after the introduction, ${plural(secs.reduce((a, s) => a + s.items.length, 0), "statement")}</span><span class="tb-space"></span>
+      <button class="btn primary big" data-act="oconfirm" ${S.busy || running() ? "disabled" : ""}>${S.busy === "oconfirm" ? "Saving…" : "Confirm the structure and write the proofs"}</button></div>`;
+}
+
+/* step 14 and 15: the proofs */
+const PSTAT = { accept: ["Checked: follows your argument", "green"], review: ["Read the marked parts", "hl"],
+  statement: ["The statement may be false", "red"], failed: ["No correct proof was found", "red"] };
+function proofCard(x, review) {
+  const d = (W().proofs || {})[x.id], num = wNum(x.id);
+  const head = `<div class="dcard-h">${itemHead(x, true)}<span class="tb-space"></span>${d ? `<span class="chip ${PSTAT[d.status][1]}">${PSTAT[d.status][0]}</span>` : ""}
+      ${d && d.settled ? `<span class="chip">${d.settled === "kept" ? "kept by you" : d.settled === "conjecture" ? "now a conjecture" : "left out"}</span>` : ""}</div>`;
+  const stmt = `<div class="tex-block">${lite(x.statement)}</div>`;
+  if (!d) {
+    const why = x.treatment === "credit" ? `Credited to ${wPaper(x.key)}; no proof of ours.` : x.kind === "conjecture" || x.treatment === "conjecture" ? "A conjecture: no proof." : "";
+    return `<div class="dcard">${head}${stmt}${why ? `<p class="muted small">${why}</p>` : ""}</div>`;
+  }
+  const isEx = !PROVED_KINDS.includes(x.kind);
+  const added = (d.checked_added || []).length ? d.checked_added : (d.added || []).map((a) => ({ what: a, ok: true, note: "" }));
+  const problem = (d.status === "statement" || d.status === "failed") && !d.settled;
+  const reason = d.status === "statement" ? (d.statement || d.doubt) : d.proof;
+  return `<div class="dcard proofcard ${problem ? "ask" : ""}" id="proof-${esc(x.id)}">${head}${stmt}
+    ${d.text ? `<div class="dlabel" style="margin-top:8px">${isEx ? "" : "Proof"}</div><div class="tex-block serif">${latexLite(numRefs(d.text))}</div>` : ""}
+    ${problem ? `<div class="flag red"><b>${d.status === "statement" ? "The statement may be false." : `After ${plural(d.tries, "try", "tries")}, no correct proof was found.`}</b> ${inner(latexLite(numRefs(reason || "")))}</div>` : ""}
+    ${added.length ? `<div class="dlabel" style="margin-top:8px">Not in your notes: added to your argument</div>
+      ${added.map((a) => `<div class="flag small ${a.ok ? "" : "red"}">${inner(latexLite(numRefs(a.what)))}${a.ok ? "" : ` <b>Judged wrong:</b> ${esc(a.note)}`}</div>`).join("")}` : ""}
+    ${(d.departures || []).length ? `<div class="dlabel" style="margin-top:8px">Where it departs from your argument</div>${d.departures.map((t) => `<div class="flag small">${inner(latexLite(numRefs(t)))}</div>`).join("")}` : ""}
+    ${d.author && !/^complete/i.test(d.author) && !isEx ? `<p class="small" style="margin-top:6px"><b>Your argument in the notes:</b> ${inner(latexLite(numRefs(d.author)))}</p>` : ""}
+    ${review ? `<div class="askbox"><textarea rows="2" data-pcomment="${esc(x.id)}" placeholder="Tell the writer what to change in this proof">${esc((S.pCom || {})[x.id] || "")}</textarea>
+      <div class="row" style="margin-top:6px"><button class="btn small" data-act="prewrite" data-id="${esc(x.id)}" ${S.busy ? "disabled" : ""}>${S.busy === "pre-" + x.id ? "Writing and checking again…" : "Rewrite this proof"}</button>
+        ${problem ? `<button class="btn small" data-act="pdecide" data-id="${esc(x.id)}" data-v="keep" ${S.busy ? "disabled" : ""}>Keep it as it is</button>
+          <button class="btn small" data-act="pdecide" data-id="${esc(x.id)}" data-v="conjecture" ${S.busy ? "disabled" : ""}>State it as a conjecture</button>
+          <button class="btn small" data-act="pdecide" data-id="${esc(x.id)}" data-v="omit" ${S.busy ? "disabled" : ""}>Leave it out</button>
+          <button class="btn small" data-act="pstmt" data-id="${esc(x.id)}" ${S.busy ? "disabled" : ""}>Correct the statement</button>` : ""}</div>
+      ${S.pStmt === x.id ? `<textarea rows="4" data-pstmt="${esc(x.id)}" style="margin-top:8px">${esc(S.pStmtText != null ? S.pStmtText : x.statement)}</textarea>
+        <div class="row" style="margin-top:6px"><button class="btn primary small" data-act="pstmtsave" data-id="${esc(x.id)}" ${S.busy ? "disabled" : ""}>Save the statement and write the proof again</button>
+        <button class="btn small" data-act="pstmtcancel">Cancel</button></div>` : ""}</div>` : ""}</div>`;
+}
+function proofsInOrder(review) {
+  const w = W(), by = Object.fromEntries((w.items || []).map((i) => [i.id, i]));
+  return (w.outline || []).map((s, si) => `<div class="osec"><h2>${si + 2}. ${esc(s.title)}</h2>
+    ${s.items.filter((i) => by[i] && by[i].treatment !== "omit").map((i) => proofCard(by[i], review)).join("")}</div>`).join("");
+}
+function viewProofReview() {
+  const x = st("proofcheck"), w = W();
+  if (!Object.keys(w.proofs || {}).length || x.status === "running") return viewStage("proofcheck");
+  const all = Object.values(w.proofs), cnt = (s) => all.filter((d) => d.status === s).length, left = (w.open_proofs || []).length;
+  return `<div class="wrap" style="padding-bottom:0"><div class="head"><h1>Your review of the proofs</h1>
+      <p>Each proof was written on its own from your argument, in the writer's own words, and then checked against your argument by a second reading.
+        Parts of your notes the proofs do not need were left out. What was added to your argument is marked: read those parts.
+        Where a statement may be false, nothing more is written until you decide.</p></div>
+    <div class="sheet"><div class="sec"><div class="row"><span class="chip green">${cnt("accept")} checked</span><span class="chip hl">${cnt("review")} to read</span>
+      ${cnt("statement") ? `<span class="chip red">${cnt("statement")} statement${cnt("statement") === 1 ? "" : "s"} may be false</span>` : ""}
+      ${cnt("failed") ? `<span class="chip red">${cnt("failed")} without a correct proof</span>` : ""}</div>
+      <p class="muted small" style="margin-top:8px">A model's check is strong evidence, not a certificate. The proofs are checked again, step by step, after the first draft.</p></div>
+      <div class="sec">${proofsInOrder(true)}</div></div></div>
+    <div class="gatebar"><span class="muted small">${left ? `${plural(left, "proof")} need${left === 1 ? "s" : ""} your decision` : "Nothing waits for your decision"}</span><span class="tb-space"></span>
+      <button class="btn primary big" data-act="papprove" ${S.busy || running() || left ? "disabled" : ""}>${S.busy === "papprove" ? "Saving…" : left ? `Decide on ${plural(left, "proof")} first` : "Approve the proofs and write the first draft"}</button></div>`;
+}
+
+/* step 17: the first draft */
+function viewDraftReview() {
+  const x = st("draftcheck"), w = W(), dr = S.b.draft, it = S.b.intro || {};
+  if (!dr || x.status === "running") return viewStage("draftcheck");
+  const ab = S.dAbs != null ? S.dAbs : (w.abstract || ""), intro = S.dIntro != null ? S.dIntro : (it.text || "");
+  return `<div class="wrap" style="padding-bottom:0"><div class="head"><h1>Your first draft</h1>
+      <p>The paper put together: your statements and the proofs you approved, joined by a few sentences between them, with the introduction and the abstract written last, from the finished paper.
+        Read it, and edit the abstract or the introduction if you wish. The draft is then re-read: shorter arguments, a step-by-step check of every proof, and a referee's reading.</p></div>
+    <div class="sheet"><div class="sec"><h2>Abstract</h2>${S.dEdit === "abstract" ? `<textarea rows="6" data-dabs>${esc(ab)}</textarea>
+        <div class="row" style="margin-top:6px"><button class="btn primary small" data-act="dsave" data-v="abstract" ${S.busy ? "disabled" : ""}>Save</button><button class="btn small" data-act="dcancel">Cancel</button></div>`
+      : `<div class="tex-block serif">${latexLite(w.abstract || "")}</div><button class="btn small" data-act="dedit" data-v="abstract" style="margin-top:6px">Edit the abstract</button>`}</div>
+      <div class="sec"><h2>Introduction</h2>${S.dEdit === "intro" ? `<textarea rows="14" data-dintro>${esc(intro)}</textarea>
+        <div class="row" style="margin-top:6px"><button class="btn primary small" data-act="dsave" data-v="intro" ${S.busy ? "disabled" : ""}>Save</button><button class="btn small" data-act="dcancel">Cancel</button></div>`
+      : `<div class="tex-block serif">${latexLite(numRefs(it.text || ""))}</div><button class="btn small" data-act="dedit" data-v="intro" style="margin-top:6px">Edit the introduction</button>`}
+        ${(it.notes || []).map((n) => `<div class="flag small">${rich(n)}</div>`).join("")}</div>
+      <div class="sec"><h2>The whole draft</h2><details class="more" open><summary>Read the first draft</summary><div id="draftHost">${dr.html}</div></details></div></div></div>
+    <div class="gatebar"><span class="tb-space"></span>
+      <button class="btn primary big" data-act="dapprove" ${S.busy || running() || S.dEdit ? "disabled" : ""}>${S.busy === "dapprove" ? "Saving…" : "Approve the first draft"}</button></div>`;
+}
+function writingStageBody(id) {
+  /* what the steps that work without the author show while they work and afterwards */
+  const w = W();
+  if (id === "proofs" && Object.keys(w.proofs || {}).length) {
+    return `<div class="sec"><h2>Proofs written so far</h2><p>Each proof is written on its own, from your argument and the statements before it, then checked against your argument. A proof the check finds wrong is written again with the mistake named.</p>${proofsInOrder(false)}</div>`;
+  }
+  if (id === "draft" && S.b.draft) {
+    return `<div class="sec"><h2>First draft</h2><p>Your statements and proofs, joined by short passages, with the introduction and the abstract written from the finished paper.</p>
+      ${w.abstract ? `<div class="dlabel">Abstract</div><div class="tex-block serif">${latexLite(w.abstract)}</div>` : ""}
+      <details class="more" style="margin-top:14px"><summary>Read the first draft</summary><div id="draftHost">${S.b.draft.html}</div></details></div>`;
+  }
+  return "";
+}
+const WRITING_ACT = {
+  stab(el) { S.stab = el.dataset.v; render(); },
+  stmtedit(el) { S.wEdit = el.dataset.id; S.wDraft = null; render(); const t = $(`[data-sedit="${el.dataset.id}"]`); if (t) t.focus(); },
+  stmtcancel() { S.wEdit = null; S.wDraft = null; render(); },
+  async stmtsave(el) {
+    const id = el.dataset.id, text = S.wDraft != null ? S.wDraft : (wItem(id) || {}).statement;
+    if (await wPost("statement", { id, statement: text })) { S.wEdit = null; S.wDraft = null; render(); toast("Statement saved."); }
+  },
+  async stmttreat(el) { await wPost("statement", { id: el.dataset.id, treatment: el.dataset.v }); },
+  async stmtplace(el) { const x = wItem(el.dataset.id); await wPost("statement", { id: x.id, placement: x.placement === "preliminaries" ? "main" : "preliminaries" }); },
+  async stmtkeep(el) { if (await wPost("statement", { id: el.dataset.id, dismiss: true })) toast("Kept as written."); },
+  async stmtanswer(el) {
+    const id = el.dataset.id, ans = ((S.wAns || {})[id] || "").trim();
+    if (!ans) return toast("Write your answer first.", true);
+    const r = await wPost("statement", { id, answer: ans }, "ans-" + id);
+    if (r) { delete S.wAns[id]; render(); toast(r.item && !r.item.settled ? "Rewritten; one more question." : "The statement was rewritten with your answer."); }
+  },
+  stmtkind(el) { S.wKind = el.dataset.v; render(); },
+  async stmtsubmit() {
+    const w = W(), kind = S.wKind || w.kind || "article";
+    S.busy = "stmtsubmit"; render();
+    try {
+      await api(`/api/projects/${S.pid}/scope`, { method: "POST", body: { kind, note: S.wNote != null ? S.wNote : (w.note || "") } });
+      S.follow = kind !== "not_ready"; S.wKind = null; S.wNote = null; history.replaceState(null, "", `#p/${S.pid}`);
+      toast(kind === "not_ready" ? "Stopped here, as you chose." : "Statements confirmed. Putting them in order now.");
+      await refresh();
+    } catch (e) { toast(e.message, true); }
+    S.busy = ""; render();
+  },
+  async omove(el) { await moveItem(el.dataset.id, el.dataset.to); },
+  async odrop(el) { if (await wPost("outline", { drop: el.dataset.id })) toast("Left out."); },
+  async otalk() {
+    if (!(S.oInstr || "").trim()) return toast("Write your message first.", true);
+    if (await wPost("outline", { action: "talk", text: S.oInstr }, "otalk")) { S.oInstr = ""; render(); const c = $("#ochat"); if (c) c.scrollIntoView({ block: "end" }); }
+  },
+  async odismiss() { await wPost("outline", { action: "dismiss" }); },
+  async oreplan() {
+    if (!(S.oInstr || "").trim()) return toast("Say how the structure should change.", true);
+    if (await wPost("outline", { action: "replan", instruction: S.oInstr }, "oreplan")) { S.oInstr = ""; render(); toast("The structure was planned again."); }
+  },
+  async oconfirm() {
+    if (await wPost("outline", { action: "confirm" }, "oconfirm")) { S.follow = true; history.replaceState(null, "", `#p/${S.pid}`); toast("Structure confirmed. Writing the proofs now."); await refresh(); }
+  },
+  async prewrite(el) {
+    const id = el.dataset.id, c = ((S.pCom || {})[id] || "").trim();
+    if (!c) return toast("Write what should change in this proof first.", true);
+    if (await wPost("proofs", { action: "rewrite", id, comment: c }, "pre-" + id)) { delete S.pCom[id]; render(); toast("Written and checked again."); }
+  },
+  async pdecide(el) { if (await wPost("proofs", { action: el.dataset.v, id: el.dataset.id })) toast("Saved."); },
+  pstmt(el) { S.pStmt = el.dataset.id; S.pStmtText = null; render(); },
+  pstmtcancel() { S.pStmt = null; S.pStmtText = null; render(); },
+  async pstmtsave(el) {
+    const id = el.dataset.id, text = S.pStmtText != null ? S.pStmtText : (wItem(id) || {}).statement;
+    if (await wPost("proofs", { action: "rewrite", id, statement: text }, "pre-" + id)) { S.pStmt = null; S.pStmtText = null; render(); toast("Statement saved; the proof was written and checked again."); }
+  },
+  async papprove() {
+    if (await wPost("proofs", { action: "approve" }, "papprove")) { S.follow = true; history.replaceState(null, "", `#p/${S.pid}`); toast("Proofs approved. Writing the first draft now."); await refresh(); }
+  },
+  dedit(el) { S.dEdit = el.dataset.v; S.dAbs = null; S.dIntro = null; render(); },
+  dcancel() { S.dEdit = null; S.dAbs = null; S.dIntro = null; render(); },
+  async dsave(el) {
+    const body = el.dataset.v === "abstract" ? { abstract: S.dAbs != null ? S.dAbs : W().abstract } : { intro: S.dIntro != null ? S.dIntro : (S.b.intro || {}).text };
+    S.busy = "dsave"; render();
+    try { await api(`/api/projects/${S.pid}/draftcheck`, { method: "POST", body }); S.dEdit = null; await refresh(); toast("Saved."); }
+    catch (e) { toast(e.message, true); }
+    S.busy = ""; render();
+  },
+  async dapprove() {
+    S.busy = "dapprove"; render();
+    try { await api(`/api/projects/${S.pid}/draftcheck`, { method: "POST", body: { approve: true } }); S.follow = true; history.replaceState(null, "", `#p/${S.pid}`); toast("First draft approved. It is re-read now."); await refresh(); }
+    catch (e) { toast(e.message, true); }
+    S.busy = ""; render();
+  },
+};
+function writingInput(el) {
+  /* typing in the writing steps: kept in memory until it is sent */
+  if (el.dataset.sedit !== undefined) { S.wDraft = el.value; return true; }
+  if (el.dataset.sanswer !== undefined) { (S.wAns = S.wAns || {})[el.dataset.sanswer] = el.value; return true; }
+  if (el.dataset.wnote !== undefined) { S.wNote = el.value; return true; }
+  if (el.dataset.oinstr !== undefined) { S.oInstr = el.value; return true; }
+  if (el.dataset.pcomment !== undefined) { (S.pCom = S.pCom || {})[el.dataset.pcomment] = el.value; return true; }
+  if (el.dataset.pstmt !== undefined) { S.pStmtText = el.value; return true; }
+  if (el.dataset.dabs !== undefined) { S.dAbs = el.value; return true; }
+  if (el.dataset.dintro !== undefined) { S.dIntro = el.value; return true; }
+  return false;
+}
+async function moveItem(id, to) {
+  const r = await wPost("outline", { move: id, to });
+  if (r && r.refused) {
+    toast("This move was refused: see the reason under “Talk about the structure”.", true);
+    const c = $("#ochat"); if (c) c.scrollIntoView({ block: "center" });
+  }
+}
+async function writingChange(el) {
+  /* selects and titles: sent when changed */
+  if (el.dataset.skind !== undefined) { await wPost("statement", { id: el.dataset.skind, kind: el.value }); return true; }
+  if (el.dataset.omove !== undefined && el.value !== "") { await moveItem(el.dataset.omove, el.value); return true; }
+  if (el.dataset.otitle !== undefined) { if (el.value.trim()) await wPost("outline", { rename: el.value, section: +el.dataset.otitle }); return true; }
+  return false;
 }
 
 /* ------------------------------------------------- the last step: title, introduction, citations */
@@ -3054,7 +3350,10 @@ function render() {
   else if (S.view === "review") h = viewReview();
   else if (S.view === "decide") h = viewDecide();
   else if (S.view === "topiccheck") h = viewTopic();
-  else if (S.view === "scope") h = viewScope();
+  else if (S.view === "scope") h = viewStatements();
+  else if (S.view === "outline") h = viewOutline();
+  else if (S.view === "proofcheck") h = viewProofReview();
+  else if (S.view === "draftcheck") h = viewDraftReview();
   else if (S.view === "finish") h = viewFinish();
   else if (S.view === "assemble" && S.b.paper) h = viewPaper();
   else h = viewStage(S.view);
@@ -3617,19 +3916,6 @@ const ACT = {
       return toast("Write what your notes are about more precisely, or correct the problem or the keywords, then search again.", true);
     await topicSubmit("refine");
   },
-  scopepick(el) { const D = scopeState(); D.results[el.dataset.id] = el.dataset.v; render(); },
-  scopekind(el) { scopeState().kind = el.dataset.v; render(); },
-  async scopesubmit() {
-    const D = scopeState();
-    S.busy = "scope"; render();
-    try {
-      await api(`/api/projects/${S.pid}/scope`, { method: "POST", body: { kind: D.kind, results: D.results, note: D.note } });
-      S.follow = D.kind !== "not_ready"; S.scope = null; history.replaceState(null, "", `#p/${S.pid}`);
-      toast(D.kind === "not_ready" ? "Stopped here, as you chose." : "Your plan is saved. Writing the introduction now.");
-      await refresh();
-    } catch (e) { toast(e.message, true); }
-    S.busy = ""; render();
-  },
   async ftitles() {
     S.busy = "ftitles"; render();
     try { await api(`/api/projects/${S.pid}/finish`, { method: "POST", body: { action: "titles" } }); await refresh(); toast("Five more titles suggested."); }
@@ -3885,6 +4171,7 @@ const ACT = {
   },
 };
 
+Object.assign(ACT, WRITING_ACT);
 document.addEventListener("click", (ev) => {
   const a = ev.target.closest("[data-act]");
   // Any other click closes an open menu: after this click is handled, so that a link clicked still opens.
@@ -3910,6 +4197,7 @@ document.addEventListener("click", (ev) => {
 });
 document.addEventListener("input", (ev) => {
   const el = ev.target;
+  if (el.dataset && writingInput(el)) return;
   if (el.dataset && el.dataset.pnote && S.review) {
     const n = +el.dataset.pnote, had = !!commentOn(n).trim(); S.review.draft[n] = el.value; paintNoteMarks(n);
     if (had !== !!el.value.trim()) render();
@@ -3985,6 +4273,7 @@ document.addEventListener("input", (ev) => {
 });
 document.addEventListener("change", (ev) => {
   const el = ev.target;
+  if (el.dataset && (el.dataset.skind !== undefined || el.dataset.omove !== undefined || el.dataset.otitle !== undefined)) { writingChange(el); return; }
   if (el.id === "rvlink" && S.review) { S.review.link = el.checked; if (el.checked) followScroll("rvtext"); return; }
   if (el.dataset.fdeclare !== undefined && S.form) { S.form.declare = el.checked; return; }
   if (el.dataset.optin !== undefined && S.form) { S.form.optIn = el.checked; return; }

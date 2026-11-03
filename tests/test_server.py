@@ -47,6 +47,22 @@ def wait(pid, stage, statuses=("waiting", "done"), seconds=120, allow=()):
     raise SystemExit(f"timeout waiting for {stage}: " + str({k: v.get("status") for k, v in project(pid)["state"]["stages"].items()}))
 
 
+def through_writing(pid, scope=None):
+    """The author's stops in the writing of the paper, through the API: the statements (a question answered first),
+    the structure, the proofs, the first draft."""
+    b = wait(pid, "scope")
+    for iid in (b["writing"] or {}).get("open_questions", []):
+        post(f"/api/projects/{pid}/statement", {"id": iid, "answer": "The bound is $\\log(n+1)$."})
+    post(f"/api/projects/{pid}/scope", scope or {"kind": "article"})
+    b = wait(pid, "outline")
+    post(f"/api/projects/{pid}/outline", {"action": "confirm"})
+    b = wait(pid, "proofcheck")
+    post(f"/api/projects/{pid}/proofs", {"action": "approve"})
+    b = wait(pid, "draftcheck")
+    post(f"/api/projects/{pid}/draftcheck", {"approve": True})
+    return b
+
+
 def answers(b):
     g = b["glossary"]
     return {"glossary": [{"id": e["id"], "meaning": e["meaning"], "confirmed": True} for e in g["entries"]],
@@ -74,9 +90,9 @@ print("0. the page names the files the program was started with; its own files a
 
 # ------------------------------------------------------------------ meta, journals, creation
 m = call("GET", "/api/meta")
-assert m["mock"] and [x["id"] for x in m["phases"]] == ["read", "write", "revise", "final"] and len(m["stages"]) == 20
+assert m["mock"] and [x["id"] for x in m["phases"]] == ["read", "write", "revise", "final"] and len(m["stages"]) == 23
 assert {s["phase"] for s in m["stages"]} == {"read", "write", "revise", "final"}
-assert [s["id"] for s in m["stages"] if s.get("gate")] == ["topiccheck", "confirm", "review", "scope", "decide", "finish"]
+assert [s["id"] for s in m["stages"] if s.get("gate")] == ["topiccheck", "confirm", "review", "scope", "outline", "proofcheck", "draftcheck", "decide", "finish"]
 assert m["plan"]["writer"]["chain"] == ["mock:sim-text"] and m["plan"]["writer"]["weaker"] == ["mock:sim-small", "mock:sim-vision"], m["plan"]["writer"]
 assert m["plan"]["fast"]["weaker"] == [] and len(m["plan"]["fast"]["chain"]) == 3
 assert set(m["templates"]) == {"amsart", "article", "elsarticle"} and m["templates"]["elsarticle"]["tested"] is False
@@ -216,11 +232,35 @@ assert [c["comment"] for c in p_.load("approved")["corrections"]["3"]] == ["The 
 assert b["assessment"]["results"]["R4"]["proof"] == "gap" and b["scope_default"]["results"]["R2"] == "credit" and b["state"]["stages"]["scope"]["status"] == "waiting"
 assert post(f"/api/projects/{pid}/scope", {"kind": "not_ready"})["scope"]["kind"] == "not_ready"
 assert project(pid)["state"]["stages"]["scope"]["stopped"] and not project(pid)["state"]["running"]
-post(f"/api/projects/{pid}/scope", {"kind": "article", "results": {"R2": "credit", "R4": "keep"}, "note": "Keep the lower bound short."})
+w = project(pid)["writing"]
+assert w["open_questions"] == ["R4"] and [x["id"] for x in w["items"]] == ["D1", "R1", "R2", "R3", "R4", "R5"]
+assert "Answer the question about R4" in post(f"/api/projects/{pid}/scope", {"kind": "article"}, 400)["error"]
+r = post(f"/api/projects/{pid}/statement", {"id": "R1", "kind": "proposition"})
+assert next(x for x in r["writing"]["items"] if x["id"] == "R1")["kind"] == "proposition"
+post(f"/api/projects/{pid}/statement", {"id": "R1", "kind": "lemma"})
+assert "no paper was found" in post(f"/api/projects/{pid}/statement", {"id": "R1", "treatment": "credit"}, 400)["error"].lower()
+r = post(f"/api/projects/{pid}/statement", {"id": "R4", "answer": "The bound is $\\log(n+1)$."})
+assert r["item"]["settled"] and not r["writing"]["open_questions"]
+post(f"/api/projects/{pid}/scope", {"kind": "article", "note": "Keep the lower bound short."})
+b = wait(pid, "outline")
+assert [s["items"] for s in b["writing"]["outline"]] == [["D1", "R2"], ["R1", "R3"], ["R4", "R5"]]
+r = post(f"/api/projects/{pid}/outline", {"move": "R5", "to": "up"})
+assert r["refused"] and "uses" in r["refused"] and r["writing"]["chat"][-1]["who"] == "app", r
+assert "not at this step" in post(f"/api/projects/{pid}/proofs", {"action": "approve"}, 400)["error"]
+post(f"/api/projects/{pid}/outline", {"action": "dismiss"})
+post(f"/api/projects/{pid}/outline", {"action": "confirm"})
+b = wait(pid, "proofcheck")
+assert b["writing"]["proofs"]["R4"]["status"] == "review" and not b["writing"]["open_proofs"]
+post(f"/api/projects/{pid}/proofs", {"action": "approve"})
+b = wait(pid, "draftcheck")
+assert b["draft"] and b["writing"]["abstract"]
+post(f"/api/projects/{pid}/draftcheck", {"intro": b["intro"]["text"] + "\n\nAn added sentence."})
+post(f"/api/projects/{pid}/draftcheck", {"approve": True})
 b = wait(pid, "decide")
+assert b["intro"]["text"].endswith("An added sentence.") and b["intro"]["edited"]
 assert b["scope"]["note"] == "Keep the lower bound short." and b["state"]["stages"]["scope"]["status"] == "done"
 assert b["transcript"]["pages"]["5"]["edited"] and b["approved"] and b["figures"][0]["caption"] == "Rectangles under a decreasing graph."
-assert 'class="paper"' in b["draft"]["html"] and b["draft"]["results"] == 5 and b["draft"]["proofs"] == 5 and b["draft"]["sections"] == 3
+assert 'class="paper"' in b["draft"]["html"] and b["draft"]["results"] == 5 and b["draft"]["proofs"] == 4 and b["draft"]["sections"] == 3
 assert b["dossier"]["results"][2]["role"] == "main" and b["plan"]["sections"][1]["title"] == "Upper bounds" and b["intro"]["text"]
 rev = b["revision"]
 assert len(rev["items"]["simplify"]) == 1 and len(rev["items"]["issues"]) == 1 and len(rev["items"]["remarks"]) == 3 and rev["decisions"] is None
@@ -232,8 +272,10 @@ post(f"/api/projects/{pid}/decisions", {"simplify": {"S1": "accept"}, "issues": 
 b = wait(pid, "assemble", ("done",))
 P = b["paper"]
 assert P["title"] and P["compile"]["template"] == "elsarticle" and "res:S1" in [x.get("label") for x in P["blocks"]]
-if P["compile"]["engine"]:            # elsarticle is not installed here: the PDF is set in the standard class, and both sources are offered
-    assert P["compile"]["ok"] and P["compile"]["fallback"]["template"] == "elsarticle" and "main_standard_class.tex" in b["downloads"], P["compile"]
+if P["compile"]["engine"]:            # if elsarticle is not installed, the PDF is set in the standard class, and both sources are offered
+    assert P["compile"]["ok"]
+    if P["compile"].get("fallback"):
+        assert P["compile"]["fallback"]["template"] == "elsarticle" and "main_standard_class.tex" in b["downloads"], P["compile"]
 for name in b["downloads"]:
     assert call("GET", f"/api/projects/{pid}/download/{name}").status_code == 200
 tex = call("GET", f"/api/projects/{pid}/download/main.tex").text
@@ -312,13 +354,14 @@ post(f"/api/projects/{pid}/run", {"from": "review"})
 b = wait(pid, "review")
 assert b["approved"] is False and b["paper"] is None and b["transcript"]["pages"]["5"]["edited"], "redoing from the review keeps the transcript"
 post(f"/api/projects/{pid}/review", {"figures": {"f1": "none"}})
+through_writing(pid)
 b = wait(pid, "assemble", ("done",), seconds=180)
 s = b["state"]["stages"]
 assert s["decide"]["status"] == "done" and s["decide"]["skipped"] and b["revision"]["decisions"]["auto"], s["decide"]
-assert s["scope"]["status"] == "done" and s["scope"]["skipped"] and b["scope"]["auto"] and b["scope"]["kind"] == "article", s["scope"]
+assert s["scope"]["status"] == "done" and not s["scope"].get("skipped") and b["scope"]["kind"] == "article", s["scope"]
 assert not b["paper"]["figures"] and "p-fig" not in b["paper"]["html"] and b["paper"]["revision"]["referee"]["recommendation"] == "accept"
 os.environ.pop("SCRIPTAVERA_MOCK_CLEAN")
-print("a clean run passes the plan and the decision steps by itself; a figure the author declined is left out")
+print("a clean run passes the decision step by itself (the statements always stop); a figure the author declined is left out")
 
 # ------------------------------------------------------------------ stop, start over, delete
 os.environ["SCRIPTAVERA_MOCK_DELAY"] = "0.4"

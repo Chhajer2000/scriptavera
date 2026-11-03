@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Vaibhav Chhajer
-"""The first draft holds every page of the notes. A writer that ends its answer early is caught at once and the
-rest is written again in smaller parts; a page that still does not come out stops the step with its number, and
-no later step works on an incomplete draft. A draft written before this check is written again, once."""
+"""What counts as a page left out of a text written from the notes, and the first draft holding every statement and
+proof the author approved, exactly as approved: the program puts the paper together, so nothing approved is dropped
+or changed on the way, and a model writes only the text between them."""
 import re
 from helpers import answers, isolate, new_project, past_topic, wait
 isolate("scriptavera_complete_")
@@ -27,21 +27,6 @@ calls = {"sec3": 0, "sec4": 0}
 mode = {"drop5": False}
 
 
-def respond(label, system, user, vision, model=None):
-    out = orig(label, system, user, vision, model)
-    if label.startswith("Write section 3"):
-        calls["sec3"] += 1
-        if calls["sec3"] == 1:                                    # ends after the first of its three pages
-            assert "(pages 2-4)" in label, label
-            return out.split("%%% page 3", 1)[0] + "%%% page 3\nLet $s$ be the number of elements left after the assignment. Then"
-    if label.startswith("Write section 4"):
-        calls["sec4"] += 1
-        if mode["drop5"]:                                         # never writes page 5
-            return re.sub(r"(?s)%%% page 5\n.*?(?=%%% page|\Z)", "", out)
-    return out
-
-
-sim.respond = respond
 p = new_project()
 past_topic(p)
 pipeline.start(p); wait(p, "confirm")
@@ -51,43 +36,15 @@ pipeline.submit_review(p, {"figures": {"f1": "orig"}})
 pipeline.start(p); wait(p, "scope")
 writing.submit_scope(p, {"kind": "article", "results": {"R4": "keep", "R2": "credit"}})
 pipeline.start(p); wait(p, "decide")
-lay = p.load("structure_partial")["layout"]
-assert [u["pages"] for u in lay if u["sec"] == 1] == [[2], [3, 4]], lay
-labels = [c["label"] for c in p.calls(500)]
-assert "Write section 3, part 2 (pages 3-4)" in labels, labels
+from scriptavera import drafting, paper as paperlib
 a = p.load("audit")
-assert not a["missing"] and a["preserved"] == a["total"], a
-msgs = [x.get("message", "") for x in pipeline.events_after(p.id, 0) if x["type"] == "log"]
-assert any("stopped short: the material of page 4 did not come out. Pages 3-4 are written again" in m for m in msgs), [m for m in msgs if "page" in m]
-assert "elements left after the assignment" not in str(p.load("body")), "the unfinished sentence is not kept"
-print("2. a part that ends early keeps what it wrote; the rest is written again as the next part, and the draft is whole")
-
-# ---------------------------------------------------------------- a page that never comes out stops the step
-mode["drop5"] = True
-p.reset_from("structure")
-calls["sec4"] = 0
-pipeline.start(p); wait(p, "structure", statuses=("error",))
-st = p.state["stages"]
-assert "page 5 of your notes" in st["structure"]["error"], st["structure"]
-assert st["simplify"]["status"] == "pending" and p.load("body") is None, "nothing after it works on an incomplete draft"
-assert calls["sec4"] <= 8, calls
-mode["drop5"] = False
-before = calls["sec4"]
-pipeline.start(p); wait(p, "decide")
-assert calls["sec4"] - before <= 2, "only the pages that were missing are written again"
-assert not p.load("audit")["missing"]
-print("3. a page still missing after writing again stops the step with its number; Continue writes only that page")
-
-# ---------------------------------------------------------------- a draft written before the check
-assert not pipeline.reset_incomplete_draft(p), "a whole draft is kept"
-rep = p.load("audit")
-pg = pipeline.audit_pages(pipeline.writing_pages(p)[0])
-rep["missing"] = [{"page": x["n"], "source": f["tex"], "display": f["display"]} for x in pg if x["n"] > 2 for f in fidelity.formulas(x["text"])]
-p.save("audit", rep)
-assert pipeline.reset_incomplete_draft(p) and p.state["stages"]["structure"]["status"] == "pending" and p.load("body") is None
-assert p.state["stages"]["scope"]["status"] == "done" and p.load("intro"), "everything before the draft is kept"
-p.save("audit", rep); p.save("body", {"blocks": []}); p.set_stage("structure", status="done")
-assert not pipeline.reset_incomplete_draft(p), "only once"
-sim.respond = orig
-print("4. a draft that stopped part of the way is written again, once, keeping everything before it")
+assert a["total"] and a["preserved"] == a["total"] and not a["missing"] and not a["altered"], a
+body = paperlib.blocks_to_latex(p.load("body")["blocks"])
+for x in drafting.kept_items(p):
+    assert drafting.label_of(x) in body, x["id"]
+proofs = p.load("proofs")["items"]
+for iid, rec in proofs.items():
+    assert rec["text"].strip()[:60] in body, iid
+assert "In this section we treat" in body, "the text between the results is written"
+print("2. the first draft holds every statement and proof as approved, with the text between them")
 print("complete ok")

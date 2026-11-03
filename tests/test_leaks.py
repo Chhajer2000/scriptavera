@@ -67,9 +67,9 @@ print("3. a writer's answer with reasoning is asked for again; what is still rea
 
 # ---------------------------------------------------------------- a draft written before the guard is written again
 p.save("body", {"blocks": [{"type": "para", "text": "Wait! In ORIGINAL TRANSCRIPT, page 3 has it."}]})
-for sid in ("structure", "simplify"):
+for sid in ("proofs", "draft", "simplify"):
     p.set_stage(sid, status="done")
-assert pipeline.reset_leaked_draft(p) and p.load("body") is None and p.state["stages"]["structure"]["status"] == "pending"
+assert pipeline.reset_leaked_draft(p) and p.load("body") is None and p.state["stages"]["proofs"]["status"] == "pending"
 p.save("body", {"blocks": [{"type": "para", "text": "Wait! again"}]})
 assert not pipeline.reset_leaked_draft(p), "only once"
 print("4. a draft that contains reasoning is written again, once")

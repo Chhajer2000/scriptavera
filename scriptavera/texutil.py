@@ -334,6 +334,55 @@ def collapse_loops(text: str) -> str:
     return _LOOP.sub(lambda m: m.group(1), text or "")
 
 
+# Commands a model writes that neither LaTeX (with amsmath and amssymb) nor the preview knows, each with the standard
+# command that draws the same symbol. Left alone, such a command is printed as a word ("longhookrightarrow").
+SAME_AS = {
+    "longhookrightarrow": "hookrightarrow", "longhookleftarrow": "hookleftarrow", "hookedrightarrow": "hookrightarrow",
+    "longtwoheadrightarrow": "twoheadrightarrow", "longtwoheadleftarrow": "twoheadleftarrow",
+    "longrightarrowtail": "rightarrowtail", "longleftarrowtail": "leftarrowtail",
+    "longrightharpoonup": "rightharpoonup", "longleftharpoonup": "leftharpoonup",
+    "embeds": "hookrightarrow", "inj": "hookrightarrow", "surj": "twoheadrightarrow",
+    "semidirect": "rtimes", "semidirectproduct": "rtimes",
+}
+_TOKEN = re.compile(r"\\([A-Za-z]+|.)", re.S)      # read left to right, so that \\\\ (a new row) is one token
+_KNOWN: set[str] | None = None
+
+
+def same_commands(text: str) -> str:
+    """Invented names of standard symbols replaced by the standard command (\\longhookrightarrow -> \\hookrightarrow)."""
+    return _TOKEN.sub(lambda m: "\\" + SAME_AS.get(m.group(1), m.group(1)), text or "")
+
+
+def known_commands() -> set[str]:
+    """Every command the preview (KaTeX) can draw, read from the KaTeX bundled with the app: what it cannot draw shows
+    as raw LaTeX on the page, and most of it would not compile in the paper either."""
+    global _KNOWN
+    if _KNOWN is None:
+        from pathlib import Path
+        js = Path(__file__).resolve().parent / "static" / "vendor" / "katex" / "katex.min.js"
+        try:
+            _KNOWN = set(re.findall(r"\\\\([A-Za-z]+)", js.read_text(encoding="utf-8")))
+        except OSError:
+            _KNOWN = set()
+        _KNOWN |= {"begin", "end", "text", "mathrm", "operatorname", "frac", "left", "right", "middle", "underbrace",
+                   "overbrace", "hookrightarrow", "rtimes", "mathbb", "mathcal", "widetilde", "xrightarrow",
+                   "xleftarrow", "label", "tag", "quad", "qquad", "substack", "boxed", "cancel", "phantom"}
+    return _KNOWN
+
+
+def unknown_commands(text: str, extra=()) -> list[str]:
+    """The commands in a transcription that the preview cannot draw (and that are not one of the paper's own
+    shorthands, given as `extra`), in order of first use."""
+    known = known_commands()
+    if not known:
+        return []
+    out: list[str] = []
+    for name in _TOKEN.findall(text or ""):
+        if name.isalpha() and name not in known and "\\" + name not in extra and name not in extra and name not in out:
+            out.append(name)
+    return out
+
+
 def clean_transcript(text: str) -> str:
     """Normalise a page transcription (markdown-style with $ and $$ mathematics). Markup a model may add outside the
     formulas (HTML such as <u>Def</u>, or a stray tag of the answer format) is removed; the words stay."""
@@ -347,6 +396,12 @@ def clean_transcript(text: str) -> str:
                lambda m: "$$\\begin{aligned}" + m.group(2).strip() + "\\end{aligned}$$"
                if "$$" not in m.group(0) else m.group(0), t, flags=re.S)
     t = re.sub(r"\\(newpage|vspace\{[^{}]*\}|hspace\{[^{}]*\}|noindent|medskip|bigskip)\s*", "", t)
+    t = same_commands(t)
+    # list and rule commands of a LaTeX document, which a page of notes does not need: a list item is a bullet, and
+    # a line drawn across the page is left out (the layout of the page is shown beside it)
+    t = re.sub(r"[ \t]*\\(?:begin|end)\{(?:itemize|enumerate|description)\}[ \t]*\n?", "", t)
+    t = re.sub(r"(?m)^([ \t]*)\\item\b\s*", r"\1• ", t)
+    t = re.sub(r"\\(?:rule\{[^{}]*\}\{[^{}]*\}|hrule\b|hrulefill\b)\s*", "", t)
     return re.sub(r"\n{3,}", "\n\n", t).strip()
 
 

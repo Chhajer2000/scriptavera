@@ -27,6 +27,25 @@ errors = []
 U = f"http://127.0.0.1:{PORT}/"
 
 
+
+def through_writing_ui(pg, timeout=240000):
+    """The author's stops in the writing of the paper, on the screen: the statements (each question answered),
+    the structure, the proofs, the first draft."""
+    pg.wait_for_selector(".stabs", timeout=timeout); time.sleep(0.4)
+    for _ in range(10):
+        box = pg.locator("textarea[data-sanswer]")
+        if not box.count():
+            break
+        box.first.fill("The bound is log(n+1); the last display is a slip.")
+        pg.locator('[data-act="stmtanswer"]').first.click(); time.sleep(1.0)
+    pg.click('[data-act="stmtsubmit"]')
+    pg.wait_for_selector(".otitle", timeout=timeout); time.sleep(0.3)
+    pg.click('[data-act="oconfirm"]')
+    pg.wait_for_selector('[data-act="papprove"]:not([disabled])', timeout=timeout); time.sleep(0.3)
+    pg.click('[data-act="papprove"]')
+    pg.wait_for_selector('[data-act="dapprove"]', timeout=timeout); time.sleep(0.3)
+    pg.click('[data-act="dapprove"]')
+
 def shot(pg, name, full=False):
     """A screenshot; `full` makes the window tall enough to show a long screen whole (the app scrolls inside it)."""
     if full:
@@ -211,17 +230,16 @@ try:
         shot(pg, "08d_approve")
         pg.click('.rv3-acts [data-act="approve"]')
 
-        # ---- the assessment of the notes; the author's plan for the paper
-        pg.wait_for_selector(".kinds", timeout=240000); time.sleep(0.5)
-        shot(pg, "08c_plan"); shot(pg, "08c_plan_full", full=True)
+        # ---- the statements: tabs, a question answered, the kind of paper
+        pg.wait_for_selector(".stabs", timeout=240000); time.sleep(0.5)
+        shot(pg, "08c_statements"); shot(pg, "08c_statements_full", full=True)
         txt = pg.inner_text("#main")
-        assert "The proof has a gap" in txt and "Already in the literature" in txt and "suggested" in pg.inner_text(".kinds"), txt[:800]
-        assert pg.locator('[data-act="scopepick"][data-v="credit"].on').count() == 1, "a known result is credited by default"
-        pg.locator('[data-act="scopekind"][data-v="not_ready"]').click(); time.sleep(0.2)
+        assert "Your statements" in txt and "suggested" in pg.inner_text(".kinds"), txt[:800]
+        pg.locator('[data-act="stmtkind"][data-v="not_ready"]').click(); time.sleep(0.2)
         assert "Stop here" in pg.inner_text(".gatebar")
-        pg.locator('[data-act="scopekind"][data-v="article"]').click(); time.sleep(0.2)
-        pg.fill("[data-scopenote]", "Keep the lower bound short.")
-        pg.click('[data-act="scopesubmit"]')
+        pg.locator('[data-act="stmtkind"][data-v="article"]').click(); time.sleep(0.2)
+        pg.fill("[data-wnote]", "Keep the lower bound short.")
+        through_writing_ui(pg)
 
         # ---- the first draft and the three readings; third stop: decisions
         pg.wait_for_selector("#deccount", timeout=240000); time.sleep(0.6)
@@ -322,9 +340,9 @@ try:
         print("paper state:", state)
         assert state["k"] == 4 and state["c"]["template"] == "article"
         # every step's screen after the run
-        for sid in ("scout", "search1", "survey", "confirm", "reading", "transcribe", "figures", "review", "understand", "assess", "scope", "intro", "structure", "simplify", "verify", "referee", "decide", "finish"):
+        for sid in ("scout", "search1", "survey", "confirm", "reading", "transcribe", "figures", "review", "understand", "assess", "scope", "outline", "proofs", "proofcheck", "draft", "draftcheck", "simplify", "verify", "referee", "decide", "finish"):
             pg.click(f'.step[data-view="{sid}"]'); time.sleep(0.45)
-            shot(pg, f"20_{sid}", full=sid in ("understand", "assess", "scope", "structure", "simplify", "verify", "referee", "decide", "figures", "intro", "finish"))
+            shot(pg, f"20_{sid}", full=sid in ("understand", "assess", "scope", "outline", "proofs", "proofcheck", "draft", "draftcheck", "simplify", "verify", "referee", "decide", "figures", "finish"))
             assert pg.evaluate("document.querySelectorAll('.katex-error').length") == 0, f"KaTeX error on {sid}"
         pg.click('[data-act="settings"]'); time.sleep(0.4); shot(pg, "30_settings", full=True)
         dlg = pg.inner_text(".dialog")

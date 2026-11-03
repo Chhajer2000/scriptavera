@@ -46,13 +46,19 @@ pipeline.submit_review(p, {"figures": {f["id"]: "orig" for f in (p.load("figures
 pipeline.start(p); wait(p, "scope")
 assert p.load("assessment")["results"]["R2"]["proof"] == "sketch"
 writing.submit_scope(p, {"kind": "article", "results": {"R4": "keep", "R2": "keep"}})
+pipeline.start(p); wait(p, "draftcheck")
+from scriptavera import drafting
+assert p.load("proofs")["items"]["R2"]["text"], "a sketched proof is written in full at the Proofs step"
+assert not C.sketched(p, revision.result_units(p.load("body")["blocks"])), "and is not completed again later"
+p.remove("proofs")              # a draft made by an earlier version: its sketched proofs are completed at the proof check
+drafting.submit_draft(p, {})
 pipeline.start(p); wait(p, "decide")
 rec = p.load("completion")["items"]["res:R2"]
 assert rec["status"] == "ready", rec.get("reason")
 assert len(rec["steps"]) == 3 and set(rec["additions"]) == {"1", "2", "3"} and rec["additions"]["3"] == "", rec["additions"]
 assert "Unknown2020" not in rec["proof"], "the citation the screen refused was dropped on the second try"
 labels = [c["label"] for c in p.calls(5000)]
-assert labels.count("Complete the sketch of Lemma 3.2") == 2 and "Check the completion of Lemma 3.2 against the sketch" in labels, \
+assert labels.count("Complete the sketch of Lemma 2.2") == 2 and "Check the completion of Lemma 2.2 against the sketch" in labels, \
     [l for l in labels if "sketch" in l or "completion" in l]
 kept = "".join(x["text"] for x in rec["parts"] if not x["added"])
 assert kept == rec["sketch"], "the sketch is kept word for word"
@@ -63,7 +69,7 @@ items = revision.decision_items(p)
 comp = items["complete"]
 assert [c["label"] for c in comp] == ["res:R2"] and comp[0]["context"]["pages"], comp
 cid = comp[0]["id"]
-print("2. the sketch of Lemma 3.2 completed by its own steps; the refused citation was dropped on the second try; put to the author")
+print("2. the sketch of Lemma 2.2 completed by its own steps; the refused citation was dropped on the second try; put to the author")
 
 # ---- the author decides
 issue = items["issues"][0]

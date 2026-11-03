@@ -51,8 +51,8 @@ ROLES: dict[str, dict] = {
     },
     "reason": {
         "name": "Mathematical reasoner", "strict": True, "margin": 1.0,
-        "job": "Resolves notation, understands the whole paper, decides its structure, looks for shorter arguments, "
-               "checks every proof and reads the paper as a referee.",
+        "job": "Resolves notation, understands the whole paper, writes its statements and decides its structure, writes "
+               "and checks each proof from your argument, looks for shorter arguments and reads the paper as a referee.",
         "ideal": "The strongest reasoning model available. Paid upgrade: Claude Opus, GPT-5 thinking or Gemini Pro.",
     },
     "reader": {
@@ -62,7 +62,7 @@ ROLES: dict[str, dict] = {
     },
     "writer": {
         "name": "Academic writer", "strict": True, "margin": 1.0,
-        "job": "Writes the introduction and every section, does the final copy-edit, writes the abstract and proposes titles.",
+        "job": "Writes the text that joins the results, the introduction and the abstract, does the final copy-edit and proposes titles.",
         "ideal": "A model with strong prose and exact LaTeX. Paid upgrade: Claude Opus or Sonnet.",
     },
 }

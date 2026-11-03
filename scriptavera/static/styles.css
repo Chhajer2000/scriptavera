@@ -1217,3 +1217,26 @@ button.chip:hover { filter: none; border-color: var(--blue); }
 .seg button { border: 0; background: var(--paper); color: var(--btn-ink); padding: 3px 10px; font-size: 12.5px; cursor: pointer; }
 .seg button + button { border-left: 1px solid var(--btn-edge); }
 .seg button.on { background: var(--blue); color: #fff; font-weight: 600; }
+
+/* the paper written statement by statement: statements, structure, proofs, first draft */
+.stabs { flex-wrap: wrap; margin-bottom: 14px; }
+.stabs .tab .chip { margin-left: 4px; font-weight: 400; }
+.dcard.stmt .dcard-h, .dcard.proofcard .dcard-h { flex-wrap: wrap; gap: 8px; align-items: center; }
+.dcard.ask { border-color: var(--hl-strong, #d9b23a); box-shadow: inset 3px 0 0 var(--hl-strong, #d9b23a); }
+.dcard select, .orow select { font: inherit; font-size: 13px; padding: 3px 6px; border: 1px solid var(--rule); border-radius: 6px; background: var(--paper, #fff); color: var(--ink); }
+.askbox { margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: var(--rule-soft); }
+.askbox textarea, .stmt-edit, .sheet textarea[data-pstmt] { width: 100%; box-sizing: border-box; font: inherit; padding: 8px; border: 1px solid var(--rule); border-radius: 6px; background: var(--paper, #fff); color: var(--ink); }
+.stmt-edit { font-family: var(--mono, monospace); font-size: 13px; }
+.osec { margin: 0 0 22px; }
+.osec > .row h2, .osec > h2 { margin: 0 0 6px; }
+.otitle { font: inherit; font-size: 18px; font-weight: 600; border: 1px solid transparent; border-radius: 6px; padding: 2px 6px; background: transparent; color: var(--ink); min-width: 18em; }
+.otitle:hover, .otitle:focus { border-color: var(--rule); background: var(--paper, #fff); }
+.orow { border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+.orow-h { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 4px; }
+.proofcard .tex-block.serif { line-height: 1.6; }
+.orow-h select { width: auto; max-width: 14em; }
+.chat { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 12px; }
+.chat .msg { border-radius: 10px; padding: 9px 12px; max-width: 85%; font-size: 14px; border: 1px solid var(--rule); background: var(--paper, #fff); }
+.chat .msg.you { align-self: flex-end; background: var(--blue-soft, #e8eefc); border-color: transparent; }
+.chat .msg.app { border-color: #ecd97a; background: var(--hl-soft); }
+.chat .msg-who { font-size: 11.5px; color: var(--graphite); margin-bottom: 2px; }

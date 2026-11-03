@@ -21,7 +21,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from . import __version__, config, domains, final, ingest, journals, literature, paper as paperlib, pipeline, revision, store, writing
-from . import arxivpack, assist, citecheck, costs, extras, hosting, memory, phone, provenance, reviews, sources, tenancy, typed, workspace
+from . import arxivpack, assist, citecheck, costs, drafting, extras, hosting, memory, phone, provenance, reviews, sources, tenancy, typed, workspace
 from .llm import KEY_STEPS, PROVIDERS, ROLES, LLMError, router
 
 DOWNLOADS = {
@@ -467,6 +467,7 @@ def _bundle(p: store.Project) -> dict:
         "doubt_answers": p.load("doubt_answers", []), "page_notes": pipeline.page_notes(p), "source_plan": store.source_plan(p.state, p.dir), "adding": pipeline.adding_now(p),
         "dossier": p.load("dossier"), "intro": p.load("intro"), "plan": p.load("plan"), "draft": draft,
         "assessment": assessment, "novelty": p.load("novelty"), "scope": p.load("scope"), "scope_default": writing.default_scope(assessment) if assessment else None,
+        "writing": drafting.view(p),
         "finish": final.finish_info(p) if p.load("paper") else None,
         "revision": revision.state_json(p),
         "journal": meta.get("journal"), "profile": journals.profile(meta.get("journal")),
@@ -932,21 +933,147 @@ async def api_scope(request: Request):
         return fail("Project not found.", 404)
     if pipeline.is_running(p.id):
         return fail("Wait for the current step to finish, or press Stop.")
-    if p.state["stages"]["scope"].get("status") not in ("waiting", "done") or not p.load("assessment"):
+    if p.state["stages"]["scope"].get("status") not in ("waiting", "done") or not p.load("statements"):
         return fail("The project is not at this step.")
     later = _later_started(p, "scope")
     try:
-        scope = writing.submit_scope(p, await _body(request))
+        scope = drafting.submit_statements(p, await _body(request))
     except ValueError as e:
         return fail(str(e))
     if later:
         pipeline.disarm(p.id)
-        p.reset_from("intro")               # a new plan: the paper is written again by it (or, if not ready, not at all)
+        p.reset_from("outline")             # new statements: the paper is written again from them (or, if not ready, not at all)
     if scope["kind"] == "not_ready":
         pipeline.emit(p.id, "state")
         return ok(scope=scope)
     pipeline.start(p)
     return ok(scope=scope)
+
+
+def _at(p: store.Project, sid: str) -> str:
+    """Why the author cannot act on this step now, or "" when they can."""
+    if pipeline.is_running(p.id):
+        return "Wait for the current step to finish, or press Stop."
+    if p.state["stages"].get(sid, {}).get("status") != "waiting":
+        return "The project is not at this step."
+    return ""
+
+
+async def api_statement(request: Request):
+    """One statement changed by the author (kind, name, place, presentation, text), or a question about it answered:
+    then it is written again by the answer."""
+    p = _project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    why = _at(p, "scope")
+    if why:
+        return fail(why)
+    body = await _body(request)
+    iid = str(body.get("id") or "")
+    try:
+        if isinstance(body.get("answer"), str):
+            item = await run_in_threadpool(drafting.answer_statement, p, iid, body["answer"])
+        else:
+            item = drafting.edit_statement(p, iid, body)
+    except (ValueError, LLMError) as e:
+        return fail(str(e))
+    pipeline.emit(p.id, "state")
+    return ok(item=item, writing=drafting.view(p))
+
+
+async def api_outline(request: Request):
+    """The structure: a section renamed, a statement moved, the structure planned again with the author's instruction,
+    or confirmed (then the proofs are written)."""
+    p = _project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    why = _at(p, "outline")
+    if why:
+        return fail(why)
+    body = await _body(request)
+    action = body.get("action")
+    try:
+        if action == "replan":
+            await run_in_threadpool(drafting.replan_outline, p, str(body.get("instruction") or ""))
+        elif action == "talk":
+            await run_in_threadpool(drafting.talk_outline, p, str(body.get("text") or ""))
+        elif action == "dismiss":
+            drafting.dismiss_refusal(p)
+        elif action == "confirm":
+            later = _later_started(p, "outline")
+            drafting.submit_outline(p)
+            if later:
+                pipeline.disarm(p.id)
+                p.reset_from("proofs")
+            pipeline.start(p)
+        else:
+            try:
+                drafting.edit_outline(p, body)
+            except ValueError as e:
+                if not body.get("move"):
+                    raise
+                return ok(writing=drafting.view(p), refused=str(e))
+    except (ValueError, LLMError) as e:
+        return fail(str(e))
+    pipeline.emit(p.id, "state")
+    return ok(writing=drafting.view(p))
+
+
+async def api_write_proof(request: Request):
+    """The author on one proof: rewrite it with an instruction (or with a new statement), keep it as it is, state
+    the result as a conjecture, or leave the result out. Or approve all the proofs."""
+    p = _project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    why = _at(p, "proofcheck")
+    if why:
+        return fail(why)
+    body = await _body(request)
+    action, iid = body.get("action"), str(body.get("id") or "")
+    try:
+        if action == "rewrite":
+            st = body.get("statement") if isinstance(body.get("statement"), str) else None
+            await run_in_threadpool(drafting.rewrite_proof, p, iid, str(body.get("comment") or ""), st)
+        elif action in ("keep", "conjecture", "omit"):
+            drafting.decide_proof(p, iid, action)
+        elif action == "approve":
+            later = _later_started(p, "proofcheck")
+            drafting.submit_proofs(p)
+            if later:
+                pipeline.disarm(p.id)
+                p.reset_from("draft")
+            pipeline.start(p)
+        else:
+            return fail("Unknown action.")
+    except (ValueError, LLMError) as e:
+        return fail(str(e))
+    pipeline.emit(p.id, "state")
+    return ok(writing=drafting.view(p))
+
+
+async def api_draftcheck(request: Request):
+    """The first draft read by the author: the introduction or the abstract edited, or the draft approved."""
+    p = _project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    why = _at(p, "draftcheck")
+    if why:
+        return fail(why)
+    body = await _body(request)
+    try:
+        if body.get("approve"):
+            later = _later_started(p, "draftcheck")
+            drafting.submit_draft(p, body)
+            if later:
+                pipeline.disarm(p.id)
+                p.reset_from("simplify")
+            pipeline.start(p)
+        else:
+            drafting.edit_draft(p, body)
+    except ValueError as e:
+        return fail(str(e))
+    pipeline.emit(p.id, "state")
+    return ok()
 
 
 async def api_finish(request: Request):
@@ -1787,6 +1914,10 @@ routes = [
     Route("/api/projects/{pid}/doubt", api_doubt, methods=["POST"]),
     Route("/api/projects/{pid}/page_note", api_page_note, methods=["POST"]),
     Route("/api/projects/{pid}/correct_page", api_correct_page, methods=["POST"]),
+    Route("/api/projects/{pid}/statement", api_statement, methods=["POST"]),
+    Route("/api/projects/{pid}/outline", api_outline, methods=["POST"]),
+    Route("/api/projects/{pid}/proofs", api_write_proof, methods=["POST"]),
+    Route("/api/projects/{pid}/draftcheck", api_draftcheck, methods=["POST"]),
     Route("/api/projects/{pid}/layout", api_layout, methods=["GET"]),
     Route("/api/projects/{pid}/figure/{fid}", api_figure_image, methods=["GET"]),
     Route("/api/projects/{pid}/figure/{fid}", api_figure, methods=["POST"]),

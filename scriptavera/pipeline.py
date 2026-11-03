@@ -22,7 +22,7 @@ from . import config, domains, literature, paper as paperlib, prompts, tenancy
 from .llm import ROLES, Cancelled, LLMError, RunHooks, clock, router
 from . import store as storelib
 from .store import STAGE_IDS, STAGES, Project
-from .texutil import answer_transcript, clean_transcript, collapse_loops, drop_leaks, leaks, looping
+from .texutil import answer_transcript, clean_transcript, collapse_loops, drop_leaks, leaks, looping, unknown_commands
 from .util import (est_tokens, extract_tag, fit, loads_lenient, parse_lines, parse_list, parse_records, parse_rows,
                    to_float)
 
@@ -224,9 +224,9 @@ def _stage_func(sid: str):
     import this one, so they are looked up when needed rather than when this module loads."""
     if sid in STAGE_FUNCS:
         return STAGE_FUNCS[sid]
-    from . import final, revision, writing
+    from . import drafting, final, revision, writing
     return {"understand": writing.stage_understand, "assess": writing.stage_assess,
-            "intro": writing.stage_intro, "structure": writing.stage_structure,
+            "proofs": drafting.stage_proofs, "draft": drafting.stage_draft,
             "simplify": revision.stage_simplify, "verify": revision.stage_verify, "referee": revision.stage_referee,
             "assemble": final.stage_assemble}[sid]
 
@@ -248,11 +248,18 @@ def _review_not_needed(p: Project) -> str:
             "was approved without stopping.")
 
 
+def _gate_prepare(sid: str):
+    """The work a stop for the author needs before it can be shown: the statements written, the structure planned.
+    It runs as part of that step, so the author sees one step, not two."""
+    if sid not in ("scope", "outline"):
+        return None
+    from . import drafting
+    return {"scope": drafting.prepare_statements, "outline": drafting.prepare_outline}[sid]
+
+
 def _gate_is_empty(p: Project, sid: str) -> bool:
-    """A gate with nothing for the author to decide is passed without stopping."""
-    if sid == "scope":
-        from . import writing
-        return writing.settle_scope_if_clean(p)
+    """A gate with nothing for the author to decide is passed without stopping. The statements and the structure
+    always stop: what the paper claims, and in what order, is the author's to confirm."""
     if sid != "decide":
         return False
     from . import revision
@@ -260,7 +267,6 @@ def _gate_is_empty(p: Project, sid: str) -> bool:
 
 
 GATE_PASSED = {
-    "scope": "Every result is proved in your notes and none was found in the literature, so a research article is written.",
     "decide": "Nothing mathematical needed your decision, so this step was passed.",
 }
 
@@ -295,34 +301,13 @@ def _drive(run: Run) -> None:
                     p.set_stage(sid, status="done", finished=time.time(), skipped=True)
                     run.log(GATE_PASSED.get(sid, "Nothing needed your decision, so this step was passed."), "done")
                     continue
+                prep = _gate_prepare(sid)
+                if prep and not _do_step(run, sid, stage, prep, gate=True):
+                    return
                 p.set_stage(sid, status="waiting", since=time.time())
                 run.log(f"Waiting for you: {stage['name'].lower()}.", "gate")
                 return
-            p.set_stage(sid, status="running", started=time.time(), error=None)
-            run.changed()
-            run.log(f"{stage['name']} started.", "stage")
-            try:
-                _stage_func(sid)(run)
-            except Cancelled:
-                p.set_stage(sid, status="pending")
-                run.log("Stopped by you. Everything finished so far is saved; press Continue to carry on from here.", "warn")
-                return
-            except Exception as e:  # noqa: BLE001
-                msg = str(e) if isinstance(e, (LLMError, ValueError)) else f"{type(e).__name__}: {e}"
-                (p.dir / "last_error.txt").write_text(traceback.format_exc(), encoding="utf-8")
-                kind, retry_at = getattr(e, "kind", ""), float(getattr(e, "retry_at", 0) or 0)
-                tries = int(p.state["stages"].get(sid, {}).get("auto_tries", 0))
-                if retry_at and (kind == "limits" or tries < 5):
-                    # a failure that passes by itself: keep everything, wait, and start again from this point
-                    p.set_stage(sid, status="paused", error=msg, resume_at=retry_at, reason=kind, auto_tries=tries + 1,
-                                weaker=getattr(e, "weaker", "") or "")
-                    p.update_state(lambda st: st.update(error={"stage": sid, "message": msg, "resume_at": retry_at, "kind": kind}))
-                    arm(p.id, retry_at)
-                    run.log(f"Paused: {msg} Progress is saved. It will continue by itself at {clock(retry_at)}.", "warn")
-                    return
-                p.set_stage(sid, status="error", error=msg, resume_at=None)
-                p.update_state(lambda st: st.update(error={"stage": sid, "message": msg}))
-                run.log(msg + " Progress is saved; press Continue to try again from this point.", "error")
+            if not _do_step(run, sid, stage, _stage_func(sid)):
                 return
             p.set_stage(sid, status="done", finished=time.time(), auto_tries=0, resume_at=None, error=None, weaker="", reason=None)
             run.log(f"{stage['name']} finished.", "done")
@@ -330,6 +315,40 @@ def _drive(run: Run) -> None:
     finally:
         p.update_state(lambda st: st.update(running=False))
         run.changed()
+
+
+def _do_step(run: Run, sid: str, stage: dict, func, gate: bool = False) -> bool:
+    """Run the work of one step. False when it stopped: by the author, or on a failure that is kept for Continue
+    (or that passes by itself, and then the step resumes at the time said)."""
+    p = run.p
+    p.set_stage(sid, status="running", started=time.time(), error=None)
+    run.changed()
+    if not gate:
+        run.log(f"{stage['name']} started.", "stage")
+    try:
+        func(run)
+    except Cancelled:
+        p.set_stage(sid, status="pending")
+        run.log("Stopped by you. Everything finished so far is saved; press Continue to carry on from here.", "warn")
+        return False
+    except Exception as e:  # noqa: BLE001
+        msg = str(e) if isinstance(e, (LLMError, ValueError)) else f"{type(e).__name__}: {e}"
+        (p.dir / "last_error.txt").write_text(traceback.format_exc(), encoding="utf-8")
+        kind, retry_at = getattr(e, "kind", ""), float(getattr(e, "retry_at", 0) or 0)
+        tries = int(p.state["stages"].get(sid, {}).get("auto_tries", 0))
+        if retry_at and (kind == "limits" or tries < 5):
+            # a failure that passes by itself: keep everything, wait, and start again from this point
+            p.set_stage(sid, status="paused", error=msg, resume_at=retry_at, reason=kind, auto_tries=tries + 1,
+                        weaker=getattr(e, "weaker", "") or "")
+            p.update_state(lambda st: st.update(error={"stage": sid, "message": msg, "resume_at": retry_at, "kind": kind}))
+            arm(p.id, retry_at)
+            run.log(f"Paused: {msg} Progress is saved. It will continue by itself at {clock(retry_at)}.", "warn")
+            return False
+        p.set_stage(sid, status="error", error=msg, resume_at=None)
+        p.update_state(lambda st: st.update(error={"stage": sid, "message": msg}))
+        run.log(msg + " Progress is saved; press Continue to try again from this point.", "error")
+        return False
+    return True
 
 
 # ---------------------------------------------------------------- helpers
@@ -980,38 +999,18 @@ def reset_leaked_draft(p: Project) -> bool:
     if not any(leaks(b.get("text", "")) or leaks(b.get("title", "")) for b in body.get("blocks", [])):
         return False
     p.update_state(lambda x: x.update(leak_reset=time.time()))
-    p.reset_from("structure")
-    emit(p.id, "log", stage="structure", level="warn",
-         message="The first draft contained a model's own reasoning instead of paper text. It is written again now; "
-                 "your reading, notation, review, plan and introduction are kept.")
+    p.reset_from("proofs")
+    emit(p.id, "log", stage="proofs", level="warn",
+         message="The first draft contained a model's own reasoning instead of paper text. The proofs are written again "
+                 "now; your reading, notation, review, statements and structure are kept.")
     return True
 
 
 def reset_incomplete_draft(p: Project) -> bool:
-    """A first draft written before the completeness check may stop part of the way through the notes (one long
-    part asked of a model that ended its answer early). Such a draft is written again, once, from the structure
-    step; the reading, the introduction and the author's answers before it are kept."""
-    st = p.state
-    if (is_running(p.id) or st.get("gap_reset") or st["stages"].get("structure", {}).get("status") != "done"
-            or st["stages"].get("assemble", {}).get("status") == "done"):
-        return False
-    report = p.load("audit")
-    if not report or not p.load("body"):
-        return False
-    pages, _ = writing_pages(p)
-    apages = audit_pages(pages)
-    gaps = page_gaps(apages, report)
-    with_math = [pg for pg in apages if len(fidelity.formulas(pg["text"])) >= 2]
-    if len(gaps) < 2 or len(gaps) < 0.2 * max(1, len(with_math)):
-        return False
-    p.update_state(lambda x: x.update(gap_reset=time.time()))
-    p.reset_from("structure")
-    emit(p.id, "log", stage="structure", level="warn",
-         message=f"The first draft stopped before the material of {len(gaps)} pages of your notes "
-                 f"({', '.join(map(str, gaps[:12]))}{'…' if len(gaps) > 12 else ''}). It is written again now, in "
-                 "smaller parts, each checked against its pages. Your reading, notation, review, plan and introduction "
-                 "are kept; the checks of the incomplete draft are discarded.")
-    return True
+    """A first draft written section by section from the pages (as earlier versions did) could stop part of the way
+    through the notes, and was then written again. The draft is now put together by the program from the statements
+    and proofs the author approved, and the notes are cut on purpose, so there is nothing of this kind to repair."""
+    return False
 
 
 def add_pages(p: Project, new: list[dict]) -> dict:
@@ -1663,6 +1662,8 @@ def correct_page(p: Project, n: int, comment: str | None = None) -> dict:
         if changes:
             cur["text"], cur["edited"] = text, True
             cur["uncertain"] = [u for u in cur.get("uncertain", []) if not u.get("snippet") or u["snippet"] in text]
+            cur["uncertain"] += [d for d in command_doubts(p, text)
+                                 if not any(d["snippet"] == u.get("snippet") for u in cur["uncertain"])]
         cur.setdefault("corrections", []).append(done)
         p.save("transcript", tr)
         notes = p.load("page_notes", {"pages": {}})       # the comment is settled (the one sent is what the author wrote)
@@ -1848,6 +1849,17 @@ def number_doubts(text: str, others: dict[str, str], changes: list[str]) -> list
     return out[:6]
 
 
+def command_doubts(p: Project, text: str) -> list[dict]:
+    """Commands in a page's transcription that do not exist (a model invented them, such as \\curvearrowtop): the
+    preview would show them as raw LaTeX and the paper would print them as words. Found without a model; the
+    author says what symbol is written there. Invented names of standard symbols were already replaced."""
+    extra = set(paperlib.MACROS) | set((p.load("typed") or {}).get("katex", {}) or {})
+    return [{"snippet": "\\" + name, "alt": "", "check": "latex",
+             "issue": f"\\{name} is not a LaTeX command, so it would show as raw LaTeX here and be printed as the "
+                      f"word “{name}” in the paper. Say in a comment which symbol or layout is written here."}
+            for name in unknown_commands(text, extra)][:6]
+
+
 def _next_draft(pages: list[dict], i: int, survey: dict, typed_src: dict) -> str:
     """The first lines of the page after page i (1-based), as the notation survey drafted it: a sentence or formula
     that runs over the page break is then read with its continuation in view. Pages are still transcribed in order,
@@ -1934,7 +1946,7 @@ def stage_transcribe(run: Run) -> None:
                   "draft reading": draft}
         if layers.get(str(n)):
             others["text layer of the PDF"] = layers[str(n)]
-        for d in number_doubts(text, others, changes):
+        for d in number_doubts(text, others, changes) + command_doubts(p, text):
             if not any(d["snippet"] in u.get("snippet", "") for u in uncertain):
                 uncertain.append(d)
         rec = {"text": text, "uncertain": uncertain, "changes": changes, "model": res.model, "edited": False}

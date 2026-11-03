@@ -166,10 +166,20 @@ def parse_dossier(text: str) -> dict:
         did = re.sub(r"[^A-Za-z0-9]", "", r.get("id", "")) or f"D{len(defs) + 1}"
         defs.append({"id": did, "name": r.get("name", "").strip(), "text": r.get("text", "").strip(),
                      "page": (page_list(r.get("page", "")) or [0])[0]})
+    others = []
+    for r in fields(text, "other", ("id", "kind", "text", "page", "relates")):
+        if not r.get("text", "").strip():
+            continue
+        oid = re.sub(r"[^A-Za-z0-9]", "", r.get("id", "")) or f"O{len(others) + 1}"
+        if any(x["id"] == oid for x in others):
+            oid = f"O{len(others) + 1}x"
+        kind = next((k for k in ("example", "remark", "question") if k in r.get("kind", "").lower()), "remark")
+        others.append({"id": oid, "kind": kind, "text": r["text"].strip(), "page": (page_list(r.get("page", "")) or [0])[0],
+                       "relates": re.findall(r"\b[A-Za-z]\d+\b", r.get("relates", ""))})
     src = re.sub(r"[\[\]\s]", "", extract_tag(text, "source"))
     return {
         "problem": extract_tag(text, "problem").strip(), "source": _none(src), "setting": extract_tag(text, "setting").strip(),
-        "results": results, "definitions": defs, "storyline": extract_tag(text, "storyline").strip(),
+        "results": results, "definitions": defs, "others": others, "storyline": extract_tag(text, "storyline").strip(),
         "contribution": extract_tag(text, "contribution").strip(),
         "notation_choice": _none(extract_tag(text, "notation_choice")),
         "concerns": [c for c in parse_lines(extract_tag(text, "concerns")) if _none(c)],
@@ -205,6 +215,10 @@ def dossier_text(d: dict, limit: int = 12000) -> str:
             + f"]: {x['statement']}"
             + "".join(f"\n    (a step inside its proof, not a result of its own: {c['statement']})" for c in x.get("contains", []))
             for x in d["results"]))
+    if d.get("others"):
+        L.append("EXAMPLES, REMARKS AND QUESTIONS\n" + "\n".join(
+            f"- {x['id']} ({x['kind']}, page {x['page']}" + (f", about {', '.join(x['relates'])}" if x.get("relates") else "")
+            + f"): {x['text']}" for x in d["others"]))
     if d.get("storyline"):
         L.append(f"HOW THE ARGUMENT GOES\n{d['storyline']}")
     if d.get("contribution"):
@@ -568,7 +582,20 @@ def default_scope(a: dict) -> dict:
 
 
 def submit_scope(p: Project, data: dict) -> dict:
-    """Gate: the author's plan for the paper. 'not_ready' stops here on purpose: the notes are not enough yet."""
+    """Gate: the author's plan for the paper. 'not_ready' stops here on purpose: the notes are not enough yet.
+    With statements (the current steps), the plan is given as a treatment per result; a question left open keeps
+    its statement as written. The screens use drafting.submit_statements, which asks for every answer first."""
+    from . import drafting
+    S = p.load("statements") or {}
+    if S.get("items"):
+        given = {rid: ("keep" if v == "new" else v) for rid, v in (data.get("results") or {}).items()}
+        ids = {x["id"] for x in S["items"]}
+        for rid, v in given.items():
+            if rid in ids and v in drafting.TREATMENTS:
+                drafting.edit_statement(p, rid, {"treatment": v})
+        for rid in drafting.open_questions(p):
+            drafting.edit_statement(p, rid, {"dismiss": True})
+        return drafting.submit_statements(p, data)
     a = p.load("assessment") or {}
     base = default_scope(a)
     kind = data.get("kind") if data.get("kind") in KINDS else base["kind"]
@@ -596,16 +623,6 @@ def submit_scope(p: Project, data: dict) -> dict:
     return scope
 
 
-def settle_scope_if_clean(p: Project) -> bool:
-    """The plan step is passed without stopping when the assessment found nothing to decide."""
-    a = p.load("assessment") or {}
-    prev = p.load("scope") or {}
-    if (prev and not prev.get("auto")) or not assessment_is_clean(a):
-        return False                               # the author's own plan is never replaced by an automatic one
-    p.save("scope", {**default_scope(a), "at": time.time(), "auto": True})
-    return True
-
-
 def planned_dossier(p: Project) -> dict:
     """The dossier as the author's plan makes it: results left out are gone, and the others say how they are to be
     presented. Every writing step works from this."""
@@ -616,6 +633,9 @@ def planned_dossier(p: Project) -> dict:
     a = p.load("assessment") or {}
     d["plan_kind"] = scope.get("kind", "article")
     d["plan_note"] = scope.get("note", "")
+    S = p.load("statements") or {}
+    if S.get("items"):
+        return _from_statements(d, S)
     treat = scope.get("results") or {}
     gone = {rid for rid, v in treat.items() if v == "omit"}
     d["left_out"] = [x["statement"] for x in d.get("results", []) if x["id"] in gone]
@@ -654,6 +674,47 @@ def planned_dossier(p: Project) -> dict:
     return d
 
 
+def _from_statements(d: dict, S: dict) -> dict:
+    """The dossier as the author's statements make it: their kinds, their wording and how each is presented. The
+    proofs are written in full from the notes, so a gap in the notes is no longer a property of the paper."""
+    kept = [x for x in S["items"] if x.get("treatment") != "omit"]
+    d["left_out"] = [x["statement"] for x in S["items"] if x.get("treatment") == "omit"]
+    d["definitions"] = [{"id": x["id"], "name": x.get("name") or x.get("words", ""), "text": x["statement"],
+                         "page": (x.get("pages") or [0])[0]} for x in kept if x["kind"] == "definition"]
+    d["others"] = [{"id": x["id"], "kind": x["kind"], "text": x["statement"], "page": (x.get("pages") or [0])[0],
+                    "relates": x.get("depends", [])} for x in kept if x["kind"] in ("example", "remark", "question")]
+    res = []
+    for x in kept:
+        if x["kind"] not in RESULT_KINDS + ("conjecture",):
+            continue
+        r = {"id": x["id"], "kind": x["kind"] if x["kind"] in RESULT_KINDS else "proposition", "statement": x["statement"],
+             "words": x.get("words", ""), "pages": x.get("pages", []), "depends": x.get("depends", []),
+             "role": x.get("role", "intermediate")}
+        if x["kind"] == "conjecture" or x.get("treatment") == "conjecture":
+            r["treatment"] = "conjecture"
+        elif x.get("treatment") == "credit" and x.get("key"):
+            r["treatment"], r["credit_key"] = "credit", x["key"]
+        res.append(r)
+    conj = {x["id"] for x in res if x.get("treatment") == "conjecture"}
+    by_id = {x["id"]: x for x in res}
+
+    def rests_on(rid: str, seen: set) -> set:
+        out = set()
+        for i in by_id.get(rid, {}).get("depends", []):
+            if i in seen:
+                continue
+            seen.add(i)
+            out |= ({i} if i in conj else set()) | rests_on(i, seen)
+        return out
+    for x in res:
+        if x["id"] not in conj:
+            c = sorted(rests_on(x["id"], {x["id"]}))
+            if c:
+                x["conditional"] = c
+    d["results"] = res
+    return d
+
+
 def left_out_text(p: Project) -> str:
     """What the author left out, so that its formulas missing from the paper are counted as left out on purpose:
     the statements, and the pages that belong to no result the paper keeps."""
@@ -668,41 +729,6 @@ def left_out_text(p: Project) -> str:
 
 
 # ------------------------------------------------------- 2. introduction
-
-def stage_intro(run: Run) -> None:
-    p = run.p
-    d = planned_dossier(p)
-    conf = p.load("confirmed", {})
-    brief = (p.load("brief") or {}).get("text", "")
-    library = {x["key"]: x for x in p.load("library", [])}
-    system = prompts.INTRO.format()
-    room = _room("writer", system, 1900)
-    sources = sources_text(p)
-    user = (f"FIELD\n{run.field}\n\nDOSSIER\n{dossier_text(d, max(1500, int(room * 0.4)))}\n\n"
-            f"RESEARCH CONTEXT BRIEF\n{fit(brief, max(500, int(room * 0.15)), 'head') or '(none)'}\n\n"
-            f"PAPERS YOU MAY CITE\n{fit(sources, max(600, int(room * 0.3)), 'head') or '(none: write the introduction without citations)'}\n\n"
-            f"CONFIRMED NOTATION\n{notation_text(conf, max(500, int(room * 0.1)))}")
-    run.progress(0, 1, "writing the introduction")
-    intro, notes, model = "", [], ""
-    for attempt in range(2):
-        res = run.ask("writer", system, user, max_out=1900, effort="high", temperature=0.3,
-                      label="Write introduction" + (" (retry)" if attempt else ""))
-        notes = []
-        intro = clean_fragment(res.text)
-        intro = re.sub(r"\\section\*?\{[^{}]*\}\s*", "", intro)
-        intro = re.sub(r"\\begin\{(abstract)\}.*?\\end\{\1\}", "", intro, flags=re.S).strip()
-        intro = fix_keys(drop_unsourced(intro, library, notes), library, notes)
-        model = res.model
-        if len(intro) >= 500:
-            break
-    if len(intro) < 200:
-        raise LLMError("The introduction came back empty.", kind="transient", retry_at=__import__("time").time() + 60)
-    for n in notes:
-        run.log(n, "warn")
-    p.save("intro", {"text": intro, "notes": notes, "model": model})
-    run.progress(1, 1, "introduction written")
-    run.log(f"Introduction written ({len(intro.split())} words, {len(cited_keys([intro]))} papers cited).")
-
 
 # ------------------------------------------- 3. structure and first draft
 
@@ -767,13 +793,6 @@ def normalise_plan(raw: list[dict], pages: list[dict], d: dict) -> list[dict]:
         s["items"] = list(dict.fromkeys(s["items"]))
         del s["planned"]
     return secs
-
-
-def plan_text(secs: list[dict]) -> str:
-    return "1. Introduction (already written)\n" + "\n".join(
-        f"{i}. {s['title']}: presents {', '.join(s['items']) or 'no numbered items'} "
-        f"(notes pages {s['pages'][0]}-{s['pages'][-1]})" + (f". {s['purpose']}" if s.get("purpose") else "")
-        for i, s in enumerate(secs, 2))
 
 
 def organisation(text: str, secs: list[dict]) -> str:
@@ -892,279 +911,4 @@ def ensure_labels(blocks: list[dict]) -> None:
             used.add(b["label"])
 
 
-UNIT_CHARS = 6000          # notes written in one answer at most: longer parts are often ended early by the model
 
-
-def stops_short(apages: list[dict], frag: str, omitted: str) -> int | None:
-    """The first page of a written part whose material did not come out: its formulas are missing, or, on pages
-    with little mathematics, the text is far shorter than the notes and the page's line is absent."""
-    rep = fidelity.audit(apages, frag, omitted)
-    marked = page_marks(frag)
-    gaps = page_gaps(apages, rep, marked or None)
-    if gaps:
-        return gaps[0]
-    size = sum(len(pg["text"]) for pg in apages)
-    if not omitted and marked and size >= 1500 and len(frag) < 0.3 * size:
-        absent = [pg["n"] for pg in apages if pg["n"] not in marked]
-        return absent[0] if absent else None
-    return None
-
-
-def cut_point(raw: str, nums: list[int], k: int) -> tuple[int, int]:
-    """Where to cut a part that stopped short at page nums[k]: just before that page's line, or before the line of
-    the last page that has one. (0, 0) when nothing before it can be kept."""
-    marks: dict[int, int] = {}
-    for m in _PAGE_MARK.finditer(raw or ""):
-        marks.setdefault(int(m.group(1)), m.start())
-    while k > 0 and nums[k] not in marks:
-        k -= 1
-    if k == 0 or len((raw or "")[:marks[nums[k]]].strip()) < 80:
-        return 0, 0
-    return marks[nums[k]], k
-
-
-def _unit_key(upages: list[dict], u: dict) -> str:
-    """What a piece of the draft is written from: its pages, exactly as transcribed, and its place in its section."""
-    text = "\n".join(f"{pg['n']}\n{pg['text']}" for pg in upages)
-    return hashlib.sha256(f"{u.get('part', 0)}|{u.get('parts', 1)}|{text}".encode("utf-8")).hexdigest()[:24]
-
-
-def stage_structure(run: Run) -> None:
-    p = run.p
-    pages, figs = writing_pages(p)
-    if not pages:
-        raise ValueError("The transcript is empty.")
-    d = planned_dossier(p)
-    intro = (p.load("intro") or {}).get("text", "")
-    conf = p.load("confirmed", {})
-    by_n = {pg["n"]: pg for pg in pages}
-    full = "\n\n".join(f"%%% page {pg['n']}\n{pg['text']}" for pg in pages)
-    sig = hashlib.sha1((full + json.dumps(d, sort_keys=True) + intro + json.dumps(figs, sort_keys=True))
-                       .encode("utf-8")).hexdigest()[:16]
-    partial = p.load("structure_partial") or {}
-    if partial.get("sig") != sig:
-        partial = {"sig": sig, "plan_raw": "", "frags": []}
-
-    # a. the order of sections, definitions, lemmas and theorems
-    run.progress(0, 3, "deciding the order of sections and results")
-    if not partial["plan_raw"]:
-        system = prompts.PLAN.format()
-        room = _room("reason", system, 1500)
-        dos = dossier_text(d, max(1500, int(room * 0.35)))
-        user = (f"DOSSIER\n{dos}\n\nINTRODUCTION (already written)\n{fit(intro, max(800, int(room * 0.15)), 'head')}\n\n"
-                f"TRANSCRIPT OF THE NOTES\n\n{_view(pages, max(1500, room - len(dos) - int(room * 0.15) - 400))}")
-        partial["plan_raw"] = run.ask("reason", system, user, max_out=1500, effort="high", label="Decide paper structure").text
-        p.save("structure_partial", partial)
-    secs = normalise_plan(fields(partial["plan_raw"], "section", ("title", "items", "from_page", "purpose")), pages, d)
-    org = organisation(extract_tag(partial["plan_raw"], "organisation"), secs)
-    p.save("plan", {"sections": secs, "organisation": org})
-    ptext = plan_text(secs)
-    run.log("Structure: " + "; ".join(f"{i}. {s['title']}" for i, s in enumerate(secs, 2)) + ".")
-
-    # b. each section written on its own, with the dossier, the plan and the introduction in front of the writer.
-    # A part holds at most UNIT_CHARS of notes: models do not reliably write out more in one answer. Every part is
-    # compared with its pages as soon as it is written; one that stops short is written again from where it stopped.
-    system = prompts.WRITE_SECTION.format()
-    budget_chars = router.budget("writer") * 3 - len(system) - 1500
-    fixed_room = max(2500, min(60000, int(budget_chars * 0.35)))
-    chunk_chars = max(2000, min(UNIT_CHARS, int((budget_chars - fixed_room) / 2.9)))
-    whole_room = budget_chars - fixed_room - int(chunk_chars * 2.9)   # the whole notes go along when they fit
-    dos = dossier_text(d, int(fixed_room * 0.45))
-    notation = notation_text(conf, int(fixed_room * 0.12))
-    cit = fit("\n".join(f"- {x['key']}: {x['title']} ({x.get('year')}). Supports: "
-                        + " | ".join(str(f) for f in ((x.get('notes') or {}).get('citable') or (x.get('notes') or {}).get('results') or [])[:3])
-                        for x in citable(p)) or "(none)", int(fixed_room * 0.2), "head")
-    intro_view = fit(intro, int(fixed_room * 0.2), "head")
-    apages = audit_pages(pages)
-    by_a = {pg["n"]: pg for pg in apages}
-    omitted = left_out_text(p)                    # statements the author left out are missing on purpose
-
-    def group(sec: int, plist: list[dict], limit: int, tries: int = 0) -> list[dict]:
-        groups: list[list[dict]] = [[]]
-        size = 0
-        for pg in plist:
-            if groups[-1] and size + len(pg["text"]) > limit:
-                groups.append([])
-                size = 0
-            groups[-1].append(pg)
-            size += len(pg["text"])
-        return [{"sec": sec, "pages": [pg["n"] for pg in g], "tries": tries} for g in groups if g]
-
-    layout = partial.get("layout") or []
-    if layout and all(n in by_n for u in layout for n in u["pages"]):
-        units = [dict(u) for u in layout]          # written before an interruption
-        frags: list[str | None] = (list(partial.get("frags") or []) + [None] * len(units))[:len(units)]
-    else:
-        units = [u for si, s in enumerate(secs) for u in group(si, [by_n[n] for n in s["pages"]], chunk_chars)]
-        frags = [None] * len(units)
-
-    def renumber() -> None:
-        for si in range(len(secs)):
-            mine = [u for u in units if u["sec"] == si]
-            for k, u in enumerate(mine):
-                u["part"], u["parts"] = k, len(mine)
-
-    def save() -> None:
-        partial.update(layout=units, frags=frags)
-        p.save("structure_partial", partial)
-
-    def span(nums: list[int]) -> str:
-        return f"{nums[0]}" if len(nums) == 1 else f"{nums[0]}-{nums[-1]}"
-
-    def ask_unit(ui: int) -> str:
-        u = units[ui]
-        s = secs[u["sec"]]
-        upages = [by_n[n] for n in u["pages"]]
-        chunk = "\n\n".join(f"%%% page {pg['n']}\n{pg['text']}" for pg in upages)
-        mine = [fid for pg in upages for _, _, _, fid in find_figures(pg["text"]) if fid]
-        what = f"Section {u['sec'] + 2}, \"{s['title']}\". Items to present, in this order: {', '.join(s['items']) or '(none numbered)'}."
-        cont = ""
-        before = [f for f in frags[:ui] if f]
-        if not u["part"] and before:
-            cont = f"END OF THE PREVIOUS SECTION (written before; do not repeat it)\n{before[-1][-1200:]}\n\n"
-        if u["part"]:
-            so_far = "\n".join(f for f in frags[ui - u["part"]:ui] if f)
-            open_now = paperlib.open_environments(so_far)
-            what += (f" This is part {u['part'] + 1} of {u['parts']} of the section: the heading and the earlier part are "
-                     f"already written. Continue from where they end.")
-            cont = (f"CURRENTLY OPEN: {', '.join(open_now) if open_now else 'nothing'}\n\n"
-                    f"END OF WHAT IS ALREADY WRITTEN\n{so_far[-900:]}\n\n")
-        elif u["parts"] > 1:
-            what += f" This is part 1 of {u['parts']}: write the heading and the material of the pages given; the rest follows later."
-        mine_ns = set(u["pages"])
-        if len(full) <= whole_room:
-            around = f"THE WHOLE OF THE NOTES (for context only; the pages of this section are given again below)\n\n{full}\n\n"
-        else:                                      # too long for one request: the pages just before and after
-            prev = [pg for pg in pages if pg["n"] < min(mine_ns)][-1:]
-            nxt = [pg for pg in pages if pg["n"] > max(mine_ns)][:1]
-            around = "".join(f"{label} (for context only)\n%%% page {pg['n']}\n{fit(pg['text'], 1500, end)}\n\n"
-                             for label, end, lst in (("THE PAGE BEFORE", "tail", prev), ("THE PAGE AFTER", "head", nxt)) for pg in lst)
-        user = (f"DOSSIER\n{dos}\n\nPLAN OF THE PAPER\n{ptext}\n\nINTRODUCTION (already written; do not repeat it)\n{intro_view}\n\n"
-                f"{around}"
-                f"CONFIRMED NOTATION\n{notation}\n\nCITABLE\n{cit}\n\n"
-                f"FIGURES ON THESE PAGES\n" + ("\n".join(f"- {fid}: {figs[fid]['caption']}" for fid in mine if fid in figs) or "(none)")
-                + f"\n\nWRITE THIS SECTION\n{what}\n\n{cont}"
-                f"NOTES FOR THIS SECTION (pages {u['pages'][0]} to {u['pages'][-1]})\n\n{chunk}")
-        key = _unit_key(upages, u)
-        if p.state.get("incremental") and key in write_cache:
-            run.log(f"Pages {span(u['pages'])}: unchanged since the last version, so the text written for them is kept.")
-            return write_cache[key]
-        return run.ask("writer", system, user, max_out=int(est_tokens(chunk) * 1.8) + 1500, effort="high", temperature=0.2,
-                       label=f"Write section {u['sec'] + 2}" + (f", part {u['part'] + 1}" if u["parts"] > 1 else "")
-                       + f" (pages {span(u['pages'])})").text
-
-    write_cache: dict = p.load("write_cache", {}) or {}
-
-    def write_pending() -> None:
-        ui = 0
-        while ui < len(units):
-            if frags[ui] is not None:
-                ui += 1
-                continue
-            renumber()
-            u = units[ui]
-            s = secs[u["sec"]]
-            upages = [by_n[n] for n in u["pages"]]
-            run.progress(1, 3, f"writing section {u['sec'] + 2} of {len(secs) + 1}: {s['title']}"
-                         + (f" (part {u['part'] + 1} of {u['parts']})" if u["parts"] > 1 else ""))
-            raw = ask_unit(ui)
-            first = u["part"] == 0
-            shaped = shape_fragment(raw, s["title"], first, figs, upages)
-            stop = None if u.get("tries", 0) >= 2 else stops_short([by_a[n] for n in u["pages"]], shaped, omitted)
-            if stop is None:
-                frags[ui] = shaped
-                write_cache[_unit_key(upages, u)] = raw
-                p.save("write_cache", dict(list(write_cache.items())[-400:]))
-                ui += 1
-                save()
-                continue
-            k = cut_point(raw, u["pages"], u["pages"].index(stop))
-            rest = upages[k[1]:]
-            tries = u.get("tries", 0) + 1
-            if k[1] > 0:                           # keep what was written, write the rest again in smaller parts
-                units[ui] = {**u, "pages": u["pages"][:k[1]]}
-                frags[ui] = shape_fragment(raw[:k[0]], s["title"], first, figs, upages[:k[1]])
-                new = group(u["sec"], rest, max(1500, chunk_chars // 2), tries)
-                units[ui + 1:ui + 1] = new
-                frags[ui + 1:ui + 1] = [None] * len(new)
-                ui += 1
-            elif len(rest) > 1:                    # nothing usable: the same pages, in two smaller parts
-                new = group(u["sec"], rest, sum(len(pg["text"]) for pg in rest) // 2 + 1, tries)
-                units[ui:ui + 1] = new
-                frags[ui:ui + 1] = [None] * len(new)
-            else:
-                units[ui] = {**u, "tries": tries}
-            run.log(f"The writing of pages {span(u['pages'])} stopped short: the material of page {stop} did not come out. "
-                    f"Pages {span([pg['n'] for pg in rest])} are written again" + (" in smaller parts." if len(rest) > 1 else "."), "warn")
-            save()
-
-    in_units = {n for u in units for n in u["pages"]}
-    for attempt in (0, 1):
-        write_pending()
-        renumber()
-        # c. every formula of the notes must be in the text: compare, and repair where one is missing or changed
-        run.progress(2, 3, "comparing every formula with the notes")
-        report = fidelity.audit(apages, "\n".join(frags), omitted)
-        problems = report["missing"] + report["altered"]
-        todo = [ui for ui, u in enumerate(units) if not u.get("repaired") and any(x["page"] in u["pages"] for x in problems)]
-        if todo:
-            run.log(f"Audit: {len(problems)} formulas missing or altered after writing. Repairing.")
-        sys_r = prompts.REPAIR.format()
-        for ui in todo:
-            u = units[ui]
-            u["repaired"] = True
-            mine = [x for x in problems if x["page"] in u["pages"]]
-            listing = "\n".join(f"- (page {x['page']}) {x['source']}" + (f"   [currently typeset as: {x['found']}]" if x.get("found") else "")
-                                for x in mine[:30])
-            chunk = "\n\n".join(f"%%% page {n}\n{by_n[n]['text']}" for n in u["pages"])
-            user = (f"FORMULAS TO RESTORE EXACTLY\n{listing}\n\nORIGINAL TRANSCRIPT (for position)\n{chunk}\n\n"
-                    f"FRAGMENT TO CORRECT\n{frags[ui]}")
-            try:
-                res = run.ask("reason", sys_r, user, max_out=int(est_tokens(frags[ui]) * 1.3) + 600, paper=True,
-                              label=f"Restore formulas, pages {span(u['pages'])}", temperature=0.0)
-            except LLMError as e:
-                if passing(e):
-                    raise
-                continue
-            cand = shape_fragment(res.text, secs[u["sec"]]["title"], u["part"] == 0, figs, [by_n[n] for n in u["pages"]])
-            trial = frags[:ui] + [cand] + frags[ui + 1:]
-            new_rep = fidelity.audit(apages, "\n".join(trial), omitted)
-            if new_rep["preserved"] > report["preserved"] and repair_is_faithful(frags[ui], cand):
-                frags, report = trial, new_rep
-            elif new_rep["preserved"] > report["preserved"]:
-                run.log(f"The repair of pages {span(u['pages'])} changed more than the formulas, so it was not used.", "warn")
-        save()
-        # d. no later step works on a draft that left out pages of the notes
-        joined = "\n".join(frags)
-        gaps = [n for n in page_gaps(apages, report, page_marks(joined) or None) if n in in_units]
-        if not gaps:
-            break
-        for ui, u in enumerate(units):
-            if set(u["pages"]) & set(gaps):
-                frags[ui] = None
-                units[ui] = {**u, "tries": 1, "repaired": False}
-        save()
-        where = ", ".join(map(str, gaps[:12])) + ("…" if len(gaps) > 12 else "")
-        if attempt:
-            raise ValueError(
-                f"The first draft still leaves out the material of page{'s' if len(gaps) > 1 else ''} {where} of your notes, "
-                "after these pages were written again in smaller parts. The draft is not passed on, so no check or "
-                "question is based on an incomplete paper. Press Continue to write these pages once more; if it happens "
-                "again, open them on the Transcript screen: a page that is hard to read or very long is the usual cause.")
-        run.log(f"After writing, the material of page{'s' if len(gaps) > 1 else ''} {where} is still missing from the draft. "
-                "These parts are written again.", "warn")
-
-    body = "\n\n".join(paperlib.close_open("\n\n".join(f for f, u in zip(frags, units) if u["sec"] == si))
-                       for si in range(len(secs)))
-    blocks = paperlib.parse_body(body)
-    ensure_labels(blocks)
-    report = fidelity.audit(apages, body, omitted)
-    p.save("body", {"blocks": blocks, "organisation": org, "figures": figs})
-    p.save("audit", report)
-    n_res = sum(1 for b in blocks if b["type"] == "env" and b.get("env") in RESULT_KINDS)
-    n_proof = sum(1 for b in blocks if b["type"] == "proof")
-    run.progress(3, 3, "first draft written")
-    run.log(f"First draft: {len(secs)} sections, {n_res} results, {n_proof} proofs, {len(figs)} figure(s).")
-    run.log(f"Fidelity audit: {report['preserved']} of {report['total']} formulas preserved; "
-            f"{len(report['altered'])} altered, {len(report['missing'])} missing, {len(report['added'])} added.",
-            "warn" if report["altered"] or report["missing"] or report["added"] else "info")

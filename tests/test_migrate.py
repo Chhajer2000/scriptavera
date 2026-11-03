@@ -75,7 +75,7 @@ revision.submit_decisions(q, {"simplify": {x["id"]: "reject" for x in dec["simpl
 pipeline.start(q); wait(q, "assemble", ("done",))
 P = q.load("paper")
 assert P["title"] == "Explicit bounds for partial sums of reciprocal powers" and "figures/f1.jpg" in (q.dir / "out" / "main.tex").read_text()
-assert "\\log(n+1) \\]" in (q.dir / "out" / "main.tex").read_text() and (q.dir / "out_before_update" / "main.tex").exists()
+assert "\\log(n+1)" in (q.dir / "out" / "main.tex").read_text() and (q.dir / "out_before_update" / "main.tex").exists()
 print("... and is finished by the new steps:", P["title"])
 
 # ---- 2. earlier projects that were in the middle of something
@@ -87,7 +87,7 @@ for case, statuses, expect in (
         ("waiting at the review", {**{s: done for s in OLD_STAGES[:6]}, "review": {"status": "waiting"}},
          {"transcribe": "done", "figures": "pending", "review": "pending"}),
         ("writing the paper", {**{s: done for s in OLD_STAGES[:7]}, "structure": {"status": "paused", "resume_at": 9e9, "error": "limit"}},
-         {"transcribe": "done", "figures": "pending", "review": "pending", "structure": "pending", "assemble": "pending"})):
+         {"transcribe": "done", "figures": "pending", "review": "pending", "proofs": "pending", "assemble": "pending"})):
     r = new_project()
     age(r, statuses, with_paper=False)
     got = {k: v.get("status") for k, v in store.get(r.id).state["stages"].items()}

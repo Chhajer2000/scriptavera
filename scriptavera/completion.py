@@ -328,10 +328,11 @@ def environment(p: Project, blocks: list[dict], units: list[dict]) -> dict:
 def sketched(p: Project, units: list[dict]) -> list[dict]:
     """The results whose proof the assessment of the notes calls a sketch, and that have a proof in the draft."""
     res = (p.load("assessment") or {}).get("results") or {}
+    written = (p.load("proofs") or {}).get("items") or {}     # written in full from the notes, and checked, at the Proofs step
     out = []
     for u in units:
         rid = u["label"].split(":", 1)[-1]
-        if u["proof"] and (res.get(rid) or {}).get("proof") in KINDS:
+        if u["proof"] and rid not in written and (res.get(rid) or {}).get("proof") in KINDS:
             out.append(u)
     return out
 

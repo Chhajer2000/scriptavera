@@ -62,16 +62,44 @@ def new_project(meta: dict | None = None, pages: int = 6):
     return store.create({**base, **(meta or {})}, pgs, pid)
 
 
+AUTO_GATES = ("scope", "outline", "proofcheck", "draftcheck")
+
+
+def pass_gate(p, sid: str) -> None:
+    """The author's part of a writing step done the simplest way: statements as written, the structure as planned,
+    proofs as written (a doubtful one kept), the first draft as it is."""
+    from scriptavera import drafting, pipeline, writing
+    if sid == "scope":
+        writing.submit_scope(p, {"kind": (p.load("statements") or {}).get("kind") or "article"})
+    elif sid == "outline":
+        drafting.submit_outline(p)
+    elif sid == "proofcheck":
+        for iid in drafting.open_proof_problems(p):
+            drafting.decide_proof(p, iid, "keep")
+        drafting.submit_proofs(p)
+    elif sid == "draftcheck":
+        drafting.submit_draft(p, {})
+    pipeline.start(p)
+
+
 def wait(p, target: str, statuses=("waiting", "done"), seconds: float = 180):
     """Wait until the stage has one of the statuses and nothing is running. A stopped run is a failure unless
-    'error' or 'paused' is among the statuses asked for."""
-    from scriptavera import pipeline
+    'error' or 'paused' is among the statuses asked for. The author's stops in the writing of the paper that come
+    before the target are passed the simplest way (pass_gate), so that a test of a later step need not answer them."""
+    from scriptavera import pipeline, store
     t0 = time.time()
     while time.time() - t0 < seconds:
         st = p.state
         s = st["stages"][target].get("status")
         if s in statuses and not pipeline.is_running(p.id):
             return st["stages"][target]
+        if not pipeline.is_running(p.id):
+            g = next((g for g in AUTO_GATES if g != target and st["stages"].get(g, {}).get("status") == "waiting"
+                      and not st["stages"][g].get("stopped") and store.STAGE_IDS.index(g) < store.STAGE_IDS.index(target)), None)
+            if g:
+                pass_gate(p, g)
+                time.sleep(0.05)
+                continue
         bad = next((x for x in st["stages"].values() if x.get("status") in ("error", "paused")), None)
         if bad and bad.get("status") not in statuses and not pipeline.is_running(p.id):
             trace = (p.dir / "last_error.txt").read_text() if (p.dir / "last_error.txt").exists() else ""
