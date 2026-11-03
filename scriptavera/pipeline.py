@@ -335,6 +335,41 @@ def _page_bytes(p: Project, n: int) -> bytes:
     return (p.dir / "pages" / f"p{n:03d}.jpg").read_bytes()
 
 
+def _workers(run: Run, role: str, vision: bool, jobs: int) -> int:
+    """How many requests of one step go out together: as many per key as the setting parallel_pages (2 unless
+    changed), for every key that can do the job with its best model; never more than 8 or than there are jobs."""
+    per_key = max(1, min(4, int(run.settings.get("parallel_pages", 2))))
+    try:
+        lanes = router.lanes(role, vision)
+    except Exception:  # noqa: BLE001 - when the keys cannot be counted, one key is assumed
+        lanes = 1
+    return max(1, min(jobs, 8, per_key * lanes))
+
+
+def _side_by_side(run: Run, role: str, vision: bool, items: list, work) -> list:
+    """work(item) for items that do not depend on each other, several at a time. Each request is exactly the one
+    that would be sent if they went one by one: only the waiting is shared. The results come back in the order of
+    the items. Every item is tried; then the first failure is raised (a stop asked for by the author first)."""
+    if not items:
+        return []
+    results: list = [None] * len(items)
+    errors: list[tuple[int, BaseException]] = []
+    with ThreadPoolExecutor(max_workers=_workers(run, role, vision, len(items))) as ex:
+        futs = {ex.submit(contextvars.copy_context().run, work, it): i for i, it in enumerate(items)}   # the same owner's keys
+        for f in as_completed(futs):
+            try:
+                results[futs[f]] = f.result()
+            except BaseException as e:  # noqa: BLE001 - raised below, once every item has been tried
+                errors.append((futs[f], e))
+                if isinstance(e, Cancelled):
+                    for g in futs:
+                        g.cancel()              # stopped by the author: what has not started is not started
+    if errors:
+        errors.sort(key=lambda x: x[0])
+        raise next((e for _, e in errors if isinstance(e, Cancelled)), errors[0][1])
+    return results
+
+
 def exact_layers(p: Project) -> dict:
     """The text layers of the pages whose text a computer drew (ingest.py): their words are exact. A hidden reading
     of handwriting that a tablet or OCR put in the PDF is never given to the readers as exact."""
@@ -493,33 +528,36 @@ def stage_scout(run: Run) -> None:
         prev_conf = float(topic.get("confidence", 0)) if topic else None
         rounds += 1
         typed_src = (p.load("typed") or {}).get("pages", {})
-        for n in todo:
-            run.check()
+        lock = threading.Lock()
+
+        def look(n: int) -> None:
             if str(n) in typed_src or str(n) in layers:   # typed notes, or a PDF's text layer: the words are known
                 src = typed_src.get(str(n)) or layers[str(n)]
-                scout[str(n)] = {"kind": "content", "prose": fit(re.sub(r"\$[^$]*\$|\\\[.*?\\\]", " ", src, flags=re.S), 2500, "head"),
-                                 "printed": "", "terms": [], "names": [],
-                                 "model": "typed source" if str(n) in typed_src else "text layer of the PDF"}
+                rec = {"kind": "content", "prose": fit(re.sub(r"\$[^$]*\$|\\\[.*?\\\]", " ", src, flags=re.S), 2500, "head"),
+                       "printed": "", "terms": [], "names": [],
+                       "model": "typed source" if str(n) in typed_src else "text layer of the PDF"}
+            else:
+                res = run.ask("vision_fast", system, f"This is page {n} of {len(p.state['pages'])}.",
+                              images=[_page_bytes(p, n)], max_out=1400, effort="low", label=f"Scout page {n}")
+                printed = extract_tag(res.text, "printed")
+                kind = _kind(res.text, extract_tag(res.text, "prose") + "\n"
+                             + ("" if printed.strip().lower() in ("", "none", "(none)") else "$" + printed))
+                rec = {
+                    "kind": kind, "prose": extract_tag(res.text, "prose"),
+                    "printed": extract_tag(res.text, "printed"),
+                    "terms": parse_list(extract_tag(res.text, "terms")),
+                    "names": parse_list(extract_tag(res.text, "names")), "model": res.model,
+                }
+                if rec["printed"].lower() in ("none", "(none)"):
+                    rec["printed"] = ""
+            with lock:
+                scout[str(n)] = rec
                 p.save("scout", scout)
+                if rec["kind"] in ("blank", "cover"):
+                    _mark_page(p, n, rec["kind"])
                 run.progress(len(scout), total, f"page {n} read")
-                continue
-            res = run.ask("vision_fast", system, f"This is page {n} of {len(p.state['pages'])}.",
-                          images=[_page_bytes(p, n)], max_out=1400, effort="low", label=f"Scout page {n}")
-            printed = extract_tag(res.text, "printed")
-            kind = _kind(res.text, extract_tag(res.text, "prose") + "\n"
-                         + ("" if printed.strip().lower() in ("", "none", "(none)") else "$" + printed))
-            scout[str(n)] = {
-                "kind": kind, "prose": extract_tag(res.text, "prose"),
-                "printed": extract_tag(res.text, "printed"),
-                "terms": parse_list(extract_tag(res.text, "terms")),
-                "names": parse_list(extract_tag(res.text, "names")), "model": res.model,
-            }
-            if scout[str(n)]["printed"].lower() in ("none", "(none)"):
-                scout[str(n)]["printed"] = ""
-            p.save("scout", scout)
-            if kind in ("blank", "cover"):
-                _mark_page(p, n, kind)
-            run.progress(len(scout), total, f"page {n} read")
+
+        _side_by_side(run, "vision_fast", True, todo, look)    # the pages of one round do not depend on each other
         topic = _make_topic(run, scout)
         topic["pages_read"] = sorted(int(k) for k in scout)
         p.save("topic", topic)
@@ -854,7 +892,7 @@ def stage_survey(run: Run) -> None:
                 _mark_page(p, n, kind)
             run.progress(len(survey), total, f"page {n} surveyed")
 
-    workers = max(1, min(4, int(run.settings.get("parallel_pages", 2))))
+    workers = _workers(run, "vision_best", True, len(todo))     # more keys, more pages at a time
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(contextvars.copy_context().run, work, n): n for n in todo}     # the same owner's keys
         for f in as_completed(futs):
@@ -1066,6 +1104,7 @@ def _build_glossary(run: Run, survey: dict) -> None:
     entries: list[dict] = []
     questions: list[dict] = []
     by_loose = {_loose(it["symbol"]): it for it in ordered}
+    asks = []
     for start in range(0, len(ordered), per):
         chunk = ordered[start:start + per]
         lines = []
@@ -1078,7 +1117,10 @@ def _build_glossary(run: Run, survey: dict) -> None:
             lines.append(line)
         user = ("Items collected from the notes:\n" + "\n".join(lines)
                 + "\n\nRelated papers found (use them for conventions; cite by KEY in 'basis'):\n" + (lit or "(none found)"))
-        res = run.ask("reason", system, user, max_out=2600, label=f"Resolve notation ({start + 1}-{start + len(chunk)})")
+        asks.append((user, f"Resolve notation ({start + 1}-{start + len(chunk)})"))
+    answers = _side_by_side(run, "reason", False, asks,           # the parts do not depend on each other
+                            lambda a: run.ask("reason", system, a[0], max_out=2600, label=a[1]))
+    for res in answers:
         for rec in parse_records(res.text, "entry"):
             sym = rec.get("symbol", "").strip().strip("$")
             if not sym:
@@ -1196,36 +1238,48 @@ def stage_reading(run: Run) -> None:
     reading = ranked[:max(top_k, sum(1 for x in ranked if x.get("pinned")))]
     system = prompts.READER.format(field=run.field, problem=problem, notation=fit(notation, 1200, "head"))
     room = min(150_000, _room("reader", system, 1500))
-    for i, pp in enumerate(reading, 1):
+    todo = [pp for pp in reading if not (pp.get("read") and pp.get("notes"))]
+    lock = threading.Lock()
+    done = [len(reading) - len(todo)]
+    if todo:
+        run.progress(done[0], len(reading), f"reading {plural(len(todo), 'paper')}, "
+                     f"{_workers(run, 'reader', False, len(todo))} at a time")
+
+    def read(pp: dict) -> None:
+        """One paper, read whole in one request. No paper's reading uses another's: the brief that brings them
+        together is written once all of them are read."""
         run.check()
-        if pp.get("read") and pp.get("notes"):
-            continue
-        run.progress(i - 1, len(reading), f"reading: {pp['title'][:60]}")
         try:
             text, how = literature.fetch_fulltext(pp)
         except Exception:  # noqa: BLE001
             text, how = pp.get("abstract") or "", "abstract only"
         if not text.strip():
-            pp["read"], pp["fulltext"], pp["verdict"] = True, "no text available", "unknown"
-            pp["notes"] = {"summary": "No abstract or full text could be retrieved.", "results": [], "notation": [],
-                           "relation": "", "citable": []}
-            p.save("library", library)
-            continue
+            with lock:
+                pp["read"], pp["fulltext"], pp["verdict"] = True, "no text available", "unknown"
+                pp["notes"] = {"summary": "No abstract or full text could be retrieved.", "results": [], "notation": [],
+                               "relation": "", "citable": []}
+                p.save("library", library)
+            return
         authors = ", ".join((a.get("given", "") + " " + a.get("family", "")).strip() for a in pp.get("authors", [])[:5])
         user = (f"PAPER [{pp['key']}]: {pp['title']}\nAuthors: {authors}\nYear: {pp.get('year')}\n"
                 f"Text available: {how}\n\n{fit(text, room, 'head')}")
         res = run.ask("reader", system, user, max_out=1500, label=f"Read {pp['key']}", effort="low")
         verdict = extract_tag(res.text, "verdict", "related").lower()
-        pp["verdict"] = next((v for v in ("irrelevant", "core", "related", "background") if v in verdict), "related")
-        pp["notes"] = {
-            "summary": extract_tag(res.text, "summary"), "results": parse_lines(extract_tag(res.text, "results")),
-            "notation": parse_lines(extract_tag(res.text, "notation")), "relation": extract_tag(res.text, "relation"),
-            "citable": parse_lines(extract_tag(res.text, "citable")),
-        }
-        pp["read"], pp["fulltext"] = True, how
-        p.save("library", library)
-        run.log(f"Read [{pp['key']}] ({how}): {pp['verdict']}")
-        run.changed()
+        with lock:
+            pp["verdict"] = next((v for v in ("irrelevant", "core", "related", "background") if v in verdict), "related")
+            pp["notes"] = {
+                "summary": extract_tag(res.text, "summary"), "results": parse_lines(extract_tag(res.text, "results")),
+                "notation": parse_lines(extract_tag(res.text, "notation")), "relation": extract_tag(res.text, "relation"),
+                "citable": parse_lines(extract_tag(res.text, "citable")),
+            }
+            pp["read"], pp["fulltext"] = True, how
+            p.save("library", library)
+            done[0] += 1
+            run.log(f"Read [{pp['key']}] ({how}): {pp['verdict']}")
+            run.progress(done[0], len(reading), f"read: {pp['title'][:60]}")
+            run.changed()
+
+    _side_by_side(run, "reader", False, todo, read)
     run.progress(len(reading), len(reading), "papers read")
 
     # 4d. one brief that every later stage shares
@@ -1703,6 +1757,18 @@ def visible_doubts(p: Project) -> tuple[dict | None, list | None, int]:
     return tr, flags, hidden
 
 
+def _next_draft(pages: list[dict], i: int, survey: dict, typed_src: dict) -> str:
+    """The first lines of the page after page i (1-based), as the notation survey drafted it: a sentence or formula
+    that runs over the page break is then read with its continuation in view. Pages are still transcribed in order,
+    each with the end of the one before as transcribed."""
+    if i >= len(pages):
+        return "(this is the last page)"
+    n = str(pages[i]["n"])
+    text = typed_src.get(n) or (survey.get(n) or {}).get("text", "")
+    text = re.sub(r"\[(?:FIGURE|MARGIN)[^\]]*\]", " ", text or "").strip()
+    return fit(text, 350, "head") if text else "(not available)"
+
+
 def stage_transcribe(run: Run) -> None:
     p = run.p
     pages = _content_pages(p)
@@ -1741,6 +1807,7 @@ def stage_transcribe(run: Run) -> None:
         user = (f"This is page {n} of {len(p.state['pages'])}.\n\nCONFIRMED NOTATION\n{notation_text(conf, share)}\n\n"
                 f"RESEARCH CONTEXT\n{fit(brief, share, 'head') or '(none)'}\n\n"
                 f"END OF THE PREVIOUS PAGE\n{prev_tail or '(this is the first page)'}\n\n"
+                f"START OF THE NEXT PAGE (from its draft; it may contain misread symbols)\n{_next_draft(pages, i, survey, typed_src)}\n\n"
                 f"DRAFT TRANSCRIPTION OF THIS PAGE (may contain misread symbols)\n{fit(draft, max(1500, room - 2 * share - 400), 'head') or '(no draft)'}")
         if hand:
             user += "\n\n" + hand
@@ -2027,11 +2094,19 @@ def stage_figures(run: Run) -> None:
                                                    " (the transcription marked it twice), so it is printed once.")
     _save_figures(p, items)
     todo = [f for f in todo if not f.get("dup")]
-    for i, rec in enumerate(todo, 1):
+    lock, drawn = threading.Lock(), [0]
+    if todo:
+        run.progress(0, len(todo), f"drawing {plural(len(todo), 'figure')}")
+
+    def draw(rec: dict) -> None:                 # each drawing is redrawn from its own page alone
         run.check()
-        run.progress(i - 1, len(todo), f"drawing the figure on page {rec['page']}")
         _draw_figure(p, rec, run.ask, conf)
-        _save_figures(p, items)
+        with lock:
+            drawn[0] += 1
+            _save_figures(p, items)
+            run.progress(drawn[0], len(todo), f"figure on page {rec['page']} drawn")
+
+    _side_by_side(run, "vision_best", True, todo, draw)
     _save_figures(p, items)
     run.progress(len(todo), len(todo), "figures ready")
     explained = [f for f in items if f.get("choice") == "explain" and f.get("auto")]
@@ -2051,7 +2126,9 @@ def _locate_figures(run: Run, items: list[dict], todo: list[dict]) -> None:
     from . import figflow
     p = run.p
     pages = sorted({f["page"] for f in todo if not f.get("pbox")})
-    for n in pages:
+    lock = threading.Lock()
+
+    def find(n: int) -> None:                    # each page is looked at alone, for all its drawings at once
         run.check()
         recs = [f for f in items if f["page"] == n]
         try:
@@ -2060,7 +2137,10 @@ def _locate_figures(run: Run, items: list[dict], todo: list[dict]) -> None:
             raise
         except Exception:  # noqa: BLE001 - each figure is then found when it is drawn
             traceback.print_exc()
-        _save_figures(p, items)
+        with lock:
+            _save_figures(p, items)
+
+    _side_by_side(run, "vision_best", True, pages, find)
 
 
 def plural(n: int, word: str) -> str:

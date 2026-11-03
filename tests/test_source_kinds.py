@@ -3,7 +3,7 @@
 """What was uploaded decides the steps. Handwritten notes go through every step; a PDF made on a computer is read
 with its exact words, and the author is asked only about its figures ("Your figures", passed when no figure needs a
 decision); typed notes need no transcription, no figures and no check. The scout reads at least five pages (all of
-them if there are fewer) and reads on until the topic is 85% clear."""
+them if there are fewer), then one page at a time while the topic's confidence still rises (stopping at 95%)."""
 import json
 from helpers import answers, isolate, new_project, wait
 isolate("scriptavera_kinds_")
@@ -28,10 +28,9 @@ p = new_project(pages=14)
 assert store.source_plan(p.state, p.dir) == {"kind": "handwritten", "label": "Handwritten or scanned notes", "hidden": [], "names": {}}
 pipeline.start(p); wait(p, "topiccheck")
 read = [c["label"] for c in p.calls(1000) if c.get("label", "").startswith("Scout page")]
-assert len(read) == 5 + 4 + 4, read                       # 5 first; 60% and 80% are not enough; 90% after 13 pages
-assert p.load("topic")["confidence"] == 0.9
-logs = (p.dir / "log.jsonl").read_text(encoding="utf-8") if (p.dir / "log.jsonl").exists() else ""
-print("1. the scout read 5 pages, then 4 more twice, until the topic was 90% clear (85% is needed)")
+# 5 first (60%), then one page at a time: 80%, 90% (above 85%, still gaining), then 85% (no gain): stop
+assert len(read) == 5 + 3, read
+print("1. the scout read 5 pages, then one at a time while the confidence still rose, and stopped when it no longer did")
 
 conf[:] = [0.95]
 q = new_project(pages=3)

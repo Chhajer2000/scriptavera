@@ -267,6 +267,7 @@ class Model:
     tok_reset_at: float = 0.0
     strikes: int = 0
     note: str = ""
+    in_flight: int = 0           # requests sent on this key and model and not yet answered
 
     @property
     def ref(self) -> str:
@@ -697,6 +698,31 @@ class Router:
         rest = sorted([m for m in avail if not fits_in(m)], key=lambda m: -m.req_tokens)
         return fits + rest
 
+    def lanes(self, role: str, vision: bool = False) -> int:
+        """How many keys can do this job with its best model: requests for it can be spread over that many keys.
+        (Keys made in the same Google Cloud project share one quota; that the app cannot see, and a key that runs
+        out simply rests while the others carry on.)"""
+        top = self.peers(role, vision)
+        if not top:
+            return 1
+        best = (top[0].provider, top[0].id)
+        return max(1, len({m.key_index for m in top if (m.provider, m.id) == best}))
+
+    def _take(self, cands: list[Model], tried: set[int]) -> Model | None:
+        """The next model to ask, reserved at once so that requests started together are spread. The order of the
+        models is never changed: only between keys of one and the same model is the least busy taken first, so
+        spreading the work never puts a job on a weaker model."""
+        with self._lock:
+            rest = [m for m in cands if id(m) not in tried]
+            if not rest:
+                return None
+            first = {}
+            for i, m in enumerate(rest):
+                first.setdefault((m.provider, m.id), i)
+            m = min(rest, key=lambda x: (first[(x.provider, x.id)], x.in_flight, x.last_call))
+            m.in_flight += 1
+            return m
+
     def budget(self, role: str, vision: bool = False) -> int:
         """Tokens one request may use with the model that will do this job."""
         c = self.candidates(role, 0, vision) or self.peers(role, vision)
@@ -752,11 +778,12 @@ class Router:
         errors: list[str] = []
         tried: set[int] = set()
         for _round in range(4):
-            for m in cands:
+            while True:
                 if hooks.cancelled():
                     raise Cancelled()
-                if id(m) in tried:
-                    continue
+                m = self._take(cands, tried)
+                if m is None:
+                    break
                 tried.add(id(m))
                 try:
                     res = self._call_model(m, role, system, user, images, json_mode, max_out, temperature, effort, label, hooks,
@@ -765,6 +792,9 @@ class Router:
                     errors.append(f"{m.ref}: {e}")
                     hooks.on_call({"role": role, "label": label, "provider": m.provider, "model": m.id, "ok": False, "note": str(e)})
                     continue
+                finally:
+                    with self._lock:
+                        m.in_flight -= 1
                 if res.truncated and allow_continue and not json_mode:
                     res = self._continue(m, role, system, user, images, res, max_out, temperature, label, hooks)
                 return res

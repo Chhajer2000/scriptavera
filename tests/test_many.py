@@ -11,8 +11,7 @@ from scriptavera import pipeline, store
 
 a, b = new_project({"name": "First notes"}), new_project({"name": "Second notes"})
 pipeline.start(a); pipeline.start(b)
-time.sleep(0.3)
-assert pipeline.is_running(a.id) and pipeline.is_running(b.id), "two papers run at the same time"
+assert pipeline.is_running(a.id) and pipeline.is_running(b.id), "two papers run at the same time"   # (pages are read side by side: checked at once)
 wait(a, "topiccheck"); wait(b, "topiccheck")
 rows = {x["id"]: x for x in store.list_projects()}
 assert rows[a.id]["waiting"] == "topiccheck" and rows[b.id]["waiting"] == "topiccheck"
