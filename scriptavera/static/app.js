@@ -335,9 +335,10 @@ function connect(pid) {
       drawLog();
       if (e.level === "error" || e.level === "gate" || e.level === "done") refreshSoon(150);
     } else if (e.type === "progress") {
-      if (S.b && S.b.state.stages[e.stage]) S.b.state.stages[e.stage].progress = { done: e.done, total: e.total, note: e.note };
-      const pm = /page (\d+)/.exec(e.note || "");
-      if (pm) markPage(parseInt(pm[1], 10));
+      if (S.b && S.b.state.stages[e.stage]) S.b.state.stages[e.stage].progress = { done: e.done, total: e.total, note: e.note, more: e.more || 0 };
+      /* a page is ticked only on the strip of the step that has just finished reading it */
+      const pm = /^page (\d+) (?:read|surveyed|transcribed|taken from)/.exec(e.note || "");
+      if (pm) markPage(parseInt(pm[1], 10), e.stage);
       drawProgress(e.stage);
     } else if (e.type === "state") {
       refreshSoon(120);
@@ -350,7 +351,7 @@ function connect(pid) {
     }
   };
 }
-function markPage(n) { const el = $(`.strip .pg[data-n="${n}"]`); if (el) el.classList.add("read"); }
+function markPage(n, stage) { const el = $(`.strip[data-kind="${stage}"] .pg[data-n="${n}"]`); if (el) el.classList.add("read"); }
 
 async function openProject(pid, view) {
   S.pid = pid; S.b = null; S.gate = null; S.review = null; S.decide = null; S.jr = null; S.edit = null; S.tab = "paper";
@@ -943,7 +944,7 @@ function pageStrip(kind) {
   const pages = S.b.state.pages;
   const done = new Set(kind === "scout" ? S.b.scouted : Object.keys((kind === "transcribe" || kind === "review") ? ((S.b.transcript || {}).pages || {}) : (S.b.survey || {})).map(Number));
   const tr = (S.b.transcript || {}).pages || {};
-  return `<div class="strip">` + pages.map((p) => {
+  return `<div class="strip" data-kind="${kind === "review" ? "transcribe" : kind}">` + pages.map((p) => {
     const flag = (kind === "transcribe" || kind === "review") && tr[p.n] && tr[p.n].uncertain.length;
     const cls = p.skip ? "skip" : (flag ? "flag" : (done.has(p.n) ? "read" : ""));
     const title = p.skip ? `Page ${p.n}: skipped (${p.kind || "excluded"})` : `Page ${p.n}`;
@@ -1015,10 +1016,15 @@ function callsTable(stage, limit) {
       <td>${esc(c.model || "")}</td><td class="num">${c.in ?? ""}</td><td class="num">${c.out ?? ""}</td><td class="num">${c.seconds ?? ""}</td></tr>`).join("") + `</tbody></table>`;
 }
 function drawCalls() { const el = $("#calls"); if (el) el.innerHTML = callsTable(el.dataset.stage, 12); }
+function barPct(p) {
+  /* done of total, with the parts still to come after them (more) counted: the bar is full only when the step is */
+  if (!p || !p.total) return 0;
+  return Math.round(100 * p.done / (p.total + (p.more || 0)));
+}
 function drawProgress(stage) {
   if (S.view !== stage) { const n = $(`.step.running .step-note`); const p = st(stage).progress; if (n && p) n.textContent = p.note || ""; return; }
   const p = st(stage).progress; const bar = $("#bar > i"); const note = $("#barnote");
-  if (p && bar) bar.style.width = (p.total ? Math.round(100 * p.done / p.total) : 0) + "%";
+  if (p && bar) bar.style.width = barPct(p) + "%";
   if (p && note) note.textContent = `${p.note || ""}${p.total ? ` (${p.done} of ${p.total})` : ""}`;
   const n = $(`.step.running .step-note`); if (n && p) n.textContent = p.note || "";
 }
@@ -1302,7 +1308,7 @@ function viewStage(id) {
   }
   h += `<div class="sheet"><div class="sec"><div class="row"><span class="chip ${x.status === "done" ? "green" : (x.status === "error" ? "red" : (x.status === "paused" ? "hl" : (x.status === "running" ? "blue" : "")))}">${status}</span>
     ${x.model ? `<span class="muted small">Model: ${esc(x.model)}</span>` : (plan && plan.primary ? `<span class="muted small">Will use ${esc(plan.primary)} (${esc(plan.name)})${plan.strict ? "; never a weaker model" : ""}</span>` : "")}</div>
-    ${x.status === "running" || p ? `<div class="bar" id="bar"><i style="width:${p && p.total ? Math.round(100 * p.done / p.total) : 0}%"></i></div>
+    ${x.status === "running" || p ? `<div class="bar" id="bar"><i style="width:${barPct(p)}%"></i></div>
       <div class="muted small" id="barnote">${p ? esc(p.note || "") + (p.total ? ` (${p.done} of ${p.total})` : "") : ""}</div>` : ""}</div>`;
   h += stageBody(id);
   h += `<div class="sec"><h2>Who did what</h2><p>Each AI call in this step, newest first.</p><div id="calls" data-stage="${id}">${callsTable(id, 12)}</div>
@@ -1433,7 +1439,10 @@ function viewConfirm() {
 function initReview() {
   let wide = true; try { wide = localStorage.getItem("scriptavera-rv-wide") !== "0"; } catch (e) { /* ignore */ }
   S.review = { pid: S.pid, n: reviewPages()[0] || 1, zoom: 1, mode: "page", dropped: {}, skip: {}, own: {}, figBusy: "",
-    figMode: "", watch: [], local: [], edit: 0, link: false, wide, draft: {}, conf: {}, quiet: {}, cache: {}, busy: {}, fresh: 0 };
+    figMode: "", watch: [], local: [], edit: 0, link: false, wide, draft: {}, conf: {}, quiet: {}, cache: {}, busy: {}, fresh: 0,
+    layout: null, layoutBusy: {}, layoutAsked: {}, layoutTimer: {}, plain: false };
+  try { S.review.plain = localStorage.getItem("scriptavera-rv-plain") === "1"; } catch (e) { /* ignore */ }
+  ensureLayout(0);
   const first = openItems()[0]; if (first) S.review.n = first.n;
 }
 function pageNotes() {
@@ -1547,14 +1556,11 @@ function bareLatex(s, put) {
 function tidyBare(text, put) {
   return String(text).split(/(\$\$[\s\S]+?\$\$|\$[^$\n]+?\$)/g).map((part, j) => j % 2 ? part : bareLatex(part, put)).join("");
 }
-function pageTextHtml(n) {
-  /* One page as it was read, with its doubtful passages highlighted and its drawings in place. Kept until the page,
-     its doubts or its drawings change, so that the whole transcript is not typeset again at every click. */
-  const R = S.review, text = String(S.b.transcript.pages[n].text || ""), marks = reviewFlags(n).map((f) => f.snippet);
-  const key = JSON.stringify([text, marks, (S.b.figures || []).filter((f) => f.page === n).map((f) => [f.k, f.choice, f.drawn, f.tikz_ok, f.box])]);
-  if (R.cache[n] && R.cache[n].key === key) return R.cache[n].html;
+function renderPiece(n, text, marks, k0) {
+  /* Text of a page, or of one piece of it, as it prints: formulas typeset, doubtful passages highlighted, and the
+     drawings, counted from the k0-th of the page, in place. */
   const figs = [], re = /\[FIGURE(?:\s+f\d+)?\s*:/g;
-  let out = "", pos = 0, m, k = 0;
+  let out = "", pos = 0, m, k = k0 || 0;
   while ((m = re.exec(text))) {
     let depth = 1, j = m.index + m[0].length;
     while (j < text.length && depth) { if (text[j] === "[") depth++; else if (text[j] === "]") depth--; j++; }
@@ -1566,6 +1572,82 @@ function pageTextHtml(n) {
   const toks = [], put = (h) => { toks.push(h); return `\u0004${toks.length - 1}\u0004`; };
   let html = mixed(tidyBare(out + text.slice(pos), put), marks).replace(/\u0003(\d+)\u0003/g, (m0, i) => figs[+i] || "");
   for (let r = 0; r < 4 && html.includes("\u0004"); r++) html = html.replace(/\u0004(\d+)\u0004/g, (m0, i) => toks[+i] || "");
+  return html;
+}
+function layoutFor(n) {
+  /* Where the lines of page n stand on the handwritten page (layout.py), when it fits the page as it reads now. */
+  const R = S.review, L = (R.layout || {})[n], rec = S.b.transcript.pages[n];
+  if (R.plain || !L || !L.ok || !rec) return null;
+  if (L.text !== rec.text) {                  /* the page changed: placed again once it is saved, plain meanwhile */
+    if (R.layoutAsked[n] !== rec.text) {
+      R.layoutAsked[n] = rec.text; clearTimeout(R.layoutTimer[n]);
+      R.layoutTimer[n] = setTimeout(() => ensureLayout(n), 1500);
+    }
+    return null;
+  }
+  return L;
+}
+async function ensureLayout(n) {
+  const R = S.review;
+  if (!R || R.layoutBusy[n]) return;
+  R.layoutBusy[n] = true;
+  try {
+    const r = await api(`/api/projects/${S.pid}/layout` + (n ? `?page=${n}` : ""));
+    if (S.review !== R) return;
+    R.layout = { ...(R.layout || {}), ...r.pages };
+    R.cache = {}; render();
+  } catch (e) { /* the plain view stays */ }
+  finally { delete R.layoutBusy[n]; }
+}
+function leadBold(text, lead) {
+  /* the words at the start of a line that the author highlighted ("Def", "Example", "Theorem"), in bold */
+  const words = text.split(/(\s+)/), want = lead * text.length;
+  let i = 0, len = 0;
+  while (i < words.length && len < want - 1 && !/[$\\[\]{}]/.test(words[i])) { len += words[i].length; i++; }   /* never into a formula */
+  const head = words.slice(0, i).join("").trimEnd(), rest = text.slice(head.length);
+  return head && rest.trim() ? `\\textbf{${head}}${rest}` : text;
+}
+function layoutHtml(n, L, marks) {
+  /* The page laid out as written: the pieces that stand side by side in one row, each row as far below the last
+     as on the page, each piece where it starts on the line. Positions are approximate: handwriting is not straight. */
+  const med = L.med || 0.022;
+  let k = 0;
+  const its = L.items.map((it, i) => ({ ...it, i, k: it.kind === "figure" ? k++ : -1 }));
+  const rows = [];
+  for (const it of [...its].sort((a, b) => (a.y + a.h / 2) - (b.y + b.h / 2) || a.x - b.x)) {
+    const r = rows[rows.length - 1], cy = it.y + it.h / 2;
+    if (r && it.kind !== "figure" && !r.fig && Math.abs(cy - r.cy) < 0.6 * Math.max(med, Math.min(it.h, r.h) / 2)) {
+      r.items.push(it); r.bottom = Math.max(r.bottom, it.y + it.h);
+    } else rows.push({ items: [it], cy, h: it.h, top: it.y, bottom: it.y + it.h, fig: it.kind === "figure" });
+  }
+  let html = "", prev = 0;
+  for (const r of rows) {
+    r.items.sort((a, b) => a.x - b.x);
+    const mt = Math.max(0, Math.min(4.5, (r.top - prev) * 40)).toFixed(2);   /* the space above, as on the page */
+    prev = Math.max(prev, r.bottom);
+    const centred = r.items.length === 1 && r.items[0].center;      /* a title written in the middle stays in the middle */
+    const xs = r.items.map((it) => Math.max(0, Math.min(0.85, it.x)));
+    const cols = [`${(xs[0] * 100).toFixed(1)}%`];
+    for (let q = 1; q < xs.length; q++) cols.push(`minmax(min-content, ${Math.max(4, (xs[q] - xs[q - 1]) * 100).toFixed(1)}%)`);
+    cols.push("minmax(0, 1fr)");
+    html += `<div class="lrow${centred ? " lcenter" : ""}" style="margin-top:${mt}em;grid-template-columns:${centred ? "minmax(0, 1fr)" : cols.join(" ")}">`
+      + r.items.map((it, q) => {
+        const text = it.kind === "line" && it.lead ? leadBold(it.t, it.lead) : it.t;
+        const cls = `li ${it.head ? "lhead" : ""} ${it.big ? "ltitle" : ""} ${it.ul ? "lul" : ""} ${it.placed ? "" : "unplaced"} k-${it.kind}`;
+        return `<div class="${cls}" id="li-${n}-${it.i}" style="grid-column:${centred ? 1 : q + 2}" data-x="${it.x}" data-y="${it.y}" data-w="${it.w}" data-h="${it.h}">${renderPiece(n, text, marks, Math.max(0, it.k))}</div>`;
+      }).join("") + `</div>`;
+  }
+  return html;
+}
+function pageTextHtml(n) {
+  /* One page as it was read, with its doubtful passages highlighted and its drawings in place: laid out as on the
+     handwritten page when its lines could be placed, otherwise line after line. Kept until the page, its doubts, its
+     drawings or the layout change, so that the whole transcript is not typeset again at every click. */
+  const R = S.review, text = String(S.b.transcript.pages[n].text || ""), marks = reviewFlags(n).map((f) => f.snippet);
+  const L = layoutFor(n);
+  const key = JSON.stringify([text, marks, !!L, L && L.items.length, (S.b.figures || []).filter((f) => f.page === n).map((f) => [f.k, f.choice, f.drawn, f.tikz_ok, f.box])]);
+  if (R.cache[n] && R.cache[n].key === key) return R.cache[n].html;
+  const html = L ? `<div class="laid">${layoutHtml(n, L, marks)}</div>` : renderPiece(n, text, marks, 0);
   R.cache[n] = { key, html };
   return html;
 }
@@ -1745,7 +1827,11 @@ function answerFlag(f, value, how) {
   S.review.dropped[f.key] = true; delete S.review.own[f.key];
   const ans = { page: n, snippet: f.snippet, alt: f.alt || "", how, value: v, issue: f.issue || "" };
   S.review.local.push(ans);
-  api(`/api/projects/${S.pid}/doubt`, { method: "POST", body: ans }).catch((e) => toast(e.message, true));
+  api(`/api/projects/${S.pid}/doubt`, { method: "POST", body: ans }).catch((e) => {
+    /* not saved: the doubt goes back to the list instead of standing as settled */
+    delete S.review.dropped[f.key]; S.review.local = S.review.local.filter((x) => x !== ans);
+    toast(`Your answer was not saved (${e.message}). Answer it again.`, true); render();
+  });
   advanceReview(how === "kept" ? "Kept as read." : "Changed on the page.");
 }
 function leftOutBanner(style) {
@@ -1917,14 +2003,34 @@ function showOnText(n, f) {
 }
 function pickFromText(n, f, fig) {
   selectPage(n);
-  const box = fig && fig.dataset.box ? fig.dataset.box.split(",").map(Number) : null;
+  const d = fig && fig.dataset;
+  const box = d && d.box ? d.box.split(",").map(Number)                  /* a drawing: its box */
+    : d && d.y ? [d.y * 1000, d.x * 1000, (+d.y + +d.h) * 1000, (+d.x + +d.w) * 1000] : null;   /* a line: where it stands */
   if (box) showOnHand(n, box[0] / 1000, box[2] / 1000, box);
   else { const y = textToHand(n, f); showOnHand(n, y - 0.04, y + 0.04); }
   const tb = $(`#tb-${n}`), band = tb && $(".ts-band", tb);
   if (band) { band.style.top = Math.max(0, f * tb.offsetHeight - 18) + "px"; flash(band); }
 }
-function pickFromHand(n, f) {
+function pickFromHand(n, f, fx) {
   selectPage(n);
+  const L = layoutFor(n);
+  if (L) {                                    /* the line written there, when the page is laid out */
+    let best = null, dist = 1e9;
+    L.items.forEach((it, i) => {
+      if (!it.placed) return;
+      const dy = Math.max(it.y - f, 0, f - (it.y + it.h)), dx = fx == null ? 0 : Math.max(it.x - fx, 0, fx - (it.x + it.w));
+      const dd = dy * 3 + dx;
+      if (dd < dist) { dist = dd; best = i; }
+    });
+    const el = best !== null && $(`#li-${n}-${best}`), col = $("#rvtext");
+    if (el && col && dist < 0.08) {
+      quietScroll(col, colY(col, el) - col.clientHeight * 0.4, true);
+      el.classList.remove("hit"); void el.offsetWidth; el.classList.add("hit");
+      const it = L.items[best], img = $(`#hs-${n} .hs-img`), band = img && $(".hs-band", img);
+      if (band) { band.style.top = it.y * 100 + "%"; band.style.height = it.h * 100 + "%"; band.style.left = it.x * 100 + "%"; band.style.width = it.w * 100 + "%"; flash(band); }
+      return;
+    }
+  }
   showOnText(n, handToText(n, f));
   const img = $(`#hs-${n} .hs-img`), band = img && $(".hs-band", img);
   if (band) { band.style.top = (f - 0.04) * 100 + "%"; band.style.height = "8%"; band.style.left = "0"; band.style.width = "100%"; flash(band); }
@@ -2025,7 +2131,8 @@ function viewReview() {
     <div class="rv3-cols">
       <aside class="rv3-panel" id="rvpanel" aria-label="Page ${R.n}">${panelHtml(open, done, openBy)}</aside>
       <section class="rv3-text" id="rvtext" aria-label="Your notes as read">
-        <div class="col-h"><b>Your notes, as read</b><span class="muted small">Page for page with your notes. Click a line to see it on your page.</span></div>
+        <div class="col-h"><b>Your notes, as read</b><span class="muted small">Click a line to see it on your page.</span><span class="tb-space"></span>
+          <span class="seg" role="group" aria-label="How the text is shown"><button class="${R.plain ? "" : "on"}" data-act="rvplain" data-v="0" title="Each line where it stands on your page; what you highlighted or underlined as a heading">As on the page</button><button class="${R.plain ? "on" : ""}" data-act="rvplain" data-v="1" title="Line after line">Plain</button></span></div>
         ${list.map((pg) => sheetHtml(pg, openBy)).join("")}</section>
       <section class="rv3-hand" id="rvhand" aria-label="Your handwritten notes" style="--hz:${R.zoom}">
         <div class="col-h dark"><b>Your handwritten notes</b><span class="tb-space"></span>
@@ -3443,6 +3550,11 @@ const ACT = {
     if (n) { selectPage(n); goPage(n); }
   },
   rvmode(el) { S.review.mode = el.dataset.v; render(); const p = $("#rvpanel"); if (p) p.scrollTop = 0; },
+  rvplain(el) {
+    const R = S.review; R.plain = el.dataset.v === "1"; R.cache = {};
+    try { localStorage.setItem("scriptavera-rv-plain", R.plain ? "1" : "0"); } catch (e) { /* ignore */ }
+    render();
+  },
   rvwide() { const R = S.review; R.wide = !R.wide; try { localStorage.setItem("scriptavera-rv-wide", R.wide ? "1" : "0"); } catch (e) { /* ignore */ } render(); },
   async rvedit(el) {
     const R = S.review, n = +el.dataset.n;
@@ -3486,10 +3598,10 @@ const ACT = {
       R.local.push(ans);
       api(`/api/projects/${S.pid}/doubt`, { method: "POST", body: ans }).catch((e) => toast(e.message, true));
     });
-    R.conf[n] = true;
-    api(`/api/projects/${S.pid}/page_note`, { method: "POST", body: { page: n, confirmed: true } })
-      .then((r) => { S.b.page_notes = r.notes; delete R.conf[n]; })
-      .catch((e) => { delete R.conf[n]; toast(e.message, true); render(); });
+    try {                                                   /* shown as confirmed once it is saved, not before */
+      const r = await api(`/api/projects/${S.pid}/page_note`, { method: "POST", body: { page: n, confirmed: true } });
+      S.b.page_notes = r.notes;
+    } catch (e) { return toast(e.message, true); }
     const doubt = nextNeeding(n, groupOpen(openItems())), next = doubt || nextUnconfirmed(n);
     if (next) {
       selectPage(next); goPage(next);
@@ -3909,9 +4021,9 @@ document.addEventListener("click", (ev) => {
   if (ev.target.closest("button, a, input, textarea, select, label, summary, [data-act]")) return;
   if (String(window.getSelection ? window.getSelection() : "").trim()) return;       // selecting text, not pointing
   const tb = ev.target.closest("#rvtext .ts-body");
-  if (tb && tb.dataset.n) { const r = tb.getBoundingClientRect(); return pickFromText(+tb.dataset.n, (ev.clientY - r.top) / r.height, ev.target.closest(".tfig")); }
+  if (tb && tb.dataset.n) { const r = tb.getBoundingClientRect(); return pickFromText(+tb.dataset.n, (ev.clientY - r.top) / r.height, ev.target.closest(".tfig[data-box], .li[data-y]")); }
   const hi = ev.target.closest("#rvhand .hs-img");
-  if (hi) { const r = hi.getBoundingClientRect(); return pickFromHand(+hi.dataset.n, (ev.clientY - r.top) / r.height); }
+  if (hi) { const r = hi.getBoundingClientRect(); return pickFromHand(+hi.dataset.n, (ev.clientY - r.top) / r.height, (ev.clientX - r.left) / r.width); }
 });
 document.addEventListener("scroll", (ev) => {
   const R = S.review, col = ev.target;

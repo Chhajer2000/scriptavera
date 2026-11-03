@@ -259,6 +259,7 @@ class Model:
     interval: float = 2.0        # seconds between requests
     effort: bool = False         # accepts reasoning_effort
     tier: int = -1               # Gemini: 0 Flash-Lite, 1 Flash, 2 Pro, 3 flagship (Pro and above: paid tier only)
+    key_tier: str = ""           # "free", "paid", or "" when undetermined
     # runtime state
     cooldown_until: float = 0.0
     dead: bool = False
@@ -528,9 +529,9 @@ class Router:
                         found = [(x, {}) for x in p["fallback"]]
                         msg = "Could not list models; using known defaults"
                     mine = [m for m in (classify(pid, mid, meta) for mid, meta in found) if m]
-                    for mdl in mine:
-                        mdl.key, mdl.key_index = key, ki
                     tier = self._tier(pid, key, mine) if mine else ""
+                    for mdl in mine:
+                        mdl.key, mdl.key_index, mdl.key_tier = key, ki, tier
                     if tier == "free":                    # Pro and Argon: not on this key; it goes straight to its best model
                         for mdl in mine:
                             if mdl.tier >= 2:
@@ -889,7 +890,9 @@ class Router:
             if wait > 75:
                 raise _Skip(f"token window resets in {int(wait)}s")
             if wait > 4:
-                hooks.on_wait(f"Pacing {m.id}: waiting {int(wait)}s for the free-tier limit")
+                is_paid = getattr(m, "key_tier", "") == "paid" or m.tier >= 2
+                reason = "request limit" if is_paid else "free-tier limit"
+                hooks.on_wait(f"Pacing {m.id}: waiting {int(wait)}s for {reason}")
             hooks.sleep(min(wait, 5.0))
 
     def _call_model(self, m: Model, role, system, user, images, json_mode, max_out, temperature, effort, label, hooks,

@@ -74,9 +74,12 @@ class Run(RunHooks):
     def log(self, message: str, level: str = "info") -> None:
         emit(self.p.id, "log", stage=self.stage, level=level, message=message)
 
-    def progress(self, done: int, total: int, note: str = "") -> None:
-        self.p.set_stage(self.stage, progress={"done": done, "total": total, "note": note})
-        emit(self.p.id, "progress", stage=self.stage, done=done, total=total, note=note)
+    def progress(self, done: int, total: int, note: str = "", more: int = 0) -> None:
+        """done of total (pages, papers, figures). more: parts of the step still to come after them (resolving the
+        notation once the pages are read, checking the transcript once it is written): the bar is not full until
+        those are done too."""
+        self.p.set_stage(self.stage, progress={"done": done, "total": total, "note": note, "more": more})
+        emit(self.p.id, "progress", stage=self.stage, done=done, total=total, note=note, more=more)
 
     def changed(self) -> None:
         emit(self.p.id, "state")
@@ -558,6 +561,7 @@ def stage_scout(run: Run) -> None:
                 run.progress(len(scout), total, f"page {n} read")
 
         _side_by_side(run, "vision_fast", True, todo, look)    # the pages of one round do not depend on each other
+        run.progress(len(scout), total, f"{plural(len(scout), 'page')} read · working out the topic from them", more=1)
         topic = _make_topic(run, scout)
         topic["pages_read"] = sorted(int(k) for k in scout)
         p.save("topic", topic)
@@ -834,6 +838,7 @@ def rebuild_glossary(p: Project) -> dict:
     run = Run(p)
     run.stage = "survey"
     _build_glossary(run, survey)
+    run.progress(len(survey), len(survey), "notation catalogued")
     return p.load("glossary")
 
 
@@ -890,7 +895,7 @@ def stage_survey(run: Run) -> None:
             p.save("survey", survey)
             if kind in ("blank", "cover"):
                 _mark_page(p, n, kind)
-            run.progress(len(survey), total, f"page {n} surveyed")
+            run.progress(len(survey), total, f"page {n} surveyed", more=1)    # the notation is resolved after the pages
 
     workers = _workers(run, "vision_best", True, len(todo))     # more keys, more pages at a time
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -908,8 +913,11 @@ def stage_survey(run: Run) -> None:
     if p.state["stages"].get("confirm", {}).get("status") == "done" and p.load("glossary"):
         # a page added after the author confirmed the notation: that confirmation stands, nothing is asked again
         run.log(f"{plural_pages(len(todo))} read and added to the notes.", "done")
+        run.progress(total, total, "pages added")
         return
+    run.progress(total, total, "all pages read · now resolving the notation they use, for all pages together", more=1)
     _build_glossary(run, survey)
+    run.progress(total, total, "notation catalogued")
 
 
 def plural_pages(k: int) -> str:
@@ -1118,8 +1126,18 @@ def _build_glossary(run: Run, survey: dict) -> None:
         user = ("Items collected from the notes:\n" + "\n".join(lines)
                 + "\n\nRelated papers found (use them for conventions; cite by KEY in 'basis'):\n" + (lit or "(none found)"))
         asks.append((user, f"Resolve notation ({start + 1}-{start + len(chunk)})"))
-    answers = _side_by_side(run, "reason", False, asks,           # the parts do not depend on each other
-                            lambda a: run.ask("reason", system, a[0], max_out=2600, label=a[1]))
+    parts, lock = [0], threading.Lock()
+
+    def resolve(a):
+        res = run.ask("reason", system, a[0], max_out=2600, label=a[1])
+        with lock:
+            parts[0] += 1
+            run.progress(len(survey), len(survey), f"all pages read · resolving the notation, part {parts[0]} of {len(asks)} done", more=1)
+        return res
+
+    if len(asks) > 1:
+        run.progress(len(survey), len(survey), f"all pages read · resolving the notation in {len(asks)} parts", more=1)
+    answers = _side_by_side(run, "reason", False, asks, resolve)   # the parts do not depend on each other
     for res in answers:
         for rec in parse_records(res.text, "entry"):
             sym = rec.get("symbol", "").strip().strip("$")
@@ -1243,7 +1261,7 @@ def stage_reading(run: Run) -> None:
     done = [len(reading) - len(todo)]
     if todo:
         run.progress(done[0], len(reading), f"reading {plural(len(todo), 'paper')}, "
-                     f"{_workers(run, 'reader', False, len(todo))} at a time")
+                     f"{_workers(run, 'reader', False, len(todo))} at a time", more=1)
 
     def read(pp: dict) -> None:
         """One paper, read whole in one request. No paper's reading uses another's: the brief that brings them
@@ -1276,11 +1294,11 @@ def stage_reading(run: Run) -> None:
             p.save("library", library)
             done[0] += 1
             run.log(f"Read [{pp['key']}] ({how}): {pp['verdict']}")
-            run.progress(done[0], len(reading), f"read: {pp['title'][:60]}")
+            run.progress(done[0], len(reading), f"read: {pp['title'][:60]}", more=1)
             run.changed()
 
     _side_by_side(run, "reader", False, todo, read)
-    run.progress(len(reading), len(reading), "papers read")
+    run.progress(len(reading), len(reading), "all papers read · now writing the research brief from them", more=1)
 
     # 4d. one brief that every later stage shares
     notes = []
@@ -1295,6 +1313,7 @@ def stage_reading(run: Run) -> None:
             f"READING NOTES\n" + fit("\n\n".join(notes) or "(no papers could be read)", _room("reason", system, 1300) - 3000, "head"))
     res = run.ask("reason", system, user, max_out=1300, label="Write context brief")
     p.save("brief", {"text": res.text.strip(), "model": res.model})
+    run.progress(len(reading), len(reading), "research brief written")
 
 
 # ------------------------------------------------------- 5. transcribe
@@ -1673,6 +1692,34 @@ def undo_correction(p: Project, n: int) -> dict:
     return {"page": n, "text": cur["text"], "notes": page_notes(p)}
 
 
+def page_layouts(p: Project, only: int | None = None) -> dict:
+    """For each page read, where each line of its transcript stands on the page (layout.py). Typed pages have no
+    handwriting to measure. The lines of the handwriting are measured once per page and kept beside its image."""
+    from . import layout
+    tr = (p.load("transcript") or {}).get("pages", {})
+    typed_src = (p.load("typed") or {}).get("pages", {})
+    boxes: dict = {}
+    for f in (p.load("figures") or {}).get("items", []):
+        if f.get("box"):
+            boxes.setdefault(f["page"], {})[f["k"]] = f["box"]
+    out = {}
+    for n, rec in tr.items():
+        if only is not None and int(n) != only:
+            continue
+        img = p.dir / "pages" / f"p{int(n):03d}.jpg"
+        if str(n) in typed_src or not img.exists():
+            out[n] = {"ok": False, "items": [], "text": rec.get("text", "")}
+            continue
+        try:
+            lines = layout.page_lines(img, p.dir / "pages" / f"layout_p{int(n):03d}.json")
+            res = layout.layout(rec.get("text", ""), lines, boxes.get(int(n)))
+        except Exception:  # noqa: BLE001 - a page that cannot be measured is shown as plain text
+            traceback.print_exc()
+            res = {"ok": False, "items": []}
+        out[n] = {**res, "text": rec.get("text", "")}
+    return out
+
+
 def adding_now(p: Project) -> dict | None:
     """While pages are added after the transcript was first checked: which pages are still being read, and whether
     figures are still being drawn. None when nothing is being added."""
@@ -1757,6 +1804,50 @@ def visible_doubts(p: Project) -> tuple[dict | None, list | None, int]:
     return tr, flags, hidden
 
 
+_NUM = re.compile(r"(?<![\w.])\d[\d.\-/]*\d(?![\w])")
+
+
+def _numbers(s: str) -> list[str]:
+    """The numbers written in the words of a page (years, dates, arXiv numbers, theorem numbers), with at least three
+    digits: formulas are left out, their indices and exponents are too short and too many to compare."""
+    s = re.sub(r"\$\$.*?\$\$|\$[^$]*\$|\\\[.*?\\\]|\\\(.*?\\\)", " ", s or "", flags=re.S)
+    return [m for m in _NUM.findall(s) if sum(c.isdigit() for c in m) >= 3]
+
+
+def _near(a: str, b: str) -> bool:
+    """Two numbers of the same shape that differ in one or two digits: one of them is a misreading of the other."""
+    return a != b and len(a) == len(b) and sum(x != y for x, y in zip(a, b)) <= 2 \
+        and all(x.isdigit() == y.isdigit() for x, y in zip(a, b))
+
+
+def number_doubts(text: str, others: dict[str, str], changes: list[str]) -> list[dict]:
+    """Numbers on which the readings of one page disagree, found without a model. The final reading has the context and
+    the best model, but a model also knows which years and identifiers are usual and may 'correct' a digit towards
+    them; an earlier reading that saw another digit, or a change the final reading made to a number, is therefore
+    put to the author as a doubt instead of being trusted either way."""
+    out, seen = [], set()
+    mine = _numbers(text)
+    for name, other in others.items():
+        theirs = set(_numbers(other))
+        for a in mine:
+            if a in theirs:
+                continue
+            for b in sorted(theirs):
+                if _near(a, b) and b not in mine and (a, b) not in seen:
+                    seen.add((a, b))
+                    out.append({"snippet": a, "alt": b, "check": "numbers",
+                                "issue": f"The {name} read {b} here. Compare the digits with the page."})
+    for c in changes:
+        nums = _numbers(c)
+        for a in mine:
+            for b in nums:
+                if _near(a, b) and (a, b) not in seen and (b, a) not in seen:
+                    seen.add((a, b))
+                    out.append({"snippet": a, "alt": b, "check": "numbers",
+                                "issue": f"The final reading changed {b} to {a}. Compare the digits with the page."})
+    return out[:6]
+
+
 def _next_draft(pages: list[dict], i: int, survey: dict, typed_src: dict) -> str:
     """The first lines of the page after page i (1-based), as the notation survey drafted it: a sentence or formula
     that runs over the page break is then read with its continuation in view. Pages are still transcribed in order,
@@ -1785,6 +1876,7 @@ def stage_transcribe(run: Run) -> None:
     fresh: list[int] = []
     typed_src = (p.load("typed") or {}).get("pages", {})
     layers = exact_layers(p)
+    scout = p.load("scout") or {}
     from . import memory
     hand = "" if p.state.get("meta", {}).get("test") else memory.quirks()
     for i, pg in enumerate(pages, 1):
@@ -1800,7 +1892,7 @@ def stage_transcribe(run: Run) -> None:
                 p.save("transcript", tr)
             prev_tail = typed_src[str(n)][-350:]
             fresh.append(n)
-            run.progress(i, total, f"page {n} taken from the typed source")
+            run.progress(i, total, f"page {n} taken from the typed source", more=1)
             continue
         draft = (survey.get(str(n)) or {}).get("text", "")
         share = max(600, (room - len(draft) - 400) // 2) if room > len(draft) + 1600 else 700
@@ -1836,20 +1928,29 @@ def stage_transcribe(run: Run) -> None:
                 settled += 1                   # a matter of wording: settled here, never shown to the author
                 continue
             uncertain.append(item)
-        rec = {"text": text, "uncertain": uncertain, "changes": parse_lines(extract_tag(res.text, "changes")),
-               "model": res.model, "edited": False}
+        changes = [c for c in parse_lines(extract_tag(res.text, "changes")) if c.strip().lower() not in ("none", "-")]
+        sc = scout.get(str(n)) or {}
+        others = {"first look at the page": (sc.get("prose") or "") + "\n" + (sc.get("printed") or ""),
+                  "draft reading": draft}
+        if layers.get(str(n)):
+            others["text layer of the PDF"] = layers[str(n)]
+        for d in number_doubts(text, others, changes):
+            if not any(d["snippet"] in u.get("snippet", "") for u in uncertain):
+                uncertain.append(d)
+        rec = {"text": text, "uncertain": uncertain, "changes": changes, "model": res.model, "edited": False}
         with p._lock:                          # the author may be editing earlier pages meanwhile: merge, never overwrite
             tr = p.load("transcript", {"pages": {}})
             tr["pages"][str(n)] = rec
             p.save("transcript", tr)
         prev_tail = text[-350:]
         fresh.append(n)
-        run.progress(i, total, f"page {n} transcribed")
+        run.progress(i, total, f"page {n} transcribed", more=1)    # the check for misreadings comes after the pages
     if old_flags is not None and not fresh:
+        run.progress(total, total, "transcript ready")
         return                                 # nothing new since the check
 
     # 5b. consistency check: flags possible misreadings, never edits
-    run.progress(total, total, "checking for misreadings")
+    run.progress(total, total, "all pages transcribed · now checking them for misreadings", more=1)
     system = prompts.CHECK.format(notation=notation_text(conf, 1200))
     room = _room("reason", system, 1400)
     flags: list[dict] = []
@@ -1890,6 +1991,7 @@ def stage_transcribe(run: Run) -> None:
         known = {(f.get("page"), f.get("snippet")) for f in old_flags}
         flags = old_flags + [f for f in flags if f["page"] in to_check and (f["page"], f["snippet"]) not in known]
     p.save("flags", flags)
+    run.progress(total, total, "transcript checked")
     tr = p.load("transcript", {"pages": {}})
     n_unc = sum(len(v["uncertain"]) for v in tr["pages"].values())
     run.log(f"Transcription complete: {n_unc} uncertain readings and {len(flags)} possible misreadings for your review."

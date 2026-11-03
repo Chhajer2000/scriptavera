@@ -105,6 +105,7 @@ Transcription rules
 - Labels the author attached to a formula with arrows or braces (an arrow from one term to a short label naming it, such as "error term" or "main part") are the author's notes on that formula, not a diagram. Write them inside the formula: \\underbrace{{term}}_{{\\text{{label}}}}, or \\overbrace{{term}}^{{\\text{{label}}}} when the label is above. An arrow from a remark to a line of the argument is a margin note.
 - [FIGURE: one neutral sentence saying what is drawn and how it is labelled] is only for real drawings: a graph, a diagram of objects and maps, a picture, a lattice, a table drawn as a picture. Never for a formula with labels. Put the marker exactly where the drawing stands in the argument; if the author numbered or captioned it, copy the number or caption into the sentence, and if it is drawn in the margin, say so.
 - Printed or typeset text on the page: copy exactly.
+- Numbers, years, dates and identifiers (arXiv numbers, DOIs, theorem and equation numbers, page numbers): copy every digit as written, even if the value looks unusual, recent or in the future. You do not know today's date. Never replace a number with one you know or expect; if a digit cannot be told apart, write [?best reading|other reading?].
 - Keep the author's words. Do not paraphrase.
 - No markup other than LaTeX: no HTML (never <u>, <b> or <br>) and no markdown. A word the author underlined, highlighted, boxed or circled is written as the word itself; highlighting is not a label, so it never becomes \\underbrace or \\overbrace.
 
@@ -225,6 +226,7 @@ Field: {field}
 
 Rules
 1. Fidelity. Transcribe exactly what the author wrote. Do not fix mathematical errors, fill gaps, add steps, strengthen statements, rename symbols or reorder anything. If a step looks wrong, transcribe it as written.
+1a. Numbers, years, dates and identifiers (arXiv numbers, DOIs, theorem, equation and page numbers) are copied digit by digit from the image, even if the value looks unusual, recent or in the future: you do not know today's date, and a number you know from elsewhere is not evidence. Never change a digit of the draft because another value seems more plausible. Change it only if the image clearly shows a different digit, and then also list it under <uncertain>.
 2. Where the handwriting allows two look-alike symbols, the confirmed notation decides.
 3. LaTeX: inline $...$; displayed $$...$$; a multi-line derivation as $$\\begin{{aligned}} ... \\end{{aligned}}$$ keeping the author's line breaks and relation signs exactly.
 4. Keep the author's wording and labels (Claim, Proof, Case 1, Theorem). Correct spelling and obvious slips of grammar silently.

@@ -1200,3 +1200,20 @@ button.chip:hover { filter: none; border-color: var(--blue); }
 .pick { border-color: var(--btn-edge); background: var(--btn); color: var(--btn-ink); }
 .pick:hover { border-color: var(--blue); }
 .pick.on { color: #fff; }
+
+/* step 9: the page laid out as written */
+.laid { padding-bottom: .4em; }
+.lrow { display: grid; align-items: start; column-gap: .5em; }
+.li { min-width: 0; overflow-wrap: normal; border-radius: 3px; }
+.li p { margin: 0; }
+.li .math.display { margin: .2rem 0; text-align: left; }
+.li.lhead { font-weight: 700; }
+.li.ltitle { font-size: 1.2em; }
+.lrow.lcenter .li { text-align: center; }
+.li.lul .katex, .li.lul { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.li.unplaced { color: var(--graphite); }
+.li.hit { animation: rvband 2.6s ease; background: rgba(39,71,199,.08); }
+.seg { display: inline-flex; border: 1px solid var(--btn-edge); border-radius: 7px; overflow: hidden; }
+.seg button { border: 0; background: var(--paper); color: var(--btn-ink); padding: 3px 10px; font-size: 12.5px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--btn-edge); }
+.seg button.on { background: var(--blue); color: #fff; font-weight: 600; }

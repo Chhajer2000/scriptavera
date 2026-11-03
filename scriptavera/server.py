@@ -834,6 +834,16 @@ async def api_correct_page(request: Request):
         return fail(str(e))
 
 
+async def api_layout(request: Request):
+    """Where each line of the transcript stands on its handwritten page (layout.py): measured from the page image,
+    with no model asked. ?page=n for one page; otherwise every page that has been read."""
+    p = _project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    one = request.query_params.get("page")
+    return ok(pages=await run_in_threadpool(pipeline.page_layouts, p, int(one) if one and one.isdigit() else None))
+
+
 async def api_figure_image(request: Request):
     """A figure as an image: the redrawn version, or the author's own drawing cut from the page."""
     p = _project(request)
@@ -1777,6 +1787,7 @@ routes = [
     Route("/api/projects/{pid}/doubt", api_doubt, methods=["POST"]),
     Route("/api/projects/{pid}/page_note", api_page_note, methods=["POST"]),
     Route("/api/projects/{pid}/correct_page", api_correct_page, methods=["POST"]),
+    Route("/api/projects/{pid}/layout", api_layout, methods=["GET"]),
     Route("/api/projects/{pid}/figure/{fid}", api_figure_image, methods=["GET"]),
     Route("/api/projects/{pid}/figure/{fid}", api_figure, methods=["POST"]),
     Route("/api/projects/{pid}/review", api_review, methods=["POST"]),
