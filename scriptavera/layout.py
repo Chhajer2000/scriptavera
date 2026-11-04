@@ -510,7 +510,18 @@ def layout(text: str, lines: list[dict], figure_boxes: dict[int, list[float]] | 
     total, pairs = best
     med = float(np.median([l["h"] for l in ls if not l["thin"]] or [0.02]))
     if assign is not None:                              # the lines a model matched to the pieces, seeing the page
-        pairs, total = _assigned(ps, lines, assign), 0.0
+        # a piece the model left out keeps the line the matching by length gave it, if the model gave that line to
+        # no other piece
+        used = {id(lines[j]) for js in assign.values() for j in js if 0 <= j < len(lines)}
+        bylen = dict(_unshare(pairs, free))
+        pairs = []
+        for i, g in _assigned(ps, lines, assign):
+            if not g and not ps[i].get("box") and ps[i]["kind"] != "figure":
+                alt = bylen.get(i) or []
+                if alt and not any((l["src"] if l.get("shared") else id(l)) in used for l in alt):
+                    g = alt
+            pairs.append((i, g))
+        total = 0.0
     else:
         pairs = _unshare(pairs, free)
     placed = {i: g for i, g in pairs}
@@ -559,6 +570,9 @@ def layout(text: str, lines: list[dict], figure_boxes: dict[int, list[float]] | 
     return {"ok": bool(ok), "items": items, "cost": round(total / max(1, texty_n), 2), "med": med, "doubt": doubt}
 
 
+_HANG = re.compile(r"\\(?:overbrace|underbrace|overset|underset|stackrel|xrightarrow|xleftarrow)")
+
+
 def _assigned(ps: list[dict], lines: list[dict], assign: dict[int, list[int]]) -> list:
     """(piece, [lines]) from the lines a model gave each piece. A line that several pieces stand on (a label and the
     formula after it; a label and the first row of a formula written over several lines) is shared side by side, in
@@ -589,9 +603,26 @@ def _assigned(ps: list[dict], lines: list[dict], assign: dict[int, list[int]]) -
         if p.get("box") or not idx:
             out.append((i, []))
             continue
-        g = [part(i, j) for j in sorted(set(idx), key=lambda j: (round(lines[j]["y"] / 0.02), lines[j]["x"]))]
+        g = [part(i, j) for j in sorted(set(idx), key=lambda j: (lines[j]["y"], lines[j]["x"]))]
+        # lines side by side on one row are one line of the author's (the gap between words split it): one box;
+        # rows one under the other stay apart, so that a sentence that goes on below is cut where it goes on
+        rows: list[list[dict]] = []
+        for l in g:
+            row = next((r for r in rows if any(min(q["y"] + q["h"], l["y"] + l["h"]) - max(q["y"], l["y"])
+                                               > 0.4 * min(q["h"], l["h"]) for q in r)), None)
+            if row is None:
+                rows.append([l])
+            else:
+                row.append(l)
         if len(g) > 1:
-            g = [{k: v for k, v in l.items() if k not in ("shared", "src")} for l in g]
+            rows = [sorted(r, key=lambda q: q["x"]) for r in sorted(rows, key=lambda r: min(q["y"] for q in r))]
+            # words written over a formula (over a brace, over an arrow) are part of the piece but not a line of
+            # it: the piece starts on its main line, never on the smaller label above it
+            if p["kind"] in ("line", "margin") and _HANG.search(p["t"]):
+                tall = lambda r: max(q["h"] for q in r)
+                while len(rows) > 1 and tall(rows[0]) < 0.75 * tall(rows[1]):
+                    rows.pop(0)
+            g = [{**{k: v for k, v in r[0].items() if k not in ("shared", "src")}, **(_merged(r) if len(r) > 1 else {})} for r in rows]
         out.append((i, g))
     return out
 

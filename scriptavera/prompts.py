@@ -369,6 +369,9 @@ Look at the handwriting itself: the pieces come in the order the transcriber wro
 - A piece written on one line gets that line: P3: L5
 - A piece the author wrote over several lines (a sentence that goes on below, a formula of several rows, a brace with its cases, a label with something written above or below it) gets all of them, top to bottom: P4: L6 L7 L8
 - Several pieces written on one boxed line (a label and the formula after it, a statement and its citation) each get that same line.
+- One line of writing split into two boxes side by side (a wide gap between two words) gets both boxes.
+- Give a piece the lines that hold its words and formulas, not a line that only holds a small label, a note or an arrow written above, below or beside it and pointing at it (the words over a brace, "compact support" with an arrow): such a line is not given to any piece, even when the transcription has put its words into the piece.
+- Every piece that is written on the page gets at least one line.
 - A boxed line that holds nothing of the transcription (a crossed-out word, a mark, part of a drawing, a page number that was not transcribed) is simply not given to any piece.
 - A piece you cannot find on the page at all: P7: none
 

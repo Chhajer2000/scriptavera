@@ -30,7 +30,8 @@ from .llm import LLMError, router
 from .util import extract_tag
 
 VERSION = 1
-RETRY_AFTER = 15 * 60                 # a page whose placing failed (no key free, a bad answer) is asked again after this
+RETRY_AFTER = 5 * 60                  # a page whose placing failed (no key free, a bad answer) is asked again after this
+WAITS = (20, 60)                      # ... but first asked again in the background, after these pauses (seconds)
 
 _pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="scriptavera-place")
 _busy: set[tuple[str, int, str]] = set()
@@ -133,7 +134,7 @@ def place(p, n: int, text: str, lines: list[dict], figure_boxes: dict | None = N
             f"THE TRANSCRIPTION, IN PIECES\n{listing}")
     hooks = Run(p)
     hooks.stage = "review"
-    res = router.chat("vision_best", prompts.PLACE_LINES, user, images=[image], max_out=1500, effort="low",
+    res = router.chat("vision_best", prompts.PLACE_LINES, user, images=[image], max_out=6000, effort="low",
                       label=f"Place the lines of page {n}", hooks=hooks)
     got = parse(res.text, len(texty), len(order))
     found = sum(1 for v in got.values() if v)
@@ -157,10 +158,19 @@ def start(p, n: int, text: str, lines: list[dict], figure_boxes: dict | None = N
 
     def work():
         try:
-            assign = place(p, n, text, lines, figure_boxes)
+            assign = None
+            for wait in (0, *WAITS):                      # an empty answer, a limit reached: asked again soon
+                time.sleep(wait)
+                try:
+                    assign = place(p, n, text, lines, figure_boxes)
+                except LLMError:
+                    assign = None
+                except Exception:  # noqa: BLE001 - an unexpected answer: asked again like an empty one
+                    traceback.print_exc()
+                    assign = None
+                if assign:
+                    break
             _save(p, n, text, {"assign": {str(i): v for i, v in assign.items()}} if assign else {"failed": time.time()})
-        except LLMError:
-            _save(p, n, text, {"failed": time.time()})
         except Exception:  # noqa: BLE001 - the page stays laid out by length
             traceback.print_exc()
             _save(p, n, text, {"failed": time.time()})

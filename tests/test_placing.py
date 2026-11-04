@@ -8,6 +8,7 @@ import time
 from helpers import isolate, new_project
 isolate("scriptavera_placing_")
 from scriptavera import placing, pipeline
+placing.WAITS = (0.2,)                     # asked again soon after a failure: at once here
 
 p = new_project(pages=1)
 # a transcript with more pieces than the page has lines: the matching by length cannot be sure of it
@@ -43,12 +44,19 @@ assert not off.get("placing") and not off.get("ai")
 p.update_state(lambda st: st.update(layout_ai=True))
 print("3. turned off for the paper: nothing is asked")
 
-os.environ["SCRIPTAVERA_MOCK_FAIL"] = "Place the lines"
+os.environ["SCRIPTAVERA_MOCK_FAIL"] = "Place the lines"        # the first answer fails, the next one is asked at once
+p.save("transcript", {"pages": {"1": {"text": text + "\nA last line"}}})
+pipeline.page_layouts(p)
+settle()
+assert (placing.cached(p, 1, text + "\nA last line") or {}).get("assign"), "a failed answer is asked again soon"
+real, calls = placing.place, []
+placing.place = lambda *a, **k: calls.append(1)             # no good answer, however often it is asked
+p.save("transcript", {"pages": {"1": {"text": text + "\nAnd another"}}})
 pipeline.page_layouts(p)
 settle()
 failed = placing.cached(p, 1, text + "\nAnd another")
-assert failed and failed.get("failed"), failed
+assert failed and failed.get("failed") and len(calls) == 2, (failed, calls)
 assert not pipeline.page_layouts(p)["1"].get("placing"), "a failure is not asked again at once"
-os.environ.pop("SCRIPTAVERA_MOCK_FAIL")
-print("4. a failure leaves the page laid out by length, and is not retried at once")
+placing.place = real
+print("4. a failed answer is asked again soon; when it keeps failing the page stays laid out by length for a while")
 print("placing ok")

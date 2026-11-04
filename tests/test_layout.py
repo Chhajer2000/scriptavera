@@ -112,9 +112,15 @@ assert r4.get("ai") and not r4.get("doubt")
 a, b = it4["Joint work w"], it4["Oberseminar "]
 assert abs(a["y"] - b["y"]) < 0.005 and b["x"] > a["x"] + 0.05, (a, b)
 assert abs(it4["Embedding gr"]["y"] - 0.07) < 0.02 and it4["Embedding gr"]["big"]
-assert not it4["Göttingen"]["placed"], "not named by the model: after the piece before"
+assert it4["Göttingen"]["placed"] and abs(it4["Göttingen"]["x"] - 0.64) < 0.03, "not named by the model: where its length put it"
+# the model gives a piece two lines side by side on one row (the gap between two words split the line): one box
+right = line_at(0.60, 0.21)
+r5 = layout.layout(TEXT, found, {}, assign={**assign, idx["Oberseminar "]: [right, line_at(0.10, 0.21)]})
+o5 = [it for it in r5["items"] if it["t"].startswith("Oberseminar")]
+assert len(o5) == 1, [it["t"] for it in r5["items"]]
 assert placing.parse("<places>\nP1: L2\nP2: L3 L4\nP3: none\nP9: L1\nP2x\n</places>", 3, 4) == {1: [2], 2: [3, 4], 3: []}
 img, order = placing.framed(im, found, set())
 assert img[:2] == b"\xff\xd8" and len(order) == sum(1 for l in found if not l["thin"])
-print("4. a page placed by a model: its lines as the model says, shared lines side by side, the framed page numbered")
+print("4. a page placed by a model: its lines as the model says, shared lines side by side, a piece it left out where its")
+print("   length put it, two lines on one row one box, the framed page numbered")
 print("layout ok")

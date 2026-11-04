@@ -720,6 +720,15 @@ class Router:
         paid = [m for m in pool if m.key_tier == "paid"]
         if not free or not paid:
             return pool
+        # but never a weaker model for it: a free key goes first only with a model as good as the paid keys' best,
+        # or with the same provider's (a free Gemini key before a paid one); a free key of another provider whose
+        # models are weaker (Groq beside a paid Gemini key) waits, as it would without free-first
+        top_paid = max(paid, key=lambda m: m.scores.get(role, 0))
+        margin = ROLES[role].get("margin", 4)
+        free = [m for m in free if m.scores.get(role, 0) >= top_paid.scores.get(role, 0) - margin
+                or m.provider == top_paid.provider]
+        if not free:
+            return pool
         best = max(m.scores.get(role, 0) for m in free)
         top = [m for m in free if m.scores.get(role, 0) >= best - ROLES[role].get("margin", 4)]
         return free if any(m.available() for m in top) else paid

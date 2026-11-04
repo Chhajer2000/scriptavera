@@ -11,3 +11,5 @@ memory/
 accounts.db
 
 .firebase/
+
+.env-backups/

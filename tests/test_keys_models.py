@@ -115,6 +115,16 @@ for m in router.models:                       # the free key reaches its limit: 
 assert [m.ref for m in router.peers("reason")] == ["gemini:gemini-4-argon#2"], [m.ref for m in router.peers("reason")]
 calls.clear()
 assert router.chat("reason", "s", "u", hooks=RunHooks(), label="paid").text == "gemini-4-argon answered" and calls == [("gemini-4-argon", "AQ.paid")]
+# a free key of a weaker provider beside a paid Gemini key: never first for a job (Groq's model is not used to read
+# handwriting while Argon is there)
+from scriptavera.llm import Model, Router
+def fake(provider, mid, tier, score):
+    m = Model(provider=provider, id=mid); m.key_tier = tier; m.vision = True
+    m.scores = {r: 0.0 for r in llm.ROLES}; m.scores["vision_best"] = score
+    return m
+argon, qwen, flash = fake("gemini", "gemini-4-argon", "paid", 124), fake("groq", "qwen/qwen3.8-27b", "free", 78), fake("gemini", "gemini-3.8-flash", "free", 96)
+assert Router._free_first("vision_best", [argon, qwen]) == [argon, qwen], "the weaker free provider does not go first"
+assert Router._free_first("vision_best", [argon, qwen, flash]) == [flash], "a free Gemini key still goes before the paid one"
 os.environ["GEMINI_API_KEY"] = "AQ.free"
 calls.clear()
 router.discover(force=True)

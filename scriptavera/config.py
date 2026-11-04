@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import time
 import os
 import threading
 from pathlib import Path
@@ -93,9 +94,19 @@ def get_keys(name: str) -> list[str]:
 
 
 def save_env(updates: dict[str, str]) -> None:
-    """Update .env in place, preserving unrelated lines and comments."""
+    """Update .env in place, preserving unrelated lines and comments. The file as it was is kept first in
+    .env-backups (the last 30 versions), so that no key is ever lost by a save."""
     with _lock:
         lines = ENV_PATH.read_text(encoding="utf-8", errors="ignore").splitlines() if ENV_PATH.exists() else []
+        if lines:
+            try:
+                keep = ENV_PATH.parent / ".env-backups"
+                keep.mkdir(exist_ok=True)
+                (keep / f"env-{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+                for old in sorted(keep.glob("env-*.txt"))[:-30]:
+                    old.unlink()
+            except OSError:
+                pass
         seen: set[str] = set()
         out: list[str] = []
         for line in lines:
