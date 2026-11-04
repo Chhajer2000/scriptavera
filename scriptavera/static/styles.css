@@ -1203,15 +1203,21 @@ button.chip:hover { filter: none; border-color: var(--blue); }
 
 /* step 9: the page laid out as written */
 .laid { padding-bottom: .4em; }
-.lrow { display: grid; align-items: start; column-gap: .5em; }
-.li { min-width: 0; overflow-wrap: normal; border-radius: 3px; }
-.li p { margin: 0; }
-.li .math.display { margin: .2rem 0; text-align: left; }
+/* the page as written: a sheet of the page's shape, each piece where it stands, never broken over two lines */
+.laidpage { position: relative; height: 0; width: 100%; }
+.laidpage .li { position: absolute; white-space: nowrap; line-height: 1.15; border-radius: 3px; overflow: visible; }
+.laidpage .li p { margin: 0; display: inline; }
+.laidpage .li .katex { font-size: 1.04em; }   /* the words in a formula as large as the words around it: one size on the page */
+.laidpage .li .math.display { display: block; margin: 0; text-align: left; }
+.laidpage .li .katex-display { margin: 0; text-align: left; }
+.laidpage .li.lcenter, .laidpage .li.lcenter .math.display, .laidpage .li.lcenter .katex-display { text-align: center; }
+.laidpage .li.k-figure { white-space: normal; overflow: hidden; }
+.laidpage .li.k-figure img { max-width: 100%; max-height: 100%; }
 .li.lhead { font-weight: 700; }
-.li.ltitle { font-size: 1.2em; }
-.lrow.lcenter .li { text-align: center; }
+.rv-aiplace { margin-left: 10px; font-size: 12.5px; color: var(--graphite); white-space: nowrap; }
+.rv-aiplace input { width: 14px; height: 14px; }
 .li.lul .katex, .li.lul { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
-.li.unplaced { color: var(--graphite); }
+.li.unplaced { color: var(--graphite); outline: 1px dashed var(--rule); }
 .li.hit { animation: rvband 2.6s ease; background: rgba(39,71,199,.08); }
 .seg { display: inline-flex; border: 1px solid var(--btn-edge); border-radius: 7px; overflow: hidden; }
 .seg button { border: 0; background: var(--paper); color: var(--btn-ink); padding: 3px 10px; font-size: 12.5px; cursor: pointer; }
@@ -1240,3 +1246,18 @@ button.chip:hover { filter: none; border-color: var(--blue); }
 .chat .msg.you { align-self: flex-end; background: var(--blue-soft, #e8eefc); border-color: transparent; }
 .chat .msg.app { border-color: #ecd97a; background: var(--hl-soft); }
 .chat .msg-who { font-size: 11.5px; color: var(--graphite); margin-bottom: 2px; }
+
+/* our own Google sign-in button: the same words for everyone; Google's window then asks which account */
+.sv-google { display: inline-flex; align-items: center; gap: 10px; padding: 9px 18px; border-radius: 999px; border: 1px solid #dadce0;
+  background: #fff; color: #3c4043; font: 500 14px/1.2 "Roboto", system-ui, sans-serif; cursor: pointer; }
+.sv-google:hover { background: #f7f8f8; border-color: #d2e3fc; }
+.sv-google:focus-visible { outline: 2px solid #4285f4; outline-offset: 2px; }
+
+/* the AI keys: chosen for each paper, each with its plan and its limits */
+.kp-list { display: flex; flex-direction: column; gap: 10px; margin: 10px 0; }
+.kp-prov-h { font-weight: 600; margin-bottom: 4px; }
+.kp-key { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 7px 10px; border: 1px solid var(--rule); border-radius: 8px; cursor: pointer; }
+.kp-key.static { cursor: default; margin-top: 6px; }
+.kp-key input[type=checkbox] { width: 16px; height: 16px; }
+.kp-name { min-width: 11em; }
+.kp-st { display: inline-flex; flex-wrap: wrap; gap: 4px; flex: 1; }

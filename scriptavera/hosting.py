@@ -29,7 +29,7 @@ GUEST_LIMIT_MESSAGE = ("Free guest limit of three papers reached for this networ
                        "Please sign in with Google to continue.")
 SESSION_COOKIE = "sv_session"
 GUEST_COOKIE = "sv_guest"
-SESSION_DAYS = 30
+SESSION_DAYS = 90             # renewed each day it is used: someone who comes back within three months stays signed in
 
 
 def env(name: str, default: str = "") -> str:
@@ -125,9 +125,22 @@ def ip_key(ip: str) -> str:
 _fallback_secret = secrets.token_bytes(32)
 
 
+def _stable_secret() -> bytes:
+    """The secret that signs the sign-in cookies. SCRIPTAVERA_SESSION_SECRET should be set. Without it, a secret made
+    up when the server starts would sign everyone out at every restart and on every other instance of the service,
+    so the secret is derived from the service's other stable secrets when it has any; only a computer with none of
+    them (the desktop app) uses one made up at start."""
+    raw = env("SCRIPTAVERA_SESSION_SECRET")
+    if raw:
+        return raw.encode()
+    stable = "".join(env(n) for n in ("SCRIPTAVERA_SIGNING_KEY_PEM", "SUPABASE_KEY", "RAZORPAY_KEY_SECRET", "RAZORPAY_WEBHOOK_SECRET"))
+    if len(stable) >= 40:
+        return hashlib.sha256(b"scriptavera-session|" + stable.encode()).digest()
+    return _fallback_secret
+
+
 def _secret(purpose: bytes) -> bytes:
-    raw = env("SCRIPTAVERA_SESSION_SECRET").encode() or _fallback_secret
-    return hmac.new(raw, purpose, hashlib.sha256).digest()
+    return hmac.new(_stable_secret(), purpose, hashlib.sha256).digest()
 
 
 def secret_configured() -> bool:

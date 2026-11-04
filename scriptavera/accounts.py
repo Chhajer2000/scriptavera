@@ -72,6 +72,34 @@ def verify_google_credential(credential: str) -> dict:
     return info
 
 
+def verify_google_access_token(access_token: str) -> dict:
+    """The sign-in made with Google's account chooser: an access token for "openid email profile", issued to this app
+    and still valid; the profile is then asked of Google with it. Returns the same fields as an ID token gives."""
+    import requests
+    client_id = hosting.google_client_id()
+    if not client_id:
+        raise AccountError("Google sign-in is not set up on this server (GOOGLE_CLIENT_ID is missing).")
+    try:
+        r = requests.get("https://oauth2.googleapis.com/tokeninfo", params={"access_token": access_token}, timeout=10)
+        if r.status_code != 200:
+            raise AccountError("Google did not confirm this sign-in. Please try again.")
+        tok = r.json()
+        if client_id not in (tok.get("aud"), tok.get("azp")):
+            raise AccountError("This sign-in was made for another app.")
+        u = requests.get("https://openidconnect.googleapis.com/v1/userinfo",
+                         headers={"Authorization": f"Bearer {access_token}"}, timeout=10)
+    except requests.RequestException as e:
+        raise AccountError("Google could not be reached to confirm the sign-in. Please try again.") from e
+    if u.status_code != 200:
+        raise AccountError("Google did not give your profile. Please try again.")
+    info = u.json()
+    if not info.get("sub") or (tok.get("sub") and tok["sub"] != info["sub"]):
+        raise AccountError("Google did not confirm this sign-in. Please try again.")
+    if not info.get("email") or not info.get("email_verified"):
+        raise AccountError("Your Google account's e-mail address is not verified.")
+    return info
+
+
 def verify_drive_token(access_token: str) -> dict:
     """An access token the page obtained for Google Drive: issued to this app, still valid, and carrying the
     drive.file permission (which lets Scriptavera see only the files it creates, nothing else in the Drive)."""

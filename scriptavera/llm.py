@@ -14,6 +14,7 @@ so adding one is a matter of a base URL and a key.
 from __future__ import annotations
 
 import base64
+import contextvars
 import hashlib
 import json
 import re
@@ -260,6 +261,7 @@ class Model:
     effort: bool = False         # accepts reasoning_effort
     tier: int = -1               # Gemini: 0 Flash-Lite, 1 Flash, 2 Pro, 3 flagship (Pro and above: paid tier only)
     key_tier: str = ""           # "free", "paid", or "" when undetermined
+    key_fp: str = ""             # the key's fingerprint: how a paper names the keys it may use, never the key itself
     # runtime state
     cooldown_until: float = 0.0
     dead: bool = False
@@ -282,6 +284,20 @@ class Model:
                 "req_tokens": self.req_tokens, "dead": self.dead, "note": self.note,
                 "cooldown": max(0, int(self.cooldown_until - time.time())),
                 "scores": {k: round(v, 1) for k, v in self.scores.items()}}
+
+
+def key_fp(key: str) -> str:
+    """A short fingerprint of a key: enough to tell one's keys apart, useless for using the key."""
+    return hashlib.sha256((key or "").encode("utf-8")).hexdigest()[:12]
+
+
+def masked(key: str) -> str:
+    return (key[:4] + "…" + key[-4:]) if len(key or "") > 12 else ("local" if key == "ollama" else "••••")
+
+
+# The keys the current piece of work may use (fingerprints), or None for all of them. Set for each request from the
+# paper's own choice, so that a change made while the paper is running applies from its next request.
+KEY_SCOPE: contextvars.ContextVar[frozenset | None] = contextvars.ContextVar("scriptavera_key_scope", default=None)
 
 
 def _s(**kw) -> dict:
@@ -507,7 +523,16 @@ class Router:
             if config.mock_mode():
                 devmock = config.simulator()
                 self.models = devmock.models()
-                self.status = {"mock": {"ok": True, "label": "Simulated models", "count": len(self.models), "message": "Developer mode"}}
+                keys = []
+                for m in self.models:                     # the simulated keys, as real ones are listed
+                    m.key = m.key if m.key and m.key != "none" else "sim-key-0001"
+                    m.key_fp = key_fp(m.key)
+                    if not any(k["fp"] == m.key_fp for k in keys):
+                        keys.append({"n": len(keys) + 1, "ok": True, "count": 0, "tier": m.key_tier or "paid", "fp": m.key_fp,
+                                     "masked": masked(m.key), "balance": None, "message": "simulated"})
+                    next(k for k in keys if k["fp"] == m.key_fp)["count"] += 1
+                self.status = {"mock": {"ok": True, "label": "Simulated models", "count": len(self.models), "message": "Developer mode",
+                                        "keys": keys}}
                 self.discovered_at = time.time()
                 return self.status
             models: list[Model] = []
@@ -531,7 +556,7 @@ class Router:
                     mine = [m for m in (classify(pid, mid, meta) for mid, meta in found) if m]
                     tier = self._tier(pid, key, mine) if mine else ""
                     for mdl in mine:
-                        mdl.key, mdl.key_index, mdl.key_tier = key, ki, tier
+                        mdl.key, mdl.key_index, mdl.key_tier, mdl.key_fp = key, ki, tier, key_fp(key)
                     if tier == "free":                    # Pro and Argon: not on this key; it goes straight to its best model
                         for mdl in mine:
                             if mdl.tier >= 2:
@@ -541,7 +566,8 @@ class Router:
                     st["count"] += n
                     st["ok"] = st["ok"] or n > 0
                     st["message"] = msg if not n else f"{st['count']} usable models"
-                    st["keys"].append({"n": ki + 1, "ok": n > 0, "count": n, "tier": tier,
+                    st["keys"].append({"n": ki + 1, "ok": n > 0, "count": n, "tier": tier, "fp": key_fp(key),
+                                       "masked": masked(key), "balance": self._balance(pid, key) if n else None,
                                        "leak": n > 0 and leaks(pid, tier),
                                        "privacy": PRIVACY.get(pid, {}).get(tier, "") if n else "",
                                        "message": msg if not n else f"{n} usable models"})
@@ -564,6 +590,27 @@ class Router:
         except Exception:  # noqa: BLE001 - not knowing the tier never stops a key from working
             return ""
         return ""
+
+    @staticmethod
+    def _balance(provider: str, key: str) -> dict | None:
+        """What is left to spend on a key, where the provider says so. OpenRouter reports its credits; Google, Groq,
+        Cerebras and Mistral do not report a balance to an API key (it is shown in their own billing pages)."""
+        if provider != "openrouter" or config.mock_mode():
+            return None
+        try:
+            r = requests.get(PROVIDERS["openrouter"]["base"] + "/credits", headers={"Authorization": f"Bearer {key}"}, timeout=12)
+            if r.status_code == 200:
+                d = (r.json() or {}).get("data") or {}
+                total, used = float(d.get("total_credits") or 0), float(d.get("total_usage") or 0)
+                return {"left": round(total - used, 4), "currency": "USD", "at": time.time()}
+            r = requests.get(PROVIDERS["openrouter"]["base"] + "/key", headers={"Authorization": f"Bearer {key}"}, timeout=12)
+            if r.status_code == 200:
+                d = (r.json() or {}).get("data") or {}
+                if d.get("limit_remaining") is not None:
+                    return {"left": round(float(d["limit_remaining"]), 4), "currency": "USD", "at": time.time()}
+        except (requests.RequestException, ValueError, TypeError):
+            return None
+        return None
 
     @staticmethod
     def _probe_openrouter(key: str) -> str:
@@ -657,8 +704,25 @@ class Router:
     def _pool(self, role: str, vision: bool) -> list[Model]:
         """Every model these keys reach that could do the job at all (in Private mode, only the paid or local ones)."""
         s = config.load_settings()
-        return [m for m in self.models if m.scores.get(role, 0) > 0 and (m.vision or not vision) and not m.dead
+        pool = [m for m in self.models if m.scores.get(role, 0) > 0 and (m.vision or not vision) and not m.dead
                 and private_ok(m.provider, m.id, s)]
+        allowed = KEY_SCOPE.get()
+        if allowed is not None:
+            pool = [m for m in pool if m.key_fp in allowed]
+        return self._free_first(role, pool)
+
+    @staticmethod
+    def _free_first(role: str, pool: list[Model]) -> list[Model]:
+        """With keys on a free plan and keys on a paid plan, the free ones are used first, until the best model they
+        reach for this job has reached its limit; then the paid keys take over (and the free ones again once they
+        are free). A key whose plan is not known counts with the free ones, so that it is used before money is."""
+        free = [m for m in pool if m.key_tier != "paid"]
+        paid = [m for m in pool if m.key_tier == "paid"]
+        if not free or not paid:
+            return pool
+        best = max(m.scores.get(role, 0) for m in free)
+        top = [m for m in free if m.scores.get(role, 0) >= best - ROLES[role].get("margin", 4)]
+        return free if any(m.available() for m in top) else paid
 
     def peers(self, role: str, vision: bool = False) -> list[Model]:
         """The top class for a job: the strongest model these keys reach and every model equivalent to it
@@ -744,10 +808,58 @@ class Router:
 
     # -------------------------------------------------------------- call
 
-    def chat(self, role: str, system: str, user: str, *, images: list[bytes] | None = None,
-             json_mode: bool = False, max_out: int = 3000, temperature: float = 0.1,
-             effort: str | None = None, label: str = "", hooks: RunHooks | None = None,
-             allow_continue: bool = True, strict: bool | None = None, patience: int | None = None) -> Result:
+    def chat(self, role: str, system: str, user: str, **kw) -> Result:
+        """One job for one role, with the keys the paper it is for may use (see _chat)."""
+        token = None
+        if KEY_SCOPE.get() is None:
+            chosen = self.chosen_keys(kw.get("hooks"))
+            if chosen is not None:
+                token = KEY_SCOPE.set(chosen)
+        try:
+            return self._chat(role, system, user, **kw)
+        finally:
+            if token is not None:
+                KEY_SCOPE.reset(token)
+
+    def chosen_keys(self, hooks) -> frozenset | None:
+        """The keys the paper of this work was given (Keys for this paper), among the keys there are now. None: every
+        key. A choice none of whose keys exists any more counts as no choice."""
+        p = getattr(hooks, "p", None)
+        try:
+            fps = ((p.state.get("meta") or {}).get("keys") or {}).get("fps") if p is not None else None
+        except Exception:  # noqa: BLE001 - a paper's state that cannot be read leaves every key usable
+            return None
+        if not fps:
+            return None
+        here = {m.key_fp for m in self.models}
+        mine = frozenset(f for f in fps if f in here)
+        return mine or None
+
+    def key_report(self) -> list[dict]:
+        """Every key, for the author: its provider, its plan (free or paid), whether it works, what has reached its
+        limit and when it is free again, and the balance where the provider reports one."""
+        self.discover()
+        now = time.time()
+        out = []
+        for pid, st in self.status.items():
+            for k in st.get("keys") or []:
+                mine = [m for m in self.models if m.provider == pid and m.key_fp == k.get("fp")]
+                resting = sorted(({"model": m.id, "until": m.cooldown_until, "note": m.note or "rate limited"}
+                                  for m in mine if m.cooldown_until > now and not m.dead), key=lambda x: x["until"])
+                usable = [m for m in mine if not m.dead]
+                out.append({"provider": pid, "label": st.get("label") or PROVIDERS.get(pid, {}).get("label", pid),
+                            "n": k.get("n"), "fp": k.get("fp", ""), "masked": k.get("masked", ""), "ok": k.get("ok"),
+                            "tier": k.get("tier", ""), "count": k.get("count", 0), "message": k.get("message", ""),
+                            "balance": k.get("balance"), "resting": resting,
+                            "all_resting": bool(usable) and all(m.cooldown_until > now for m in usable),
+                            "free_again": min((r["until"] for r in resting), default=0),
+                            "vision": any(m.vision for m in usable)})
+        return out
+
+    def _chat(self, role: str, system: str, user: str, *, images: list[bytes] | None = None,
+              json_mode: bool = False, max_out: int = 3000, temperature: float = 0.1,
+              effort: str | None = None, label: str = "", hooks: RunHooks | None = None,
+              allow_continue: bool = True, strict: bool | None = None, patience: int | None = None) -> Result:
         """One job for one role.
 
         strict: None follows the role. True uses only the role's top class of models and waits (by raising an

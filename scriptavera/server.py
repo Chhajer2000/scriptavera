@@ -21,7 +21,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from . import __version__, config, domains, final, ingest, journals, literature, paper as paperlib, pipeline, revision, store, writing
-from . import arxivpack, assist, citecheck, costs, drafting, extras, hosting, memory, phone, provenance, reviews, sources, tenancy, typed, workspace
+from . import arxivpack, assist, citecheck, costs, drafting, extras, hosting, memory, phone, placing, provenance, reviews, sources, tenancy, typed, workspace
 from .llm import KEY_STEPS, PROVIDERS, ROLES, LLMError, router
 
 DOWNLOADS = {
@@ -281,6 +281,63 @@ async def api_settings(request: Request):
         config.save_settings(body["settings"])
     await run_in_threadpool(router.discover, True)
     return ok(_meta_payload())
+
+
+async def api_key_report(request: Request):
+    """Every AI key of whoever asks: its plan (free or paid), whether it works, which models have reached their limit
+    and when they are free again, and the balance where the provider reports one."""
+    if not router.discovered_at:
+        await run_in_threadpool(router.discover)
+    return ok(keys=await run_in_threadpool(router.key_report))
+
+
+async def api_manage_key(request: Request):
+    """On a computer: one key added to a provider, or one removed (by its fingerprint), in the .env file. On
+    scriptavera.com keys are kept in the person's browser and managed there."""
+    if hosting.public():
+        return fail("Not available on scriptavera.com.", 404)
+    from .llm import BYOK, key_fp
+    tenancy.set_owner(None)
+    body = await _body(request)
+    pid = str(body.get("provider") or "")
+    if pid not in BYOK:
+        return fail("Unknown provider.")
+    name = PROVIDERS[pid]["env"]
+    keys = config.get_keys(name)
+    if body.get("add"):
+        new = str(body["add"]).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_\-\.]{16,200}", new):
+            return fail("That does not look like a key: paste it exactly as the provider shows it.")
+        if new in keys:
+            return fail("That key is already added.")
+        keys.append(new)
+    elif body.get("remove"):
+        keys = [k for k in keys if key_fp(k) != body["remove"]]
+    else:
+        return fail("Say which key to add or remove.")
+    config.save_env({name: ",".join(keys)})
+    await run_in_threadpool(router.discover, True)
+    return ok(_meta_payload())
+
+
+async def api_paper_keys(request: Request):
+    """The AI keys a paper may use. Saved with the paper; while it runs, its next request already uses them."""
+    p = _project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    body = await _body(request)
+    fps = [str(x)[:20] for x in (body.get("fps") or []) if isinstance(x, str)][:40]
+    if not router.discovered_at:
+        await run_in_threadpool(router.discover)
+    known = {k["fp"]: k for k in router.key_report()}
+    fps = [f for f in dict.fromkeys(fps) if f in known]
+    if not fps:
+        return fail("Choose at least one key.")
+    if not any(known[f].get("vision") for f in fps):
+        return fail("None of these keys reaches a model that can read images; add a Gemini key to your choice.")
+    p.update_state(lambda st: st.setdefault("meta", {}).update(keys={"fps": fps, "at": time.time()}))
+    pipeline.emit(p.id, "state")
+    return ok(fps=fps)
 
 
 async def api_test_mode(request: Request):
@@ -841,8 +898,13 @@ async def api_layout(request: Request):
     p = _project(request)
     if not p:
         return fail("Project not found.", 404)
+    if request.method == "POST":                 # crowded pages placed by a model that sees the page, or not
+        body = await _body(request)
+        on = bool(body.get("ai"))
+        p.update_state(lambda st: st.update(layout_ai=on))
     one = request.query_params.get("page")
-    return ok(pages=await run_in_threadpool(pipeline.page_layouts, p, int(one) if one and one.isdigit() else None))
+    return ok(pages=await run_in_threadpool(pipeline.page_layouts, p, int(one) if one and one.isdigit() else None),
+              ai=placing.enabled(p))
 
 
 async def api_figure_image(request: Request):
@@ -1891,6 +1953,9 @@ routes = [
     Route("/api/source", api_source),
     Route("/api/shutdown", api_shutdown, methods=["POST"]),
     Route("/api/settings", api_settings, methods=["POST"]),
+    Route("/api/keys/report", api_key_report),
+    Route("/api/keys/manage", api_manage_key, methods=["POST"]),
+    Route("/api/projects/{pid}/keys", api_paper_keys, methods=["POST"]),
     Route("/api/settings/test", api_test, methods=["POST"]),
     Route("/api/test_mode", api_test_mode, methods=["POST"]),
     Route("/api/journals", api_journals),
@@ -1918,7 +1983,7 @@ routes = [
     Route("/api/projects/{pid}/outline", api_outline, methods=["POST"]),
     Route("/api/projects/{pid}/proofs", api_write_proof, methods=["POST"]),
     Route("/api/projects/{pid}/draftcheck", api_draftcheck, methods=["POST"]),
-    Route("/api/projects/{pid}/layout", api_layout, methods=["GET"]),
+    Route("/api/projects/{pid}/layout", api_layout, methods=["GET", "POST"]),
     Route("/api/projects/{pid}/figure/{fid}", api_figure_image, methods=["GET"]),
     Route("/api/projects/{pid}/figure/{fid}", api_figure, methods=["POST"]),
     Route("/api/projects/{pid}/review", api_review, methods=["POST"]),

@@ -50,9 +50,7 @@ const HOSTED = {
     return this.keyInfo;
   },
   keyChip(k) {
-    if (!k.ok) return `<span class="chip red" title="${esc(k.message || "")}">${esc(k.message || "not working")}</span>`;
-    const tier = k.tier === "paid" ? `<span class="chip green">paid plan</span>` : k.tier === "free" ? `<span class="chip red">free plan</span>` : `<span class="chip">plan not known</span>`;
-    return `${tier} <span class="chip">${esc(String(k.count))} models</span>`;
+    return keyStatus({ resting: [], all_resting: false, ...k });   /* plan, limits reached and when they renew, balance */
   },
   keysDialog() {
     const info = this.keyInfo || { providers: [] }, mine = this.myKeys();
@@ -120,22 +118,33 @@ const HOSTED = {
     s.onload = () => {
       this.gis = window.google && window.google.accounts;
       if (!this.gis) return;
-      this.gis.id.initialize({ client_id: this.acct.google_client_id, callback: (r) => this.signedInWith(r.credential),
-        ux_mode: "popup", auto_select: false, cancel_on_tap_outside: true, context: "signin" });
       this.paintButtons();
     };
     document.head.appendChild(s);
   },
   paintButtons() {
-    if (!this.gis) return;
+    /* Our own "Sign in with Google" button: always the same words, never someone's name or e-mail. Pressing it opens
+       Google's window, where you choose the account. */
     document.querySelectorAll(".sv-gbtn:not([data-done])").forEach((el) => {
       el.dataset.done = "1";
-      this.gis.id.renderButton(el, { theme: "outline", size: "large", text: "signin_with", shape: "pill", logo_alignment: "left" });
+      el.innerHTML = `<button class="sv-google" data-act="svgoogle"><svg viewBox="0 0 48 48" width="18" height="18" aria-hidden="true">
+        <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+        <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+        <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+        <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+        <span>Sign in with Google</span></button>`;
     });
   },
-  async signedInWith(credential) {
+  signIn() {
+    if (!this.gis || !this.gis.oauth2) return toast("Google sign-in is still loading. Try again in a moment.", true);
+    const client = this.gis.oauth2.initTokenClient({ client_id: this.acct.google_client_id, scope: "openid email profile",
+      callback: (r) => { if (r && r.access_token) this.signedInWith({ access_token: r.access_token }); else toast("Signing in was not completed.", true); },
+      error_callback: () => toast("The Google window was closed before you chose an account.", true) });
+    client.requestAccessToken({ prompt: "select_account" });          /* Google asks which account, every time */
+  },
+  async signedInWith(proof) {
     try {
-      const r = await api("/api/auth/google", { method: "POST", body: { credential } });
+      const r = await api("/api/auth/google", { method: "POST", body: typeof proof === "string" ? { credential: proof } : proof });
       this.acct = r; this.token = null;
       closeDialog();
       toast(r.adopted ? `Signed in. ${r.adopted === 1 ? "The paper" : "The " + r.adopted + " papers"} you started as a guest ${r.adopted === 1 ? "is" : "are"} now in your account.` : "Signed in with Google.");
@@ -214,7 +223,7 @@ const HOSTED = {
       : `<span class="chip ${left ? "" : "red"}" title="Free papers left${this.signedIn() ? " in your account" : " for this network, as a guest"}">${left} of ${this.acct.free_limit} free papers left</span>`;
     const who = this.signedIn()
       ? `<button class="hb-btn sv-me" data-act="svaccount" title="Your account">${this.acct.user.picture_url ? `<img src="${esc(this.acct.user.picture_url)}" alt="" referrerpolicy="no-referrer">` : ""}<span class="hb-label">${esc(this.acct.user.given_name || this.acct.user.full_name || this.acct.user.email)}</span></button>`
-      : `<button class="hb-btn primary-ish" data-act="svsignin">Sign in with Google</button>`;
+      : `<button class="hb-btn primary-ish" data-act="svgoogle">Sign in with Google</button>`;
     const keys = `<button class="hb-btn" data-act="svkeys" title="Your own AI keys, kept in this browser">AI keys<i class="key-dot ${S.meta && S.meta.has_vision ? "ok" : ""}"></i></button>`;
     return chip + keys + who;
   },
@@ -229,7 +238,7 @@ const HOSTED = {
     return `<div class="banner sv-guest"><div class="grow"><b>You are using Scriptavera as a guest.</b> Your papers are kept only in this server's memory:
       you can lose your data and progress at any time (for example when the server restarts), and a guest's papers are deleted after three days.
       Sign in with Google to keep your progress.${compact ? "" : ` <br><b>Guests get no cryptographic timestamps.</b> To have your unpublished notes signed, timestamped by an independent RFC 3161 authority and preserved,
-      register with Google and connect your Google Drive: only then is a signature made.`}</div><span class="sv-gbtn"></span>${this.gis ? "" : `<button class="btn" data-act="svsignin">Sign in</button>`}</div>`;
+      register with Google and connect your Google Drive: only then is a signature made.`}</div><span class="sv-gbtn"></span></div>`;
   },
   formNotices(f) {
     if (!this.on) return "";
@@ -320,7 +329,6 @@ const HOSTED = {
       <p>Signing in keeps your papers and their progress safe, and gives your account ${esc(String((this.acct || {}).free_limit ?? 3))} free papers in all (papers you made as a guest in this browser count, and move into your account).</p>
       <p>With Google Drive connected as well, your notes are signed and timestamped when you upload them, and your finished paper can be saved to your Drive in one click.</p>
       <div class="sv-gbtn" style="margin:16px 0"></div>
-      ${this.gis ? "" : `<p class="muted small">Google's sign-in button is loading…</p>`}
       <p class="muted small">Scriptavera receives your name, e-mail address and profile picture from Google. Nothing is posted anywhere.</p></div></div>`);
     this.paintButtons();
   },
@@ -394,10 +402,11 @@ const HOSTED = {
       catch (e) { toast(e.message, true); }
     },
     svsignin() { HOSTED.signinDialog(""); },
+    svgoogle() { HOSTED.signIn(); },
     svaccount() { HOSTED.accountDialog(); },
     async svsignout() {
       try { await api("/api/auth/logout", { method: "POST" }); } catch (e) { /* signed out anyway */ }
-      if (HOSTED.gis) HOSTED.gis.id.disableAutoSelect();
+      if (HOSTED.gis && HOSTED.gis.id) HOSTED.gis.id.disableAutoSelect();
       HOSTED.token = null; closeDialog(); await HOSTED.refresh(); S.meta = await api("/api/meta"); await loadProjects(); location.hash = ""; render();
     },
     async svdrive() {

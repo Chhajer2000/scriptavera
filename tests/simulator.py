@@ -277,6 +277,12 @@ def respond(label: str, system: str, user: str, vision: bool, model: Model | Non
             return f"<transcript>\n{page.replace(a, b)}\n</transcript>\n<changes>\n{a} -> {b}\n</changes>\n<reply>\nReplaced {a} by {b}.\n</reply>"
         return f"<transcript>\n{page}\n</transcript>\n<changes>\nnone\n</changes>\n<reply>\nYour comment explains the page; nothing in the transcription needed changing.\n</reply>"
 
+    # ---- step 9: which piece of a page's transcript stands on which framed line (in order, one line each)
+    if label.startswith("Place the lines of page"):
+        lines = int(re.search(r"L1 to L(\d+)", user).group(1))
+        ks = [int(k) for k in re.findall(r"^P(\d+):", user, re.M)]
+        return "<places>\n" + "\n".join(f"P{k}: L{min(k, lines)}" for k in ks) + "\n</places>"
+
     # ---- reading the notes
     if label.startswith("Locate"):
         if "tail" in label:

@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-VERSION = 10
+VERSION = 11                    # of the measured lines (kept beside each page)
 WIDTH = 700                     # the page is measured at this width
 
 
@@ -455,6 +455,7 @@ def _align(ps: list[dict], ls: list[dict], scale: float):
                 a, b = int(at * len(prof)), max(int(at * len(prof)) + 1, int(round((at + share) * len(prof))))
                 part = prof[a:b] or prof
                 out.append((pi + q, [{**line, "x": line["x"] + line["w"] * at, "w": line["w"] * share, "hlp": part, "shared": True,
+                                      "src": id(line), "sq": q, "sr": r,
                                       "hl": sum(part) / len(part), "ul": line["ul"] if q == 0 else 0.0, "ulc": 0.0}]))
                 at += share
         elif k > 0:
@@ -466,9 +467,11 @@ def _align(ps: list[dict], ls: list[dict], scale: float):
     return cost[n][m], out
 
 
-def layout(text: str, lines: list[dict], figure_boxes: dict[int, list[float]] | None = None) -> dict:
+def layout(text: str, lines: list[dict], figure_boxes: dict[int, list[float]] | None = None,
+           assign: dict[int, list[int]] | None = None) -> dict:
     """Where each piece of a page's transcript stands. figure_boxes: k -> [y0, x0, y1, x1] (thousandths), the boxes
-    the figure step found for the k-th drawing of the page."""
+    the figure step found for the k-th drawing of the page. assign: piece -> the lines it stands on (indices into
+    lines), when a model has matched them (placing.py); otherwise the pieces are matched by their lengths."""
     ps = pieces(text)
     if not ps:
         return {"ok": False, "items": []}
@@ -479,12 +482,13 @@ def layout(text: str, lines: list[dict], figure_boxes: dict[int, list[float]] | 
             if b:
                 p["box"] = {"x": b[1] / 1000, "y": b[0] / 1000, "w": (b[3] - b[1]) / 1000, "h": (b[2] - b[0]) / 1000}
             k += 1
+    reserved = _page_numbers(ps, lines)                 # a page number: in its corner, not shared with a heading
     inside = [p["box"] for p in ps if p.get("box")]
 
     def in_figure(l):
         cx, cy = l["x"] + l["w"] / 2, l["y"] + l["h"] / 2
         return any(b["x"] <= cx <= b["x"] + b["w"] and b["y"] <= cy <= b["y"] + b["h"] for b in inside)
-    free = [l for l in lines if not in_figure(l)]
+    free = [l for l in lines if not in_figure(l) and id(l) not in reserved]
     texty = [p for p in ps if p["kind"] != "figure"]
     if not free or not texty:
         return {"ok": False, "items": [_item(p, None, 0.02) for p in ps]}
@@ -505,6 +509,10 @@ def layout(text: str, lines: list[dict], figure_boxes: dict[int, list[float]] | 
             best = (total, pairs)
     total, pairs = best
     med = float(np.median([l["h"] for l in ls if not l["thin"]] or [0.02]))
+    if assign is not None:                              # the lines a model matched to the pieces, seeing the page
+        pairs, total = _assigned(ps, lines, assign), 0.0
+    else:
+        pairs = _unshare(pairs, free)
     placed = {i: g for i, g in pairs}
     items, last = [], None
     matched = sum(1 for p_i, g in pairs if g)
@@ -520,6 +528,15 @@ def layout(text: str, lines: list[dict], figure_boxes: dict[int, list[float]] | 
                 box["ul"] = 1.0                          # an underline drawn as its own stroke below the words
         else:
             box = None
+        if g and len(g) > 1 and p["kind"] in ("line", "margin") and not p.get("box"):
+            parts = _wrap(p["t"], [l["w"] for l in g])  # a sentence the author wrote over several lines: each on its own
+            if parts:
+                for q, (part, l) in enumerate(zip(parts, g)):
+                    sub = _item({**p, "t": part, "chars": len(part)}, {**_merged([l]), "ul": box.get("ul", 0) if q == 0 else 0}, med)
+                    sub["cont"] = q > 0
+                    items.append(sub)
+                last = items[-1]
+                continue
         it = _item(p, box, med)
         if box is None and last is not None:            # not matched: right after the piece before
             it.update(x=last["x"], y=last["y"] + last["h"] + 0.002, w=last["w"], h=med, placed=False)
@@ -528,15 +545,145 @@ def layout(text: str, lines: list[dict], figure_boxes: dict[int, list[float]] | 
     texty_n = len(texty)
     shared = sum(1 for _, g in pairs if len(g) == 1 and g[0].get("shared"))
     written = sum(1 for l in free if not l["thin"])
+    if assign is not None:
+        return {"ok": matched >= 0.6 * texty_n, "items": items, "cost": 0.0, "med": med, "doubt": False, "ai": True}
+    # how sure the matching by length is: a page where every piece found a line of about its length is sure; any
+    # piece without its line, or lines of writing left over, or a poor fit, makes it doubtful
+    spare = written - len({id(l) for _, g in pairs for l in g if not l.get("shared")} | {l["src"] for _, g in pairs for l in g if l.get("shared")})
+    unplaced = sum(1 for it in items if not it.get("placed") and it["kind"] != "figure")
+    doubt = bool(unplaced or spare >= 2 or total / max(1, texty_n) > 0.2)
     # a label and its formula often share a line ("Thm (Brown '92)  H(V) = 0"), but far more pieces than lines of
     # handwriting means that the text and the page do not belong together
     ok = (texty_n and matched >= 0.6 * texty_n and texty_n <= 1.8 * written + 2 and shared <= 0.6 * texty_n
           and total / max(1, texty_n) < 1.2)
-    return {"ok": bool(ok), "items": items, "cost": round(total / max(1, texty_n), 2), "med": med}
+    return {"ok": bool(ok), "items": items, "cost": round(total / max(1, texty_n), 2), "med": med, "doubt": doubt}
+
+
+def _assigned(ps: list[dict], lines: list[dict], assign: dict[int, list[int]]) -> list:
+    """(piece, [lines]) from the lines a model gave each piece. A line that several pieces stand on (a label and the
+    formula after it; a label and the first row of a formula written over several lines) is shared side by side, in
+    the order of the transcript, each in proportion to its length; a piece on several lines takes them in reading
+    order."""
+    users: dict[int, list[int]] = {}
+    for i, idx in sorted(assign.items()):
+        if i < len(ps) and not ps[i].get("box"):
+            for j in idx:
+                if 0 <= j < len(lines):
+                    users.setdefault(j, []).append(i)
+
+    def part(i: int, j: int) -> dict:
+        line, sharers = lines[j], users[j]
+        if len(sharers) < 2:
+            return line
+        total = sum(ps[q]["chars"] for q in sharers) or 1
+        at = sum(ps[q]["chars"] for q in sharers[:sharers.index(i)]) / total
+        share = ps[i]["chars"] / total
+        prof = line.get("hlp") or [line["hl"]]
+        a = int(at * len(prof))
+        cut = prof[a:max(a + 1, int(round((at + share) * len(prof))))] or prof
+        return {**line, "x": line["x"] + line["w"] * at, "w": line["w"] * share, "shared": True, "src": id(line),
+                "hlp": cut, "hl": sum(cut) / len(cut), "ul": line["ul"] if at == 0 else 0.0, "ulc": 0.0}
+    out = []
+    for i, p in enumerate(ps):
+        idx = [j for j in assign.get(i, []) if 0 <= j < len(lines)]
+        if p.get("box") or not idx:
+            out.append((i, []))
+            continue
+        g = [part(i, j) for j in sorted(set(idx), key=lambda j: (round(lines[j]["y"] / 0.02), lines[j]["x"]))]
+        if len(g) > 1:
+            g = [{k: v for k, v in l.items() if k not in ("shared", "src")} for l in g]
+        out.append((i, g))
+    return out
+
+
+def _unshare(pairs: list, lines: list[dict]) -> list:
+    """Two pieces put on one line, while a line of handwriting on the same row, beside it, got no text: the author
+    wrote them apart (a formula on the left, a map on the right). The piece on that side takes that line, and the
+    other the whole of its own."""
+    used = {id(l) for _, g in pairs for l in g if not l.get("shared")} | {l["src"] for _, g in pairs for l in g if l.get("shared")}
+    spare = [l for l in lines if id(l) not in used and not l["thin"] and not l.get("tall")]
+    by_src: dict[int, list] = {}
+    for k, (i, g) in enumerate(pairs):
+        if len(g) == 1 and g[0].get("shared") and g[0].get("sr") == 2:
+            by_src.setdefault(g[0]["src"], []).append(k)
+    src_line = {id(l): l for l in lines}
+    for sid, ks in by_src.items():
+        line = src_line.get(sid)
+        if not line or len(ks) != 2:
+            continue
+        cy, hh = line["y"] + line["h"] / 2, line["h"]
+        row = [u for u in spare if abs(u["y"] + u["h"] / 2 - cy) < 0.6 * max(hh, u["h"])]
+        right = [u for u in row if u["x"] >= line["x"] + line["w"]]
+        left = [u for u in row if u["x"] + u["w"] <= line["x"]]
+        first, second = sorted(ks, key=lambda k: pairs[k][1][0]["sq"])
+        whole = {k2: v for k2, v in line.items()}
+        if right:
+            u = min(right, key=lambda u: u["x"])
+            pairs[first] = (pairs[first][0], [whole]); pairs[second] = (pairs[second][0], [u])
+        elif left:
+            u = max(left, key=lambda u: u["x"])
+            pairs[first] = (pairs[first][0], [u]); pairs[second] = (pairs[second][0], [whole])
+        else:
+            continue
+        spare.remove(u)
+    return pairs
+
+
+def _wrap(text: str, widths: list[float]) -> list[str] | None:
+    """A line of the transcript cut where the author's handwriting goes on to the next line: at spaces outside the
+    formulas, as near as can be to where each written line ends. None when it cannot be cut so."""
+    cuts, depth, inmath = [], 0, False
+    for i, ch in enumerate(text):
+        if ch == "$" and (i == 0 or text[i - 1] != "\\"):
+            inmath = not inmath
+        elif ch in "{[(":
+            depth += 1
+        elif ch in "}])":
+            depth = max(0, depth - 1)
+        elif ch == " " and not inmath and depth == 0:
+            cuts.append(i)
+    if len(cuts) < len(widths) - 1:
+        return None
+    total, at, parts, start = sum(widths) or 1, 0.0, [], 0
+    for w in widths[:-1]:
+        at += w / total
+        want = at * len(text)
+        c = min((x for x in cuts if x > start), key=lambda x: abs(x - want), default=None)
+        if c is None:
+            return None
+        parts.append(text[start:c].strip())
+        start = c + 1
+    parts.append(text[start:].strip())
+    return parts if all(parts) else None
+
+
+_NUMBER = re.compile(r"^\(?\s*\d{1,3}\s*\)?\.?$")
+
+
+def _page_numbers(ps: list[dict], lines: list[dict]) -> set[int]:
+    """A page number in the transcript (a bare number at its start or end) and a small mark alone in a corner of the
+    page: they belong together. Matched first, so that the number is never laid over the start of a heading."""
+    texty = [i for i, p in enumerate(ps) if p["kind"] != "figure"]
+    if not texty:
+        return set()
+    used: set[int] = set()
+    for i, top in ((texty[0], True), (texty[-1], False)):
+        p = ps[i]
+        if p.get("box") or p["kind"] != "line" or not _NUMBER.match(p["t"].strip()):
+            continue
+        corner = [l for l in lines if id(l) not in used and not l["thin"] and l["w"] < 0.08
+                  and ((l["y"] < 0.15) if top else (l["y"] + l["h"] > 0.85))
+                  and (l["x"] > 0.6 or l["x"] + l["w"] < 0.4)]
+        if not corner:
+            continue
+        l = min(corner, key=lambda c: c["y"]) if top else max(corner, key=lambda c: c["y"])
+        p["box"] = {"x": l["x"], "y": l["y"], "w": l["w"], "h": l["h"]}
+        used.add(id(l))
+    return used
 
 
 def _item(p: dict, box: dict | None, med: float) -> dict:
-    it = {"t": p["t"], "kind": p["kind"], "placed": box is not None}
+    it = {"t": p["t"], "kind": p["kind"], "placed": box is not None, "rows": p.get("rows", 1)}
     if box:
         it.update(x=round(box["x"], 4), y=round(box["y"], 4), w=round(box["w"], 4), h=round(box["h"], 4))
         short = p["kind"] in ("line", "margin") and p["chars"] < 45 and box["h"] < 2 * med

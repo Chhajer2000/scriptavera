@@ -107,6 +107,11 @@ assert sorted(calls) == [("gemini-4-argon", "AQ.free"), ("gemini-4-argon", "AQ.p
 free_pro = [m for m in router.models if m.key == "AQ.free" and m.tier >= 2]
 assert free_pro and all(m.dead and "free tier" in m.note for m in free_pro), "set aside before any work"
 assert st["keys"][0]["count"] == 3 and st["keys"][1]["count"] == 5, st["keys"]
+# free keys first: while the free key's best model is free, the paid key is not used
+assert [m.ref for m in router.peers("reason")] == ["gemini:gemini-3.8-flash", "gemini:gemini-3.7-flash"], [m.ref for m in router.peers("reason")]
+for m in router.models:                       # the free key reaches its limit: the paid key takes over, with Argon
+    if m.key == "AQ.free":
+        m.cooldown_until = time.time() + 3600
 assert [m.ref for m in router.peers("reason")] == ["gemini:gemini-4-argon#2"], [m.ref for m in router.peers("reason")]
 calls.clear()
 assert router.chat("reason", "s", "u", hooks=RunHooks(), label="paid").text == "gemini-4-argon answered" and calls == [("gemini-4-argon", "AQ.paid")]
@@ -116,7 +121,7 @@ router.discover(force=True)
 assert [m.ref for m in router.peers("reason")] == ["gemini:gemini-3.8-flash", "gemini:gemini-3.7-flash"]
 assert router.chat("reason", "s", "u", hooks=RunHooks(), label="free").model == "gemini-3.8-flash"
 assert calls == [("gemini-4-argon", "AQ.free"), ("gemini-3.8-flash", "AQ.free")], calls        # the work never tried Argon or Pro
-print("3. the tier of each key found first: a free key goes straight to 3.8 Flash, a paid key to Argon")
+print("3. the tier of each key found first: a free key goes straight to 3.8 Flash, a paid key to Argon; free keys are used first")
 
 # ---- two keys of another provider: each reported on its own; one call skips what a key cannot use
 os.environ.pop("GEMINI_API_KEY")

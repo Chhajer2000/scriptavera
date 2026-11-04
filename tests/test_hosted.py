@@ -41,6 +41,7 @@ def fake_google(credential):
     return {"sub": sub, "email": email, "email_verified": True, "name": name, "given_name": name.split()[0],
             "iss": "https://accounts.google.com"}
 accounts.verify_google_credential = fake_google
+accounts.verify_google_access_token = lambda token: fake_google(token.removeprefix("tok:"))   # Google's account chooser
 accounts.verify_drive_token = lambda token: {"aud": "test-client", "scope": accounts.DRIVE_SCOPE, "email": "drive@example.org"}
 
 
@@ -168,6 +169,17 @@ proof = g.req("GET", f"/api/projects/{pids[0]}/proof").json()["proof"]
 assert proof["missing"] and proof["locked"] and "Sign in with Google" in proof["error"], proof
 assert not (config.PROJECTS_DIR / pids[0] / "originals").exists() and not provenance.status(config.PROJECTS_DIR / pids[0])
 print("5. each paper is seen only by its owner; guests get no signed record and are told why")
+
+# signing in with Google's account chooser (an access token), and staying signed in: a session close to its end is renewed
+from scriptavera import hosting
+z = Browser("203.0.113.77")
+r = z.req("POST", "/api/auth/google", json={"access_token": "tok:sub-z|zed@example.org|Zed Zeta"})
+assert r.status_code == 200 and r.json()["user"]["email"] == "zed@example.org" and "Max-Age=7776000" in r.headers.get("set-cookie", ""), r.text
+uid = hosting.unsign(r.headers["set-cookie"].split("sv_session=", 1)[1].split(";", 1)[0])["uid"]
+z.s.cookies.set("sv_session", hosting.sign({"uid": uid, "email": "zed@example.org"}, days=10))
+r = z.req("GET", "/api/account")
+assert r.json()["signed_in"] and "sv_session=" in r.headers.get("set-cookie", "") and "Max-Age=7776000" in r.headers["set-cookie"], r.headers
+print("5b. signing in with Google's account chooser; a session in use is renewed, so it is not asked for again")
 
 # ------------------------------------------------------------------ 6. signing in: guest papers move in, then 402
 r = g.sign_in("sub-a", "alice@example.org", "Alice Abel")

@@ -124,7 +124,8 @@ def _resolve(scope: dict, headers: dict) -> dict:
     peer = (scope.get("client") or ("", 0))[0] or ""
     ip = hosting.client_ip(headers, peer)
     email = str(session.get("email") or "").lower()
-    return {"uid": session.get("uid"), "email": email, "guest": gid, "new_guest": new_guest, "ip": ip,
+    renew = bool(session.get("uid")) and session.get("exp", 0) - time.time() < (hosting.SESSION_DAYS - 1) * 86400
+    return {"uid": session.get("uid"), "email": email, "guest": gid, "new_guest": new_guest, "ip": ip, "renew": renew,
             "ip_key": hosting.ip_key(ip), "admin": bool(email and email in hosting.admins()),
             "secure": headers.get("x-forwarded-proto", "") == "https" or scope.get("scheme") == "https"}
 
@@ -162,6 +163,10 @@ async def gate(scope: dict, headers: dict) -> tuple[JSONResponse | None, list[tu
     if ident["new_guest"]:
         extra.append((b"set-cookie", hosting.cookie_header(hosting.GUEST_COOKIE, hosting.sign({"g": ident["guest"]}, 365),
                                                            365 * 86400, ident["secure"])))
+    if ident.get("uid") and ident.get("renew"):     # signed in and active: the sign-in is extended, so it is not asked again
+        extra.append((b"set-cookie", hosting.cookie_header(
+            hosting.SESSION_COOKIE, hosting.sign({"uid": ident["uid"], "email": ident["email"]}), hosting.SESSION_DAYS * 86400,
+            ident["secure"])))
     path = scope.get("path", "")
     if any(path.startswith(p) for p in CLOSED_PATHS):
         return fail("Not available on scriptavera.com.", 404), extra
@@ -532,7 +537,10 @@ async def api_auth_google(request: Request):
     body = await _body(request)
     ident = identity(request)
     try:
-        info = await run_in_threadpool(accounts.verify_google_credential, str(body.get("credential") or ""))
+        if body.get("access_token"):              # Google's account chooser (the Sign in with Google button)
+            info = await run_in_threadpool(accounts.verify_google_access_token, str(body["access_token"]))
+        else:                                       # an ID token
+            info = await run_in_threadpool(accounts.verify_google_credential, str(body.get("credential") or ""))
     except accounts.AccountError as e:
         return fail(str(e), 401)
     d = accounts.db()
@@ -735,6 +743,7 @@ KEY_SHAPE = re.compile(r"^[A-Za-z0-9_\-.:]{12,300}$")
 def _keys_payload(owner: str, given: dict[str, list[str]] | None = None) -> dict:
     from . import llm
     r = llm.person_router(owner)
+    live = {k["fp"]: k for k in r.key_report()} if r else {}       # limits reached and when they renew, balances
     providers = []
     for pid in llm.BYOK:
         p = llm.PROVIDERS[pid]
@@ -743,7 +752,9 @@ def _keys_payload(owner: str, given: dict[str, list[str]] | None = None) -> dict
         mine = (given or {}).get(pid) or []
         for k in keys:
             raw = mine[k["n"] - 1] if 0 < k["n"] <= len(mine) else ""
-            k["masked"] = (raw[:4] + "…" + raw[-4:]) if len(raw) > 12 else ""
+            k["masked"] = (raw[:4] + "…" + raw[-4:]) if len(raw) > 12 else k.get("masked", "")
+            for f in ("resting", "all_resting", "free_again", "balance"):
+                k[f] = (live.get(k.get("fp")) or {}).get(f, k.get(f))
         providers.append({"id": pid, "label": p["label"], "why": p["why"], "link": llm.KEY_STEPS[pid]["link"],
                           "steps": llm.KEY_STEPS[pid]["steps"], "keys": keys, "ok": bool(st.get("ok"))})
     return {"ok": True, "providers": providers, "shared": llm.shared_keys(),

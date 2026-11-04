@@ -83,6 +83,7 @@ function macros() {
    wider than the preview's column, so a formula that fits on the page is shown whole here too. */
 function fitMath(root) {
   $$(".math.display", root).forEach((el) => {
+    if (el.closest(".laidpage")) return;              // a page laid out as written: sized with its page by fitLaid
     el.style.fontSize = "";
     const w = el.clientWidth;
     if (!w) return;                                   // hidden: fitted when shown
@@ -93,8 +94,8 @@ function fitMath(root) {
 }
 let fitTimer = null;
 const refit = (ms) => { clearTimeout(fitTimer); fitTimer = setTimeout(() => fitMath(document), ms); };
-window.addEventListener("resize", () => refit(150));
-if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => refit(0));       // widths change once KaTeX's fonts load
+window.addEventListener("resize", () => { refit(150); clearTimeout(fitLaid.t); fitLaid.t = setTimeout(() => fitLaid(document), 160); });
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { refit(0); fitLaid(document); });       // widths change once KaTeX's fonts load
 new MutationObserver((ms) => { if (ms.some((m) => m.addedNodes.length)) refit(60); }).observe(document.documentElement, { childList: true, subtree: true });
 function tex(src, display) {
   try { return katex.renderToString(String(src || ""), { displayMode: !!display, throwOnError: false, strict: "ignore", output: "html", macros: macros() }); }
@@ -479,6 +480,7 @@ function drawTop() {
     <span class="tb-dom">${esc(domainNames(m.domains).join(", "))}</span>
     ${m.imported ? "" : `<button class="chip ${S.b.journal ? "blue" : ""} tb-journal" data-act="journal" title="The journal the final paper is prepared for">${S.b.journal ? "For: " + esc(S.b.journal.name) : "Choose a target journal"}</button>
     <button class="chip ${rec.cls} tb-proof" data-act="proof" title="The signed, timestamped record of your notes: evidence of when they existed">${esc(rec.chip)}</button>`}
+    ${m.imported ? "" : `<button class="chip ${(m.keys || {}).fps ? "blue" : ""}" data-act="paperkeys" title="The AI keys this paper uses: change them at any time, also while it works">AI keys${(m.keys || {}).fps ? ": " + plural(m.keys.fps.length, "key") : ""}</button>`}
     ${S.b.usage && S.b.usage.total.calls ? `<button class="chip" data-act="costs" title="What this paper has cost in AI calls so far, and the estimate for the whole paper">${money(S.b.usage.total.cost)} so far</button>` : ""}
     <span class="tb-space"></span>`;
   if (S.b.paper && !running()) h += `<button class="btn small" data-act="addpagesdlg" title="Add new pages to these notes: only they are read, and every part of the paper that does not change is kept">${ICON.pages}Add pages</button>`;
@@ -559,7 +561,7 @@ const HOW = { read: "Every page is read. You confirm the topic, the notation and
   write: "The notes are understood as a whole; you choose the plan, and the paper is written from them.",
   revise: "Arguments are shortened, every proof is checked and a referee reads the draft. You decide on each change to the mathematics.",
   final: "You choose the title and check the citations. You get the LaTeX, the PDF and a package for Overleaf." };
-const HOME_ACTS = `<button class="btn primary big" data-act="newpaper">${ICON.plus}Import notes</button>`;
+const HOME_ACTS = `<button class="btn primary big" data-act="newpaper">${ICON.plus}Make a research paper</button>`;
 function papersBoard() {
   const P = (S.projects || []).filter((p) => !p.imported), imported = (S.projects || []).filter((p) => p.imported);
   const groups = [
@@ -573,34 +575,6 @@ function papersBoard() {
       <h2>${esc(h)} <span class="pg-n2">${list.length}</span></h2>${sub ? `<p class="pgroup-sub">${esc(sub)}</p>` : ""}
       <div class="pgrid">${list.map(paperCard).join("")}</div></section>`).join("");
 }
-function researchSuiteGrid() {
-  return `<div class="suite-grid">
-    <div class="suite-card">
-      <div class="suite-card-icon">${ICON.doc}</div>
-      <h3>Research Papers</h3>
-      <p>Convert handwritten notes, page scans, or drafts into verified LaTeX publications with symbol by symbol formula auditing.</p>
-      <button class="btn primary" data-act="newpaper">${ICON.plus}Import notes</button>
-    </div>
-    <div class="suite-card">
-      <div class="suite-card-icon">${ICON.slides}</div>
-      <h3>Conference Presentations</h3>
-      <p>Transform theorems, proofs, and definitions into professional LaTeX Beamer presentation slides for seminars and conferences.</p>
-      <button class="btn primary" data-act="slidesguide">${ICON.slides}Presentation slides</button>
-    </div>
-    <div class="suite-card">
-      <div class="suite-card-icon">${ICON.review}</div>
-      <h3>Reviewer Comments</h3>
-      <p>Address referee critiques point by point, carry out proof corrections, and draft formal author response letters.</p>
-      <button class="btn primary" data-act="rebuttalguide">${ICON.review}Reviewer rebuttal</button>
-    </div>
-    <div class="suite-card">
-      <div class="suite-card-icon">${ICON.shield}</div>
-      <h3>Proof &amp; Priority Audit</h3>
-      <p>Verify mathematical AST consistency, cross check citations on arXiv, and seal scans with RFC 3161 timestamps.</p>
-      <button class="btn primary" data-act="auditguide">${ICON.shield}Integrity audit</button>
-    </div>
-  </div>`;
-}
 
 function viewHome() {
   const P = S.projects || [];
@@ -609,12 +583,11 @@ function viewHome() {
       <button class="btn" data-act="settings">Open settings</button></div>` : HOSTED.noKeyBanner()) : "") + HOSTED.guestNotice(true);
   if (!P.length) {
     return `<div class="home">${key}<div class="home-empty">
-      <h1>Mathematical Research Suite</h1>
-      <p class="lead">Transform handwritten notes, proofs, and drafts into publication ready LaTeX papers, conference presentations, and peer review rebuttals.</p>
+      <h1>From your notes to a research paper</h1>
+      <p class="lead">Turn handwritten notes, proofs and drafts into a publication-ready LaTeX paper.</p>
       <div class="home-hero-actions">${HOME_ACTS}</div>
       <p class="muted small" style="margin-top:10px">Automatically recognizes handwritten notes, scanned PDFs, page photos, typed text, or LaTeX files (.tex / .zip).</p>
       </div>
-      ${researchSuiteGrid()}
       ${aboutLine()}</div>`;
   }
   return `<div class="home">${key}
@@ -622,7 +595,6 @@ function viewHome() {
       <p>Every step is saved as it finishes, so you can leave a paper at any point and come back to it.</p></div>
       <div class="home-acts">${HOME_ACTS}</div></div>
     ${papersBoard()}
-    <div style="margin-top:36px"><h2 style="font-size:18px;margin-bottom:12px">Research suite</h2>${researchSuiteGrid()}</div>
     ${aboutLine()}</div>`;
 }
 function money(x) { return x >= 1 ? "$" + x.toFixed(2) : x > 0 ? "$" + x.toFixed(3) : "$0"; }
@@ -1573,13 +1545,20 @@ async function ensureLayout(n) {
   const R = S.review;
   if (!R || R.layoutBusy[n]) return;
   R.layoutBusy[n] = true;
+  let again = false;
   try {
     const r = await api(`/api/projects/${S.pid}/layout` + (n ? `?page=${n}` : ""));
     if (S.review !== R) return;
-    R.layout = { ...(R.layout || {}), ...r.pages };
-    R.cache = {}; render();
+    R.layoutAi = r.ai !== false;
+    const old = R.layout || {}, changed = Object.keys(r.pages).some((k) => JSON.stringify(old[k]) !== JSON.stringify(r.pages[k]));
+    R.layout = { ...old, ...r.pages };
+    again = Object.values(r.pages).some((L) => L && L.placing);   /* an AI is placing the lines of a page: look again */
+    if (changed) { R.cache = {}; render(); }
   } catch (e) { /* the plain view stays */ }
-  finally { delete R.layoutBusy[n]; }
+  finally {
+    delete R.layoutBusy[n];
+    if (again) { clearTimeout(R.layoutPoll); R.layoutPoll = setTimeout(() => { if (S.review === R) ensureLayout(n); }, 4000); }
+  }
 }
 function leadBold(text, lead) {
   /* the words at the start of a line that the author highlighted ("Def", "Example", "Theorem"), in bold */
@@ -1590,36 +1569,105 @@ function leadBold(text, lead) {
   return head && rest.trim() ? `\\textbf{${head}}${rest}` : text;
 }
 function layoutHtml(n, L, marks) {
-  /* The page laid out as written: the pieces that stand side by side in one row, each row as far below the last
-     as on the page, each piece where it starts on the line. Positions are approximate: handwriting is not straight. */
-  const med = L.med || 0.022;
+  /* The page as written: each piece of the text where it stands on the handwritten page, on a sheet of the same
+     shape, in a size taken from the height of the handwriting (fitLaid sets it once the formulas are typeset). A line
+     is never broken in two: a piece that does not fit the width the author's line takes is made smaller instead. */
+  const asp = L.aspect || 1.414;
   let k = 0;
   const its = L.items.map((it, i) => ({ ...it, i, k: it.kind === "figure" ? k++ : -1 }));
-  const rows = [];
-  for (const it of [...its].sort((a, b) => (a.y + a.h / 2) - (b.y + b.h / 2) || a.x - b.x)) {
-    const r = rows[rows.length - 1], cy = it.y + it.h / 2;
-    if (r && it.kind !== "figure" && !r.fig && Math.abs(cy - r.cy) < 0.6 * Math.max(med, Math.min(it.h, r.h) / 2)) {
-      r.items.push(it); r.bottom = Math.max(r.bottom, it.y + it.h);
-    } else rows.push({ items: [it], cy, h: it.h, top: it.y, bottom: it.y + it.h, fig: it.kind === "figure" });
-  }
-  let html = "", prev = 0;
-  for (const r of rows) {
-    r.items.sort((a, b) => a.x - b.x);
-    const mt = Math.max(0, Math.min(4.5, (r.top - prev) * 40)).toFixed(2);   /* the space above, as on the page */
-    prev = Math.max(prev, r.bottom);
-    const centred = r.items.length === 1 && r.items[0].center;      /* a title written in the middle stays in the middle */
-    const xs = r.items.map((it) => Math.max(0, Math.min(0.85, it.x)));
-    const cols = [`${(xs[0] * 100).toFixed(1)}%`];
-    for (let q = 1; q < xs.length; q++) cols.push(`minmax(min-content, ${Math.max(4, (xs[q] - xs[q - 1]) * 100).toFixed(1)}%)`);
-    cols.push("minmax(0, 1fr)");
-    html += `<div class="lrow${centred ? " lcenter" : ""}" style="margin-top:${mt}em;grid-template-columns:${centred ? "minmax(0, 1fr)" : cols.join(" ")}">`
-      + r.items.map((it, q) => {
-        const text = it.kind === "line" && it.lead ? leadBold(it.t, it.lead) : it.t;
-        const cls = `li ${it.head ? "lhead" : ""} ${it.big ? "ltitle" : ""} ${it.ul ? "lul" : ""} ${it.placed ? "" : "unplaced"} k-${it.kind}`;
-        return `<div class="${cls}" id="li-${n}-${it.i}" style="grid-column:${centred ? 1 : q + 2}" data-x="${it.x}" data-y="${it.y}" data-w="${it.w}" data-h="${it.h}">${renderPiece(n, text, marks, Math.max(0, it.k))}</div>`;
-      }).join("") + `</div>`;
-  }
-  return html;
+  const bottom = Math.max(1, ...its.map((it) => (it.y || 0) + (it.h || 0) + 0.01));
+  const html = its.map((it) => {
+    const text = it.kind === "line" && it.lead ? leadBold(it.t, it.lead) : it.t;
+    const cls = `li ${it.head ? "lhead" : ""} ${it.ul ? "lul" : ""} ${it.center ? "lcenter" : ""} ${it.placed ? "" : "unplaced"} k-${it.kind}`;
+    const top = (it.y / bottom * 100).toFixed(2);
+    const pos = `left:${(it.x * 100).toFixed(2)}%;top:${top}%;width:${(Math.max(0.03, it.w) * 100).toFixed(2)}%`
+      + (it.kind === "figure" ? `;height:${(it.h / bottom * 100).toFixed(2)}%` : "");
+    /* rows: a formula written over several lines (aligned, cases) counts each of them */
+    const rows = Math.max(it.rows || 1, /\\begin\{/.test(it.t) ? 1 + (it.t.match(/\\\\(?![a-zA-Z])/g) || []).length : 1);
+    const hang = /\\(?:underbrace|overbrace|xleftarrow|xrightarrow|underset|overset|stackrel)/.test(it.t) ? 1 : 0;
+    return `<div class="${cls}" id="li-${n}-${it.i}" style="${pos}" data-x="${it.x}" data-y="${it.y}" data-w="${it.w}" data-h="${it.h}" data-rows="${rows}" data-hang="${hang}" data-big="${it.big ? 1 : 0}" data-top="${top}">${renderPiece(n, text, marks, Math.max(0, it.k))}</div>`;
+  }).join("");
+  return `<div class="laidpage" style="padding-top:${(asp * bottom * 100).toFixed(2)}%" data-pad="${(asp * bottom * 100).toFixed(2)}" data-asp="${asp}" data-bottom="${bottom}" data-med="${L.med || 0.022}">${html}</div>`;
+}
+function fitLaid(root) {
+  /* One size of letters for the whole page, as handwriting mostly has one size: taken from the height of the
+     author's usual line, and made a little smaller for the whole page if the lines would not fit where they stand.
+     A title (written clearly larger, or highlighted) is a little larger. Each piece keeps its place on the page; it may
+     run on to the right as far as the next piece on its row (or the edge of the page), as handwriting runs on, and
+     only a piece that still does not fit there is made smaller by itself, so that a line is never broken in two. */
+  (root || document).querySelectorAll(".laidpage").forEach((pg) => {
+    const W = pg.clientWidth;
+    if (!W) return;
+    if (pg.dataset.pad) pg.style.paddingTop = pg.dataset.pad + "%";
+    const H = W * (+pg.dataset.asp || 1.414);                  /* the height of the page itself, not of the sheet */
+    const med = +pg.dataset.med || 0.022;
+    const size = Math.max(9, Math.min(22, med * H * 0.66));
+    const all = [...pg.querySelectorAll(".li")].map((el) => ({
+      el, x: +el.dataset.x || 0, y: +el.dataset.y || 0, w: Math.max(0.03, +el.dataset.w || 0.1), h: +el.dataset.h || med,
+      rows: Math.max(1, +el.dataset.rows || 1), hang: +el.dataset.hang || 0, fig: el.classList.contains("k-figure"),
+      center: el.classList.contains("lcenter") }));
+    const text = all.filter((o) => !o.fig);
+    /* the room of each piece: from where it starts to the next piece on the same row, or to the edge of the page */
+    const sameRow = (a, b) => Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y) > 0.35 * Math.min(a.h, b.h, med * 1.5);
+    text.forEach((o) => {
+      let right = 0.985, left = 0.015;
+      all.forEach((q) => {
+        if (q === o || !sameRow(o, q)) return;
+        if (q.x >= o.x + o.w * 0.5) right = Math.min(right, q.x - 0.008);
+        else if (q.x + q.w <= o.x + o.w * 0.5) left = Math.max(left, q.x + q.w + 0.008);
+      });
+      if (o.center) {                                         /* a centred title stays centred where it was written */
+        const c = o.x + o.w / 2, half = Math.max(o.w / 2, Math.min(c - left, right - c));
+        o.l = c - half; o.room = 2 * half;
+      } else { o.l = o.x; o.room = Math.max(o.w, right - o.x); }
+      /* a title: written clearly larger than the page's usual line, or a heading the author highlighted */
+      const ratio = (o.h / o.rows) / med;
+      const head = o.el.classList.contains("lhead");
+      /* the title, or a line written clearly larger (a box much taller than one line holds more than one: no) */
+      o.f = +o.el.dataset.big ? 1.2 : ratio > 1.6 && ratio < 2.4 ? 1.15 : head && o.center ? 1.15 : head ? 1.05 : ratio < 0.6 ? 0.85 : 1;
+      o.el.style.left = (o.l * 100).toFixed(2) + "%";
+      o.el.style.width = "max-content";
+      o.el.style.fontSize = (size * o.f) + "px";
+      o.nat = o.el.getBoundingClientRect().width || 1;
+    });
+    /* one size for the page: the size at which nearly all of its lines fit where they stand */
+    const fits = text.map((o) => (o.room * W) / o.nat).sort((a, b) => a - b);
+    const scale = fits.length ? Math.max(0.72, Math.min(1, fits[Math.floor(fits.length * 0.15)])) : 1;
+    text.forEach((o) => {
+      let fs = size * o.f * scale;
+      const room = o.room * W;
+      if (o.nat * scale > room) fs = Math.max(7, fs * room / (o.nat * scale) * 0.98);   /* this line alone, smaller */
+      o.el.style.fontSize = fs + "px";
+      if (o.hang) {                                           /* a mark above or below the line: within two lines */
+        const tall = Math.max(o.h, med) * H * 2.1;
+        for (let i = 0; i < 4 && o.el.scrollHeight > tall + 1 && fs > 7; i++) {
+          fs = Math.max(7, fs * tall / o.el.scrollHeight * 0.97); o.el.style.fontSize = fs + "px";
+        }
+      }
+      /* the box as wide as what is written in it, so that it covers nothing of its neighbours */
+      if (o.center) {
+        const wid = o.el.getBoundingClientRect().width / W;
+        o.el.style.left = ((o.l + Math.max(0, (o.room - wid) / 2)) * 100).toFixed(2) + "%";
+      }
+    });
+    /* two pieces that would lie over each other: the later one moves just below the earlier, so both can be read */
+    const sheetH = pg.clientHeight || pg.offsetHeight, base = pg.getBoundingClientRect();
+    const els = [...pg.querySelectorAll(".li")];
+    els.forEach((el) => { if (el.dataset.top) el.style.top = el.dataset.top + "%"; });
+    const boxes = els.map((el) => { const r = el.getBoundingClientRect(); return { el, l: r.left - base.left, r: r.right - base.left, t: r.top - base.top, b: r.bottom - base.top }; })
+      .sort((a, b) => a.t - b.t || a.l - b.l);
+    let low = sheetH;
+    boxes.forEach((x, i) => {
+      for (const y of boxes.slice(0, i)) {
+        const over = Math.min(x.r, y.r) - Math.max(x.l, y.l), vert = y.b - x.t;
+        if (over > 0.15 * Math.min(x.r - x.l, y.r - y.l) && vert > 2 && x.t >= y.t - 2) {
+          const h = x.b - x.t; x.t = y.b + 1; x.b = x.t + h; x.el.style.top = x.t + "px";
+        }
+      }
+      low = Math.max(low, x.b + 4);
+    });
+    if (low > sheetH + 1) pg.style.paddingTop = low + "px";
+  });
 }
 function pageTextHtml(n) {
   /* One page as it was read, with its doubtful passages highlighted and its drawings in place: laid out as on the
@@ -1637,7 +1685,8 @@ function sheetHtml(pg, openBy) {
   const n = pg.n, R = S.review, rec = S.b.transcript.pages[n], s = pageState(pg, openBy), c = commentOn(n).trim();
   const chips = (s === "doubt" ? `<span class="chip hl">${plural(openBy[n].length, "item")} to check</span>` : "")
     + (s === "ok" ? '<span class="chip green">✓ Confirmed</span>' : "") + (rec && (rec.corrections || []).length ? '<span class="chip blue">Corrected from your comment</span>' : rec && rec.edited ? '<span class="chip blue">Changed by you</span>' : "")
-    + (R.busy[n] ? '<span class="chip"><span class="spinner"></span> Correcting…</span>' : "");
+    + (R.busy[n] ? '<span class="chip"><span class="spinner"></span> Correcting…</span>' : "")
+    + (!R.plain && (R.layout || {})[n] && R.layout[n].placing ? '<span class="chip" title="An AI that sees your page is saying which line goes where"><span class="spinner"></span> Placing the lines…</span>' : "");
   const body = pg.skip ? `<div class="ts-out">Left out as ${pg.kind === "blank" ? "a blank page" : pg.kind === "cover" ? "a cover page" : "not part of the notes"}. <button class="linkbtn" data-act="zoom" data-n="${n}">Look at it, or include it</button></div>`
     : !rec ? `<div class="ts-out"><span class="spinner"></span> This page is being read.</div>` : pageTextHtml(n);
   return `<section class="tsheet s-${s} ${n === R.n ? "on" : ""} ${R.fresh === n ? "fresh" : ""}" id="ts-${n}" data-n="${n}">
@@ -2114,7 +2163,8 @@ function viewReview() {
       <aside class="rv3-panel" id="rvpanel" aria-label="Page ${R.n}">${panelHtml(open, done, openBy)}</aside>
       <section class="rv3-text" id="rvtext" aria-label="Your notes as read">
         <div class="col-h"><b>Your notes, as read</b><span class="muted small">Click a line to see it on your page.</span><span class="tb-space"></span>
-          <span class="seg" role="group" aria-label="How the text is shown"><button class="${R.plain ? "" : "on"}" data-act="rvplain" data-v="0" title="Each line where it stands on your page; what you highlighted or underlined as a heading">As on the page</button><button class="${R.plain ? "on" : ""}" data-act="rvplain" data-v="1" title="Line after line">Plain</button></span></div>
+          <span class="seg" role="group" aria-label="How the text is shown"><button class="${R.plain ? "" : "on"}" data-act="rvplain" data-v="0" title="Each line where it stands on your page; what you highlighted or underlined as a heading">As on the page</button><button class="${R.plain ? "on" : ""}" data-act="rvplain" data-v="1" title="Line after line">Plain</button></span>
+          ${R.plain ? "" : `<label class="check small rv-aiplace" title="On a crowded page, where the lines cannot be placed surely by their length, an AI that sees the page says which line goes where: one request per such page, with your keys."><input type="checkbox" id="rvaiplace" ${R.layoutAi === false ? "" : "checked"}> AI places crowded pages</label>`}</div>
         ${list.map((pg) => sheetHtml(pg, openBy)).join("")}</section>
       <section class="rv3-hand" id="rvhand" aria-label="Your handwritten notes" style="--hz:${R.zoom}">
         <div class="col-h dark"><b>Your handwritten notes</b><span class="tb-space"></span>
@@ -3225,6 +3275,104 @@ function editorPanel() {
       <p class="muted small">Formulas and citations are kept unless your instruction says otherwise. The fidelity check runs again after every change.</p>` : ""}</div>`;
 }
 
+/* ------------------------------------------------- the AI keys a paper uses: chosen when it starts or continues,
+   changeable at any time while it runs; each key with its plan, its limits and, where the provider says, its balance */
+const LAST_KEYS = "scriptavera-last-keys";
+function lastKeys() { try { const v = JSON.parse(localStorage.getItem(LAST_KEYS) || "null"); return Array.isArray(v) ? v : null; } catch (e) { return null; } }
+function rememberKeys(fps) { try { localStorage.setItem(LAST_KEYS, JSON.stringify(fps)); } catch (e) { /* storage unavailable */ } }
+async function keyReport() {
+  try { return (await api("/api/keys/report")).keys || []; } catch (e) { toast(e.message, true); return []; }
+}
+function keyStatus(k) {
+  /* the chips that say what a key is now: its plan, whether it works, a limit reached and when it renews, its balance */
+  const out = [];
+  out.push(k.tier === "paid" ? `<span class="chip green">paid tier</span>` : k.tier === "free" ? `<span class="chip">free tier</span>` : `<span class="chip">plan not known</span>`);
+  if (!k.ok) out.push(`<span class="chip red" title="${esc(k.message || "")}">not working: ${esc(k.message || "check the key")}</span>`);
+  else if (k.all_resting) out.push(`<span class="chip red">limit reached, renews at ${esc(clock(k.free_again))}</span>`);
+  else if ((k.resting || []).length) out.push(`<span class="chip hl" title="${esc(k.resting.map((r) => `${r.model}: ${r.note}, free again at ${clock(r.until)}`).join("; "))}">${plural(k.resting.length, "model")} at the limit, until ${esc(clock(k.resting[0].until))}</span>`);
+  else out.push(`<span class="chip">${plural(k.count, "model")}</span>`);
+  if (k.balance && k.balance.left != null) out.push(`<span class="chip blue">balance $${Number(k.balance.left).toFixed(2)}</span>`);
+  return out.join(" ");
+}
+function keyRows(keys, chosen, input) {
+  /* the keys, grouped by provider; with input, each can be ticked */
+  const groups = {};
+  keys.forEach((k) => { (groups[k.label] = groups[k.label] || []).push(k); });
+  return Object.entries(groups).map(([label, ks]) => `<div class="kp-prov"><div class="kp-prov-h">${esc(label)}</div>
+    ${ks.map((k) => `<label class="kp-key ${input ? "" : "static"}">${input ? `<input type="checkbox" data-kpick="${esc(k.fp)}" ${chosen.has(k.fp) ? "checked" : ""} ${k.ok ? "" : "disabled"}>` : ""}
+      <span class="kp-name">Key ${k.n} <span class="muted">${esc(k.masked || "")}</span></span><span class="kp-st">${keyStatus(k)}</span></label>`).join("")}</div>`).join("");
+}
+function keyPlanNote(keys, chosen) {
+  const sel = keys.filter((k) => chosen.has(k.fp));
+  const free = sel.some((k) => k.tier !== "paid"), paid = sel.some((k) => k.tier === "paid");
+  if (!sel.length) return `<div class="flag red small">Choose at least one key.</div>`;
+  if (free && paid) return `<div class="flag blue small"><b>Free keys first.</b> The free-tier keys are used until they reach their limit; then the paid keys are used,
+    and the free ones again once their limit renews. Note: free keys cannot use the strongest Gemini models (Pro), so the paper is written with Flash while they last.</div>`;
+  if (paid) return `<div class="flag small">Only paid keys: the strongest models these keys reach are used, and the provider bills each request.</div>`;
+  return `<div class="flag small">Only free keys: nothing is billed. When their limit is reached, the work waits and carries on by itself when it renews.
+    <b>Data protection:</b> with a free-tier key the provider may use what is sent to improve its models.</div>`;
+}
+function keysPicker({ purpose, current }) {
+  /* Resolves with the fingerprints of the keys chosen, or null when the author cancels. */
+  const before = S.confirmResolve; S.confirmResolve = null; if (before) before(false);
+  return new Promise(async (resolve) => {
+    const keys = await keyReport();
+    if (!keys.length) { resolve([]); return; }                     /* no key at all: the step says so itself */
+    const fps = keys.map((k) => k.fp), usable = keys.filter((k) => k.ok).map((k) => k.fp);
+    const start = (current && current.length ? current : lastKeys()) || usable;
+    const chosen = new Set(start.filter((f) => usable.includes(f)));
+    if (!chosen.size) usable.forEach((f) => chosen.add(f));
+    S.kpick = { keys, chosen };
+    const title = { start: "Which AI keys should this paper use?", continue: "Continue with which AI keys?", change: "AI keys for this paper" }[purpose] || "AI keys";
+    const go = { start: "Start with these keys", continue: "Continue with these keys", change: "Use these keys" }[purpose] || "Use these keys";
+    const paint = () => {
+      const K = S.kpick;
+      showDialog(`<div class="dialog" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="dlg-h"><h2>${esc(title)}</h2></div>
+        <div class="dlg-b"><p class="small muted">${purpose === "change" ? "The change applies from the paper's next request, also while it is working." : "Your choice from last time is ticked. You can change it at any time with “AI keys” at the top of the paper."}</p>
+          <div class="kp-list">${keyRows(K.keys, K.chosen, true)}</div>${keyPlanNote(K.keys, K.chosen)}
+          <p class="small muted">Google, Groq, Cerebras and Mistral do not tell an API key its balance; see it in the provider's billing page. OpenRouter does, and it is shown.</p></div>
+        <div class="dlg-f"><button class="btn" data-act="kpcancel">Cancel</button><button class="btn primary" data-act="kpok" ${K.chosen.size ? "" : "disabled"}>${esc(go)}</button></div></div>`);
+    };
+    S.kpick.paint = paint;
+    S.confirmResolve = (v) => { S.kpick = null; resolve(v === false ? null : v); };
+    paint();
+    void fps;
+  });
+}
+async function paperKeys(pid, purpose) {
+  /* asks which keys this paper uses, saves the choice with it; false when the author cancels */
+  const cur = pid && S.b && S.pid === pid ? (((S.b.state || {}).meta || {}).keys || {}).fps : null;
+  const fps = await keysPicker({ purpose, current: cur });
+  if (fps === null) return false;
+  if (!fps.length) return true;
+  try { await api(`/api/projects/${pid}/keys`, { method: "POST", body: { fps } }); rememberKeys(fps); return true; }
+  catch (e) { toast(e.message, true); return false; }
+}
+const KEY_ACT = {
+  kpcancel() { const r = S.confirmResolve; S.confirmResolve = null; closeDialog(); if (r) r(false); },
+  kpok() {
+    const K = S.kpick; if (!K || !K.chosen.size) return;
+    const fps = [...K.chosen], r = S.confirmResolve; S.confirmResolve = null; closeDialog(); if (r) r(fps);
+  },
+  async paperkeys() {
+    if (await paperKeys(S.pid, "change")) { toast("Saved: the paper uses these keys from its next request."); await refresh(); }
+  },
+  async kmadd(el) {
+    const box = $(`#kmadd-${el.dataset.p}`), v = ((box && box.value) || "").trim();
+    if (!v) return toast("Paste the key first.", true);
+    S.busy = "keys"; render();
+    try { S.meta = await api("/api/keys/manage", { method: "POST", body: { provider: el.dataset.p, add: v } }); toast("Key added and checked."); }
+    catch (e) { toast(e.message, true); }
+    S.busy = ""; showDialog(settingsDialog());
+  },
+  async kmdel(el) {
+    if (!await askConfirm({ title: "Remove this key?", yes: "Remove the key", body: `<p>The key is removed from this computer (the .env file). Papers that chose it use your other keys.</p>` })) { showDialog(settingsDialog()); return; }
+    try { S.meta = await api("/api/keys/manage", { method: "POST", body: { provider: el.dataset.p, remove: el.dataset.fp } }); toast("Key removed."); }
+    catch (e) { toast(e.message, true); }
+    showDialog(settingsDialog());
+  },
+};
+
 /* -------------------------------------------------------------- settings */
 function settingsDialog() {
   const M = S.meta;
@@ -3235,11 +3383,19 @@ function settingsDialog() {
     else if (p.id === "custom") input = `<input type="text" data-env="CUSTOM_BASE_URL" placeholder="${ph("CUSTOM_BASE_URL", "Base URL, e.g. https://example.com/v1")}" autocomplete="off">
       <div class="prov-extra"><input type="password" data-env="CUSTOM_API_KEY" placeholder="${ph("CUSTOM_API_KEY", "Key")}" autocomplete="off">
       <input type="text" data-env="CUSTOM_MODELS" placeholder="${ph("CUSTOM_MODELS", "Model names, comma separated")}" autocomplete="off"></div>`;
-    else input = `<input type="password" data-env="${p.env}" placeholder="${ph(p.env, "Paste key (several keys: separate them with commas)")}" autocomplete="off">`;
+    else {                                     /* each key on its own line, with its status and a Remove button */
+      const ks = (p.keys || []).filter((k) => k.fp);
+      input = `${ks.map((k) => `<div class="kp-key static"><span class="kp-name">Key ${k.n} <span class="muted">${esc(k.masked || "")}</span></span>
+          <span class="kp-st">${keyStatus({ ...k, resting: [], all_resting: false })}</span>
+          <button class="btn small quiet" data-act="kmdel" data-p="${esc(p.id)}" data-fp="${esc(k.fp)}">Remove</button></div>`).join("")}
+        <div class="row" style="margin-top:6px"><input type="password" class="grow" id="kmadd-${esc(p.id)}" placeholder="Paste a ${esc(p.label)} key${ks.length ? " (another one)" : ""}" autocomplete="off" spellcheck="false">
+          <button class="btn small" data-act="kmadd" data-p="${esc(p.id)}" ${S.busy === "keys" ? "disabled" : ""}>${S.busy === "keys" ? "Checking…" : "Add key"}</button></div>`;
+    }
     const keys = p.keys || [], tier = (k) => (k && k.tier ? `, ${k.tier === "paid" ? "paid plan" : "free plan"}` : "");
-    const state = !p.configured ? link : keys.length > 1
+    const state = ["ollama", "custom"].includes(p.id) ? (!p.configured ? link : keys.length > 1
       ? keys.map((k) => k.ok ? `<span class="chip green">key ${k.n}: ${plural(k.count, "model")}${tier(k)}</span>` : `<span class="chip red" title="${esc(k.message)}">key ${k.n}: ${esc(k.message || "not working")}</span>`).join(" ")
-      : (p.ok ? `<span class="chip green">${plural(p.count, "model")}${tier(keys[0])}</span>` : `<span class="chip red" title="${esc(p.message)}">${esc(p.message || "not working")}</span>`);
+      : (p.ok ? `<span class="chip green">${plural(p.count, "model")}${tier(keys[0])}</span>` : `<span class="chip red" title="${esc(p.message)}">${esc(p.message || "not working")}</span>`))
+      : (!p.configured ? link : "");
     const privacy = keys.filter((k) => k.ok && k.privacy).map((k) => `<div class="small ${k.leak ? "sv-leak" : "muted"}">${keys.length > 1 ? "Key " + k.n + ": " : ""}${esc(k.privacy)}</div>`).join("");
     const steps = (p.steps || []).length ? `<div class="sv-steps"><b>How to get a ${esc(p.label)} key</b><ol>${p.steps.map((x) => `<li>${esc(x)}</li>`).join("")}</ol>
       ${p.signup ? `<a href="${esc(p.signup)}" target="_blank" rel="noopener">Open ${esc(p.label)} to create a key ↗</a>` : ""}</div>` : "";
@@ -3281,6 +3437,7 @@ function settingsDialog() {
         <label class="field"><span>Reference order without a journal</span><select data-set="ref_order"><option value="alphabetical" ${s.ref_order === "alphabetical" ? "selected" : ""}>Alphabetical by author</option><option value="appearance" ${s.ref_order === "appearance" ? "selected" : ""}>Order of first citation</option></select></label>
         <label class="field"><span>Document class without a journal</span><select data-set="document_class"><option value="amsart" ${s.document_class === "amsart" ? "selected" : ""}>amsart (AMS layout)</option><option value="article" ${s.document_class === "article" ? "selected" : ""}>article</option></select></label>
       </div>
+      <label class="check" style="margin-top:12px"><input type="checkbox" data-setbool="layout_ai" ${s.layout_ai === false ? "" : "checked"}> When your notes are checked (step 9), let an AI that sees the page say which line goes where on a crowded page, so the text is laid out as you wrote it. One request per such page; each paper can turn it off on its own.</label>
       <h3>Private mode</h3>
       <label class="check"><input type="checkbox" data-setbool="private" ${s.private ? "checked" : ""}> <b>Keep unpublished work private.</b> Every job then uses only Gemini models that Google sells on its paid tier, or a model running on this computer (Ollama); free services such as Groq or OpenRouter are never used, and your results are not searched for by their statements, on MathOverflow or in OEIS. Your Gemini key's Google Cloud project must have billing enabled: on the paid tier Google does not use prompts or responses to improve its products and keeps them only for a limited time to detect abuse. Short topic phrases are still sent to the literature databases as search queries, and fingerprints to the timestamp services; nothing else leaves this computer.</label>
       <h3>What Scriptavera remembers about you</h3><p>The meanings you confirm and the readings of your handwriting you correct are remembered on this computer, so later papers ask fewer questions: ${M.memory ? `${M.memory.symbols} symbol(s), ${M.memory.readings} handwriting reading(s)` : "nothing yet"}. ${M.memory && (M.memory.symbols || M.memory.readings) ? `<button class="btn small" data-act="forget">Forget all of it</button>` : ""}</p>
@@ -3297,7 +3454,7 @@ function aboutLine() {
     <div class="footer-grid">
       <div class="footer-col">
         <div class="footer-head">Scriptavera ${v}</div>
-        <p class="muted small">Open source mathematical research pipeline converting notes into verified papers, conference presentations, and peer review responses.</p>
+        <p class="muted small">Open source mathematical research pipeline converting notes into verified papers.</p>
         <p class="muted small">&copy; 2026 Vaibhav Chhajer</p>
       </div>
       <div class="footer-col">
@@ -3371,6 +3528,7 @@ function render() {
   $("#app").classList.toggle("rv-wide", S.view === "review" && !!S.review && S.review.pid === S.pid && !!S.review.wide && !!$(".rv3", main) && st("review").status !== "done");
   if (HOSTED.on) HOSTED.paintButtons();             // Google's sign-in buttons, where the page has room for one
   renderMath(main);
+  fitLaid(main);
   drawLog();
   if (S.view === "new" && S.form && S.form.files && S.form.files.length) renderUploadPreview();
   if (S.view === "assemble" && S.tab === "latex" && S.b && S.b.paper) loadTex();
@@ -3533,8 +3691,10 @@ const ACT = {
     try {
       const r = await api("/api/projects", { method: "POST", form: fd });
       HOSTED.counted();
-      await api(`/api/projects/${r.id}/run`, { method: "POST", body: {} });
-      S.form = newForm(); S.busy = ""; location.hash = `p/${r.id}`;
+      S.form = newForm(); S.busy = "";
+      if (await paperKeys(r.id, "start")) await api(`/api/projects/${r.id}/run`, { method: "POST", body: {} });
+      else toast("The paper is saved. Press Continue when you want it to start.");
+      location.hash = `p/${r.id}`;
     } catch (e) { S.busy = ""; render(); if (!HOSTED.refusal(e)) toast(e.message, true); }
   },
   async stop() { try { await api(`/api/projects/${S.pid}/stop`, { method: "POST" }); toast("Stopping after the current call."); } catch (e) { toast(e.message, true); } },
@@ -3542,16 +3702,21 @@ const ACT = {
     if (!await askConfirm({ title: "Start over from the first step?", yes: "Discard the results and start over",
       body: `<p>Every result for this paper is discarded: the reading, the notation you confirmed, the transcription, the drafts and the paper. It cannot be undone.</p>
         <p>Your uploaded pages and the record of your notes are kept, and the notes are read again from the first step.</p>` })) return;
+    if (!await paperKeys(S.pid, "continue")) return;
     try { await api(`/api/projects/${S.pid}/run`, { method: "POST", body: { from: "scout" } }); S.follow = true; S.gate = null; S.review = null; S.decide = null; S.edit = null; history.replaceState(null, "", `#p/${S.pid}`); toast("Starting again from the first step."); await refresh(); }
     catch (e) { toast(e.message, true); }
   },
   async autostop() { try { await api(`/api/projects/${S.pid}/autostop`, { method: "POST" }); toast("Automatic restart cancelled. Press Continue when you want to carry on."); await refresh(); } catch (e) { toast(e.message, true); } },
-  async resume() { try { await api(`/api/projects/${S.pid}/run`, { method: "POST", body: {} }); S.follow = true; await refresh(); } catch (e) { toast(e.message, true); } },
+  async resume() {
+    if (!await paperKeys(S.pid, "continue")) return;
+    try { await api(`/api/projects/${S.pid}/run`, { method: "POST", body: {} }); S.follow = true; await refresh(); } catch (e) { toast(e.message, true); }
+  },
 
   async redo(el) {
     const s = stageInfo(el.dataset.stage);
     if (!await askConfirm({ title: `Redo “${esc(s.name)}”?`, yes: "Redo from this step", danger: false,
       body: `<p>This step and every step after it run again, and their current results are replaced. Everything before it is kept.</p>` })) return;
+    if (!await paperKeys(S.pid, "continue")) return;
     try { await api(`/api/projects/${S.pid}/run`, { method: "POST", body: { from: s.id } }); S.follow = true; S.gate = null; S.review = null; S.decide = null; S.edit = null; history.replaceState(null, "", `#p/${S.pid}`); await refresh(); } catch (e) { toast(e.message, true); }
   },
   async delete(el) {
@@ -3666,7 +3831,7 @@ const ACT = {
     if (!files.length) return toast("No photos arrived.", true);
     if (S.phoneFor === "add" && S.pid) {
       const fd = new FormData(); for (const f of files) fd.append("files", f);
-      try { const r = await api(`/api/projects/${S.pid}/add_pages`, { method: "POST", form: fd }); toast(`${plural(r.pages.length, "page")} added.`); await api(`/api/projects/${S.pid}/run`, { method: "POST" }); await refresh(); }
+      try { const r = await api(`/api/projects/${S.pid}/add_pages`, { method: "POST", form: fd }); toast(`${plural(r.pages.length, "page")} added.`); if (await paperKeys(S.pid, "continue")) await api(`/api/projects/${S.pid}/run`, { method: "POST" }); await refresh(); }
       catch (e) { toast(e.message, true); }
     } else { S.form.files.push(...files); render(); toast(`${plural(files.length, "photo")} added to the notes.`); }
   },
@@ -3853,6 +4018,15 @@ const ACT = {
     const R = S.review; R.plain = el.dataset.v === "1"; R.cache = {};
     try { localStorage.setItem("scriptavera-rv-plain", R.plain ? "1" : "0"); } catch (e) { /* ignore */ }
     render();
+  },
+  async rvaiplace(el) {
+    const R = S.review, on = el.checked;
+    try {
+      const r = await api(`/api/projects/${S.pid}/layout`, { method: "POST", body: { ai: on } });
+      if (S.review !== R) return;
+      R.layoutAi = r.ai !== false; R.layout = { ...(R.layout || {}), ...r.pages }; R.cache = {}; render();
+      if (Object.values(r.pages).some((L) => L && L.placing)) { clearTimeout(R.layoutPoll); R.layoutPoll = setTimeout(() => ensureLayout(0), 4000); }
+    } catch (e) { toast(e.message || String(e)); }
   },
   rvwide() { const R = S.review; R.wide = !R.wide; try { localStorage.setItem("scriptavera-rv-wide", R.wide ? "1" : "0"); } catch (e) { /* ignore */ } render(); },
   async rvedit(el) {
@@ -4171,7 +4345,7 @@ const ACT = {
   },
 };
 
-Object.assign(ACT, WRITING_ACT);
+Object.assign(ACT, WRITING_ACT, KEY_ACT);
 document.addEventListener("click", (ev) => {
   const a = ev.target.closest("[data-act]");
   // Any other click closes an open menu: after this click is handled, so that a link clicked still opens.
@@ -4274,6 +4448,11 @@ document.addEventListener("input", (ev) => {
 document.addEventListener("change", (ev) => {
   const el = ev.target;
   if (el.dataset && (el.dataset.skind !== undefined || el.dataset.omove !== undefined || el.dataset.otitle !== undefined)) { writingChange(el); return; }
+  if (el.dataset && el.dataset.kpick !== undefined && S.kpick) {
+    if (el.checked) S.kpick.chosen.add(el.dataset.kpick); else S.kpick.chosen.delete(el.dataset.kpick);
+    S.kpick.paint(); return;
+  }
+  if (el.id === "rvaiplace" && S.review) { ACT.rvaiplace(el); return; }
   if (el.id === "rvlink" && S.review) { S.review.link = el.checked; if (el.checked) followScroll("rvtext"); return; }
   if (el.dataset.fdeclare !== undefined && S.form) { S.form.declare = el.checked; return; }
   if (el.dataset.optin !== undefined && S.form) { S.form.optIn = el.checked; return; }

@@ -18,7 +18,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import audit as fidelity
-from . import config, domains, literature, paper as paperlib, prompts, tenancy
+from . import config, domains, literature, paper as paperlib, placing, prompts, tenancy
 from .llm import ROLES, Cancelled, LLMError, RunHooks, clock, router
 from . import store as storelib
 from .store import STAGE_IDS, STAGES, Project
@@ -1693,6 +1693,16 @@ def undo_correction(p: Project, n: int) -> dict:
     return {"page": n, "text": cur["text"], "notes": page_notes(p)}
 
 
+def hosted_blocked(p: Project) -> bool:
+    """No model can be asked for this paper now (no key chosen that works): nothing is started."""
+    try:
+        if not router.discovered_at:
+            router.discover()
+        return not router.models
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def page_layouts(p: Project, only: int | None = None) -> dict:
     """For each page read, where each line of its transcript stands on the page (layout.py). Typed pages have no
     handwriting to measure. The lines of the handwriting are measured once per page and kept beside its image."""
@@ -1711,13 +1721,29 @@ def page_layouts(p: Project, only: int | None = None) -> dict:
         if str(n) in typed_src or not img.exists():
             out[n] = {"ok": False, "items": [], "text": rec.get("text", "")}
             continue
+        text = rec.get("text", "")
         try:
             lines = layout.page_lines(img, p.dir / "pages" / f"layout_p{int(n):03d}.json")
-            res = layout.layout(rec.get("text", ""), lines, boxes.get(int(n)))
+            res = layout.layout(text, lines, boxes.get(int(n)))
+            # a page where the matching by length is not sure: where a model that sees the page puts its lines
+            if lines and (res.get("doubt") or not res.get("ok")) and placing.enabled(p):
+                got = placing.cached(p, int(n), text)
+                if got and got.get("assign"):
+                    ai = layout.layout(text, lines, boxes.get(int(n)), assign=got["assign"])
+                    if ai.get("ok"):
+                        res = ai
+                elif not got and not hosted_blocked(p):
+                    res["placing"] = placing.start(p, int(n), text, lines, boxes.get(int(n)))
         except Exception:  # noqa: BLE001 - a page that cannot be measured is shown as plain text
             traceback.print_exc()
             res = {"ok": False, "items": []}
-        out[n] = {**res, "text": rec.get("text", "")}
+        try:
+            from PIL import Image
+            with Image.open(img) as im:                  # the shape of the page, so the text is laid out on the same shape
+                aspect = round(im.height / max(1, im.width), 4)
+        except Exception:  # noqa: BLE001
+            aspect = 1.414
+        out[n] = {**res, "text": rec.get("text", ""), "aspect": aspect}
     return out
 
 

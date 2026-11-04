@@ -362,6 +362,24 @@ Answer in exactly this format:
 the rewritten passage, with no [FIGURE ...] marker left
 </passage>"""
 
+PLACE_LINES = """You see one page of handwritten mathematical notes. Every line of handwriting on it is framed by a red box with a number: L1, L2, and so on. Below the image is the transcription of the page, cut into numbered pieces: P1, P2, and so on. Say on which boxed line or lines each piece is written, so that the transcription can be shown laid out exactly as the page is.
+
+Look at the handwriting itself: the pieces come in the order the transcriber wrote them down, which is not always the order on the page. A label and what follows it, a citation at the end of a line, or a remark written to the right may stand anywhere.
+
+- A piece written on one line gets that line: P3: L5
+- A piece the author wrote over several lines (a sentence that goes on below, a formula of several rows, a brace with its cases, a label with something written above or below it) gets all of them, top to bottom: P4: L6 L7 L8
+- Several pieces written on one boxed line (a label and the formula after it, a statement and its citation) each get that same line.
+- A boxed line that holds nothing of the transcription (a crossed-out word, a mark, part of a drawing, a page number that was not transcribed) is simply not given to any piece.
+- A piece you cannot find on the page at all: P7: none
+
+Answer with one line per piece, inside <places></places>, and nothing else:
+<places>
+P1: L2
+P2: L3 L4
+P3: none
+</places>"""
+
+
 CORRECT_PAGE = """The author of handwritten mathematical notes has compared the transcription of one page with the page itself and commented on what is wrong. Correct the transcription as the comment says. The author wrote the page: what the comment says the page shows is right, and the image shows where it applies.
 
 Rules
