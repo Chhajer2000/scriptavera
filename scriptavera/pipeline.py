@@ -2576,12 +2576,22 @@ def locate_symbol(p: Project, symbol: str, page: int, context: str = "") -> dict
     return out
 
 
-def save_transcript_page(p: Project, n: int, text: str) -> None:
-    tr = p.load("transcript", {"pages": {}})
-    rec = tr["pages"].setdefault(str(n), {"text": "", "uncertain": [], "changes": [], "model": "", "edited": False})
-    if rec["text"] != text:
-        rec["text"], rec["edited"] = text, True
-        p.save("transcript", tr)
+def save_transcript_page(p: Project, n: int, text: str, keep_lines: bool = False) -> str:
+    """Save the author's page n. keep_lines: the change was made somewhere in the page (an answer to a doubt), not to
+    its shape, so the line breaks and the places of the notes the page has on the server are kept where the text sent
+    has them otherwise (the page was put into shape meanwhile, relines.py). Returns the page as saved."""
+    with p._lock:                          # read and written in one go: nothing else changes the page in between
+        tr = p.load("transcript", {"pages": {}})
+        rec = tr["pages"].setdefault(str(n), {"text": "", "uncertain": [], "changes": [], "model": "", "edited": False})
+        if keep_lines and rec["text"] and rec["text"] != text:
+            from . import relines
+            lined, _, share = relines.transfer(text, rec["text"])
+            if share >= relines.GATE:
+                text = lined
+        if rec["text"] != text:
+            rec["text"], rec["edited"] = text, True
+            p.save("transcript", tr)
+        return rec["text"]
 
 
 def submit_topic(p: Project, data: dict) -> str:

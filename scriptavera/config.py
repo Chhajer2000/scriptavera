@@ -47,7 +47,7 @@ DEFAULT_SETTINGS = {
     "candidates_keep": 24,     # papers kept after ranking
     "read_top_k": 8,           # papers read in full
     "parallel_pages": 2,       # simultaneous page calls in the survey pass
-    "layout_ai": True,         # step 9: a page whose lines cannot be placed surely by their length is placed by a model
+    "layout_ai": True,         # step 9: a model that sees each page says where its lines end and which are headings
     "ref_order": "alphabetical",  # or "appearance"
     "document_class": "amsart",   # or "article"
     "proof_timestamps": True,     # timestamp the fingerprint of uploaded notes with independent services

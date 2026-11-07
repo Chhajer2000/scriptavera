@@ -42,7 +42,16 @@ try:
         line = pg.inner_text("#rvpanel .autoline")
         assert "One drawing on this page only explains your argument" in line, line
         assert pg.locator("#fig-f2").count() == 0, "a sure explanation is not asked about"
-        assert "not printed" in pg.inner_text("#tb-3 .tfig"), "the middle says what was decided about the drawing"
+        # the middle shows the notes as written: the drawing where it stands, whole, with nothing to decide in the text
+        assert pg.locator("#tb-3 .tfig").count() >= 1 and pg.locator("#tb-1 .tfig img").count() >= 1, "the drawings stand in the text"
+        mid = pg.inner_text("#tb-3") + pg.inner_text("#tb-1")
+        assert "not printed" not in mid and "decision" not in mid and "Figure" not in mid, mid
+        sizes = pg.evaluate("""() => [...document.querySelectorAll('#rvtext .rd-l, #rvtext .rd .katex')]
+            .filter((e) => !e.closest('.katex .katex')).map((e) => getComputedStyle(e).fontSize)""")
+        assert len(set(sizes)) == 1, ("one size of letters for the words and the formulas", sorted(set(sizes)))
+        assert pg.locator('[data-act="rvplain"], #rvaiplace').count() == 0, "one view of the notes, no switches"
+        assert pg.evaluate("[...document.querySelectorAll('#rvtext .rd *')].filter((e) => getComputedStyle(e).float !== 'none').length") == 0, \
+            "nothing in the notes is moved to a side: a note stays under the line it belongs to"
         pg.locator("#rvpanel > details.pp-sec > summary").click(); time.sleep(0.3)
         row = pg.locator(".srow", has_text="Page 3")
         assert "Not printed" in row.inner_text() and "Decided by the app" in row.inner_text(), row.inner_text()

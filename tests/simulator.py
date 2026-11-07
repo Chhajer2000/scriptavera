@@ -283,6 +283,15 @@ def respond(label: str, system: str, user: str, vision: bool, model: Model | Non
         ks = [int(k) for k in re.findall(r"^P(\d+):", user, re.M)]
         return "<places>\n" + "\n".join(f"P{k}: L{min(k, lines)}" for k in ks) + "\n</places>"
 
+    # ---- step 9: the page written out line for line: a sentence to a line, a line of one or two words a heading
+    if label.startswith("Find the lines of page"):
+        page = user.split("THE TRANSCRIPTION OF THIS PAGE\n", 1)[1]
+        parts = re.split(r"(\$\$.+?\$\$|\$[^$]+?\$|\[FIGURE[^\]]*\])", page, flags=re.S)
+        text = "".join(q if i % 2 else re.sub(r"\. (?=[A-Z])", ".\n", q) for i, q in enumerate(parts))
+        lines = ["<h>" + q if q.strip() and len(q.split()) <= 2 and "$" not in q and not q.lstrip().startswith("[") else q
+                 for q in text.split("\n")]
+        return "<lines>\n" + "\n".join(lines) + "\n</lines>"
+
     # ---- reading the notes
     if label.startswith("Locate"):
         if "tail" in label:

@@ -83,19 +83,20 @@ function macros() {
    wider than the preview's column, so a formula that fits on the page is shown whole here too. */
 function fitMath(root) {
   $$(".math.display", root).forEach((el) => {
-    if (el.closest(".laidpage")) return;              // a page laid out as written: sized with its page by fitLaid
     el.style.fontSize = "";
     const w = el.clientWidth;
     if (!w) return;                                   // hidden: fitted when shown
     const k = el.firstElementChild;
     const need = k ? k.scrollWidth : el.scrollWidth;
-    if (need > w + 1) el.style.fontSize = Math.max(0.45, (w - 2) / need).toFixed(3) + "em";
+    /* the notes as read keep one size of letters: a formula wider than the column is made a little smaller at most,
+       and can be scrolled sideways beyond that */
+    if (need > w + 1) el.style.fontSize = Math.max(el.closest(".rd") ? 0.85 : 0.45, (w - 2) / need).toFixed(3) + "em";
   });
 }
 let fitTimer = null;
 const refit = (ms) => { clearTimeout(fitTimer); fitTimer = setTimeout(() => fitMath(document), ms); };
-window.addEventListener("resize", () => { refit(150); clearTimeout(fitLaid.t); fitLaid.t = setTimeout(() => fitLaid(document), 160); });
-if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { refit(0); fitLaid(document); });       // widths change once KaTeX's fonts load
+window.addEventListener("resize", () => refit(150));
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => refit(0));       // widths change once KaTeX's fonts load
 new MutationObserver((ms) => { if (ms.some((m) => m.addedNodes.length)) refit(60); }).observe(document.documentElement, { childList: true, subtree: true });
 function tex(src, display) {
   try { return katex.renderToString(String(src || ""), { displayMode: !!display, throwOnError: false, strict: "ignore", output: "html", macros: macros() }); }
@@ -1394,9 +1395,7 @@ function initReview() {
   let wide = true; try { wide = localStorage.getItem("scriptavera-rv-wide") !== "0"; } catch (e) { /* ignore */ }
   S.review = { pid: S.pid, n: reviewPages()[0] || 1, zoom: 1, mode: "page", dropped: {}, skip: {}, own: {}, figBusy: "",
     figMode: "", watch: [], local: [], edit: 0, link: false, wide, draft: {}, conf: {}, quiet: {}, cache: {}, busy: {}, fresh: 0,
-    layout: null, layoutBusy: {}, layoutAsked: {}, layoutTimer: {}, plain: false };
-  try { S.review.plain = localStorage.getItem("scriptavera-rv-plain") === "1"; } catch (e) { /* ignore */ }
-  ensureLayout(0);
+    linesAsked: {}, linesWork: {}, linesStale: {}, linesBusy: false, linesOff: false };
   const first = openItems()[0]; if (first) S.review.n = first.n;
 }
 function pageNotes() {
@@ -1438,19 +1437,21 @@ function pageRow(openBy) {
     return `<button class="rv-p s-${s} ${pg.n === S.review.n ? "on" : ""} ${c ? "noted" : ""}" data-act="rvpage" data-n="${pg.n}" title="Page ${pg.n}: ${t}" aria-label="Page ${pg.n}, ${t}">${pg.n}</button>`;
   }).join("");
 }
-function figInText(n, k, desc) {
-  /* A drawing in the middle column, where it stands on the page: the redrawn figure or the drawing cut from the page,
-     what was decided about it, and what it shows. */
+/* Step 9 shows each page of the notes the way the author reads it: line under line as the page has them, an empty
+   line as a gap, every word and formula in one size of letters, a heading the author marked in bold, a margin note to
+   the right of the line it was written beside, and each drawing whole, as wide on the column as it is on the page,
+   where it stands. What is to be decided about a drawing is asked on the left, never in the text. */
+const READ_SCALE = 1.25;               /* the column shows the notes a little larger than the page holds them */
+function figInText(n, k, desc, alone) {
+  /* A drawing where it stands in the text: the redrawn figure once it is drawn (unless the author's own drawing was
+     chosen), otherwise the drawing cut from the page, never cut off. What it shows is its description, on hover. */
   const f = (S.b.figures || []).find((x) => x.page === n && x.k === k);
-  const v = f ? Math.round(f.drawn || 0) : 0, box = f && Array.isArray(f.box) && f.box.length === 4 ? f.box : null;
-  const [label, cls] = !f ? ["Drawing", "none"] : figOpen(f) ? ["your decision is needed", "open"]
-    : ({ tikz: ["printed, redrawn", "paper"], orig: ["printed, your own drawing", "paper"], explain: ["not printed: it explains your argument", "expl"], none: ["left out", "gone"] }[f.choice] || ["Drawing", "none"]);
-  let img = "";
-  if (f && f.choice !== "none") {
-    if (f.tikz_ok && f.drawn && f.choice !== "orig" && f.choice !== "explain") img = `<img src="/api/projects/${S.pid}/figure/${f.id}?kind=tikz&v=${v}" alt="The redrawn figure" loading="lazy">`;
-    else if (box || f.drawn) img = `<img src="/api/projects/${S.pid}/figure/${f.id}?v=${v}" alt="Your drawing, cut from page ${n}" loading="lazy">`;
-  }
-  return `<span class="tfig s-${cls}" ${box ? `data-box="${box.join(",")}"` : ""} ${f ? `data-fid="${f.id}"` : ""}><span class="tfig-h">Figure${f && f.of > 1 ? ` ${k + 1}` : ""}${f ? " · " + label : ""}</span>${img}<span class="tfig-d">${inner(mixed(desc))}</span></span>`;
+  const box = f && Array.isArray(f.box) && f.box.length === 4 ? f.box : null, v = f ? Math.round(f.drawn || 0) : 0;
+  const what = esc(String(desc || "").replace(/\s+/g, " ").trim());
+  const q = !f ? "" : f.tikz_ok && f.drawn && !["orig", "explain", "none"].includes(f.choice) ? `?kind=tikz&v=${v}` : box ? `?v=${v}` : "";
+  if (!q) return `<span class="tfig bare${alone ? " alone" : ""}" ${f ? `data-fid="${f.id}"` : ""}>Drawing: ${inner(mixed(desc))}</span>`;
+  const wide = box ? Math.max(3, Math.min(100, (box[3] - box[1]) / 10 * READ_SCALE)) : 60;
+  return `<span class="tfig${alone ? " alone" : ""}" ${box ? `data-box="${box.join(",")}"` : ""} data-fid="${f.id}" style="width:${wide.toFixed(1)}%"><img src="/api/projects/${S.pid}/figure/${f.id}${q}" alt="${what}" title="${what}" loading="lazy" draggable="false"></span>`;
 }
 /* LaTeX the transcriber wrote outside dollar signs ("\underline{Thm}", "\begin{center}", "\xrightarrow{...}"), shown as
    it would print: text commands as formatting, anything else typeset as mathematics. Only the display: the page's
@@ -1510,183 +1511,129 @@ function bareLatex(s, put) {
 function tidyBare(text, put) {
   return String(text).split(/(\$\$[\s\S]+?\$\$|\$[^$\n]+?\$)/g).map((part, j) => j % 2 ? part : bareLatex(part, put)).join("");
 }
-function renderPiece(n, text, marks, k0) {
-  /* Text of a page, or of one piece of it, as it prints: formulas typeset, doubtful passages highlighted, and the
-     drawings, counted from the k0-th of the page, in place. */
-  const figs = [], re = /\[FIGURE(?:\s+f\d+)?\s*:/g;
-  let out = "", pos = 0, m, k = k0 || 0;
-  while ((m = re.exec(text))) {
+/* Straight quotation marks as printed ones (the letters of the notes show " as a closing mark): in words, and in the
+   words of a formula (\text{...}), where KaTeX makes `` and '' into them. */
+const qWords = (t) => t.replace(/(^|[\s(\[{\u0003])(?<!\\)"(?=\S)/g, "$1\u201c").replace(/(?<!\\)"/g, "\u201d");
+const qMath = (t) => t.replace(/\\text\{([^{}"]*"[^{}]*)\}/g, (m0, w) => "\\text{" + w.replace(/(^|[\s(\[])"(?=\S)/g, "$1``").replace(/"/g, "''") + "}");
+function curly(s) {
+  return String(s || "").split(/(\$\$[\s\S]+?\$\$|\$[^$\n]+?\$)/g).map((t, i) => (i % 2 ? qMath(t) : qWords(t))).join("");
+}
+function readLine(n, raw, held, marks, fmt) {
+  /* One line of a page: its indent, a bullet the author wrote, in bold if the author marked it as a heading (or its
+     first words, a highlighted "Theorem" or "Note"), its formulas typeset and its doubtful passages highlighted. A
+     drawing alone on its line stands on a line of its own. A note ([MARGIN: ...]) is shown right under the line it
+     was read with, marked as a note on it: never beside another line, since where a note stands says what it is
+     about. Where it goes is decided when the page is read (prompts.FINAL, relines.py), the same way for any notes. */
+  const whole = squash(raw.replace(/\u0003(\d+)\u0003/g, (m0, i) => held[+i].raw));
+  const ind = Math.min(6, /^[ \t]*/.exec(raw)[0].replace(/\t/g, "    ").length >> 1);
+  const notes = [];
+  let body = raw.replace(/[ \t]*\u0003(\d+)\u0003/g, (m0, i) => (held[+i].kind === "margin" ? (notes.push(held[+i]), " ") : m0)).trim();
+  const toks = [], put = (h) => { toks.push(h); return `\u0004${toks.length - 1}\u0004`; };
+  const part = (t) => inner(mixed(tidyBare(curly(t), put), marks)).replace(/<\/p><p>/g, "<br>");
+  const under = notes.map((h) => `<div class="rd-l rd-note" style="--ind:${ind + 1}" title="Your note on the line above"><span class="rd-arrow" aria-hidden="true">↳</span>${part(h.desc)}</div>`).join("");
+  const done = (html) => { for (let r = 0; r < 4 && html.includes("\u0004"); r++) html = html.replace(/\u0004(\d+)\u0004/g, (m0, i) => toks[+i] || ""); return html; };
+  if (!body) return done(under);
+  const bm = /^(?:[•·∙◦▪*]|–|-(?!-))\s+(?=\S)/.exec(body);
+  if (bm) body = body.slice(bm[0].length);
+  const only = /^\u0003(\d+)\u0003$/.exec(body), one = only && held[+only[1]];
+  if (one && one.kind === "fig") return done(`<div class="rd-l rd-figline" style="--ind:${ind}">${figInText(n, one.k, one.desc, true)}</div>${under}`);
+  const head = fmt.heads.has(whole), lead = !head && fmt.leads[whole];
+  let html = "";
+  if (lead) {                                 /* the first words of the line are its heading */
+    const ws = body.split(/(\s+)/); let acc = "", i = 0;
+    while (i < ws.length && squash(acc) !== lead) acc += ws[i++];
+    if (squash(acc) === lead && acc.length < body.length) html = `<b class="rd-lead">${part(acc)}</b>${part(body.slice(acc.length))}`;
+  }
+  if (!html) html = part(body);
+  html = html.replace(/\u0003(\d+)\u0003/g, (m0, i) => {
+    const h = held[+i];
+    return h.kind === "fig" ? figInText(n, h.k, h.desc, false) : `<span class="tfig bare">Drawing: ${inner(mixed(h.desc))}</span>`;
+  });
+  const cls = ["rd-l", /^\$\$[\s\S]*\$\$$/.test(body) ? "rd-disp" : "", bm ? "rd-bul" : "", head ? "rd-head" : ""].filter(Boolean).join(" ");
+  return done(`<div class="${cls}" style="--ind:${ind}">${bm ? '<span class="rd-b" aria-hidden="true">•</span>' : ""}${html}</div>${under}`);
+}
+function readHtml(n, text, marks) {
+  /* A page of the notes as the author reads it: a line of the transcript is a line here, an empty line a gap. */
+  const rec = S.b.transcript.pages[n] || {}, f = rec.format || {};
+  const fmt = { heads: new Set((f.heads || []).map(String)), leads: f.leads && typeof f.leads === "object" ? f.leads : {} };
+  const held = [], re = /\[(FIGURE(?:\s+f\d+)?|MARGIN|EXPLANATORY DRAWING)\s*:/g;
+  let src = "", pos = 0, m, k = 0;
+  while ((m = re.exec(text))) {               /* drawings and margin notes, their brackets matched, set aside */
     let depth = 1, j = m.index + m[0].length;
     while (j < text.length && depth) { if (text[j] === "[") depth++; else if (text[j] === "]") depth--; j++; }
     if (depth) break;
-    figs.push(figInText(n, k++, text.slice(m.index + m[0].length, j - 1).trim()));
-    out += text.slice(pos, m.index) + `\u0003${figs.length - 1}\u0003`;
+    const kind = m[1].startsWith("FIGURE") ? "fig" : m[1] === "MARGIN" ? "margin" : "expl";
+    held.push({ kind, k: kind === "fig" ? k++ : -1, desc: text.slice(m.index + m[0].length, j - 1).trim(), raw: text.slice(m.index, j) });
+    src += text.slice(pos, m.index) + `\u0003${held.length - 1}\u0003`;
     pos = j; re.lastIndex = j;
   }
-  const toks = [], put = (h) => { toks.push(h); return `\u0004${toks.length - 1}\u0004`; };
-  let html = mixed(tidyBare(out + text.slice(pos), put), marks).replace(/\u0003(\d+)\u0003/g, (m0, i) => figs[+i] || "");
-  for (let r = 0; r < 4 && html.includes("\u0004"); r++) html = html.replace(/\u0004(\d+)\u0004/g, (m0, i) => toks[+i] || "");
-  return html;
-}
-function layoutFor(n) {
-  /* Where the lines of page n stand on the handwritten page (layout.py), when it fits the page as it reads now. */
-  const R = S.review, L = (R.layout || {})[n], rec = S.b.transcript.pages[n];
-  if (R.plain || !L || !L.ok || !rec) return null;
-  if (L.text !== rec.text) {                  /* the page changed: placed again once it is saved, plain meanwhile */
-    if (R.layoutAsked[n] !== rec.text) {
-      R.layoutAsked[n] = rec.text; clearTimeout(R.layoutTimer[n]);
-      R.layoutTimer[n] = setTimeout(() => ensureLayout(n), 1500);
-    }
-    return null;
-  }
-  return L;
-}
-async function ensureLayout(n) {
-  const R = S.review;
-  if (!R || R.layoutBusy[n]) return;
-  R.layoutBusy[n] = true;
-  let again = false;
-  try {
-    const r = await api(`/api/projects/${S.pid}/layout` + (n ? `?page=${n}` : ""));
-    if (S.review !== R) return;
-    R.layoutAi = r.ai !== false;
-    const old = R.layout || {}, changed = Object.keys(r.pages).some((k) => JSON.stringify(old[k]) !== JSON.stringify(r.pages[k]));
-    R.layout = { ...old, ...r.pages };
-    again = Object.values(r.pages).some((L) => L && L.placing);   /* an AI is placing the lines of a page: look again */
-    if (changed) { R.cache = {}; render(); }
-  } catch (e) { /* the plain view stays */ }
-  finally {
-    delete R.layoutBusy[n];
-    if (again) { clearTimeout(R.layoutPoll); R.layoutPoll = setTimeout(() => { if (S.review === R) ensureLayout(n); }, 4000); }
-  }
-}
-function leadBold(text, lead) {
-  /* the words at the start of a line that the author highlighted ("Def", "Example", "Theorem"), in bold */
-  const words = text.split(/(\s+)/), want = lead * text.length;
-  let i = 0, len = 0;
-  while (i < words.length && len < want - 1 && !/[$\\[\]{}]/.test(words[i])) { len += words[i].length; i++; }   /* never into a formula */
-  const head = words.slice(0, i).join("").trimEnd(), rest = text.slice(head.length);
-  return head && rest.trim() ? `\\textbf{${head}}${rest}` : text;
-}
-function layoutHtml(n, L, marks) {
-  /* The page as written: each piece of the text where it stands on the handwritten page, on a sheet of the same
-     shape, in a size taken from the height of the handwriting (fitLaid sets it once the formulas are typeset). A line
-     is never broken in two: a piece that does not fit the width the author's line takes is made smaller instead. */
-  const asp = L.aspect || 1.414;
-  let k = 0;
-  const its = L.items.map((it, i) => ({ ...it, i, k: it.kind === "figure" ? k++ : -1 }));
-  const bottom = Math.max(1, ...its.map((it) => (it.y || 0) + (it.h || 0) + 0.01));
-  const html = its.map((it) => {
-    const text = it.kind === "line" && it.lead ? leadBold(it.t, it.lead) : it.t;
-    const cls = `li ${it.head ? "lhead" : ""} ${it.ul ? "lul" : ""} ${it.center ? "lcenter" : ""} ${it.placed ? "" : "unplaced"} k-${it.kind}`;
-    const top = (it.y / bottom * 100).toFixed(2);
-    const pos = `left:${(it.x * 100).toFixed(2)}%;top:${top}%;width:${(Math.max(0.03, it.w) * 100).toFixed(2)}%`
-      + (it.kind === "figure" ? `;height:${(it.h / bottom * 100).toFixed(2)}%` : "");
-    /* rows: a formula written over several lines (aligned, cases) counts each of them */
-    const rows = Math.max(it.rows || 1, /\\begin\{/.test(it.t) ? 1 + (it.t.match(/\\\\(?![a-zA-Z])/g) || []).length : 1);
-    const hang = /\\(?:underbrace|overbrace|xleftarrow|xrightarrow|underset|overset|stackrel)/.test(it.t) ? 1 : 0;
-    return `<div class="${cls}" id="li-${n}-${it.i}" style="${pos}" data-x="${it.x}" data-y="${it.y}" data-w="${it.w}" data-h="${it.h}" data-rows="${rows}" data-hang="${hang}" data-big="${it.big ? 1 : 0}" data-top="${top}">${renderPiece(n, text, marks, Math.max(0, it.k))}</div>`;
-  }).join("");
-  return `<div class="laidpage" style="padding-top:${(asp * bottom * 100).toFixed(2)}%" data-pad="${(asp * bottom * 100).toFixed(2)}" data-asp="${asp}" data-bottom="${bottom}" data-med="${L.med || 0.022}">${html}</div>`;
-}
-function fitLaid(root) {
-  /* One size of letters for the whole page, as handwriting mostly has one size: taken from the height of the
-     author's usual line, and made a little smaller for the whole page if the lines would not fit where they stand.
-     A title (written clearly larger, or highlighted) is a little larger. Each piece keeps its place on the page; it may
-     run on to the right as far as the next piece on its row (or the edge of the page), as handwriting runs on, and
-     only a piece that still does not fit there is made smaller by itself, so that a line is never broken in two. */
-  (root || document).querySelectorAll(".laidpage").forEach((pg) => {
-    const W = pg.clientWidth;
-    if (!W) return;
-    if (pg.dataset.pad) pg.style.paddingTop = pg.dataset.pad + "%";
-    const H = W * (+pg.dataset.asp || 1.414);                  /* the height of the page itself, not of the sheet */
-    const med = +pg.dataset.med || 0.022;
-    const size = Math.max(9, Math.min(22, med * H * 0.66));
-    const all = [...pg.querySelectorAll(".li")].map((el) => ({
-      el, x: +el.dataset.x || 0, y: +el.dataset.y || 0, w: Math.max(0.03, +el.dataset.w || 0.1), h: +el.dataset.h || med,
-      rows: Math.max(1, +el.dataset.rows || 1), hang: +el.dataset.hang || 0, fig: el.classList.contains("k-figure"),
-      center: el.classList.contains("lcenter") }));
-    const text = all.filter((o) => !o.fig);
-    /* the room of each piece: from where it starts to the next piece on the same row, or to the edge of the page */
-    const sameRow = (a, b) => Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y) > 0.35 * Math.min(a.h, b.h, med * 1.5);
-    text.forEach((o) => {
-      let right = 0.985, left = 0.015;
-      all.forEach((q) => {
-        if (q === o || !sameRow(o, q)) return;
-        if (q.x >= o.x + o.w * 0.5) right = Math.min(right, q.x - 0.008);
-        else if (q.x + q.w <= o.x + o.w * 0.5) left = Math.max(left, q.x + q.w + 0.008);
-      });
-      if (o.center) {                                         /* a centred title stays centred where it was written */
-        const c = o.x + o.w / 2, half = Math.max(o.w / 2, Math.min(c - left, right - c));
-        o.l = c - half; o.room = 2 * half;
-      } else { o.l = o.x; o.room = Math.max(o.w, right - o.x); }
-      /* a title: written clearly larger than the page's usual line, or a heading the author highlighted */
-      const ratio = (o.h / o.rows) / med;
-      const head = o.el.classList.contains("lhead");
-      /* the title, or a line written clearly larger (a box much taller than one line holds more than one: no) */
-      o.f = +o.el.dataset.big ? 1.2 : ratio > 1.6 && ratio < 2.4 ? 1.15 : head && o.center ? 1.15 : head ? 1.05 : ratio < 0.6 ? 0.85 : 1;
-      o.el.style.left = (o.l * 100).toFixed(2) + "%";
-      o.el.style.width = "max-content";
-      o.el.style.fontSize = (size * o.f) + "px";
-      o.nat = o.el.getBoundingClientRect().width || 1;
-    });
-    /* one size for the page: the size at which nearly all of its lines fit where they stand */
-    const fits = text.map((o) => (o.room * W) / o.nat).sort((a, b) => a - b);
-    const scale = fits.length ? Math.max(0.72, Math.min(1, fits[Math.floor(fits.length * 0.15)])) : 1;
-    text.forEach((o) => {
-      let fs = size * o.f * scale;
-      const room = o.room * W;
-      if (o.nat * scale > room) fs = Math.max(7, fs * room / (o.nat * scale) * 0.98);   /* this line alone, smaller */
-      o.el.style.fontSize = fs + "px";
-      if (o.hang) {                                           /* a mark above or below the line: within two lines */
-        const tall = Math.max(o.h, med) * H * 2.1;
-        for (let i = 0; i < 4 && o.el.scrollHeight > tall + 1 && fs > 7; i++) {
-          fs = Math.max(7, fs * tall / o.el.scrollHeight * 0.97); o.el.style.fontSize = fs + "px";
-        }
-      }
-      /* the box as wide as what is written in it, so that it covers nothing of its neighbours */
-      if (o.center) {
-        const wid = o.el.getBoundingClientRect().width / W;
-        o.el.style.left = ((o.l + Math.max(0, (o.room - wid) / 2)) * 100).toFixed(2) + "%";
-      }
-    });
-    /* two pieces that would lie over each other: the later one moves just below the earlier, so both can be read */
-    const sheetH = pg.clientHeight || pg.offsetHeight, base = pg.getBoundingClientRect();
-    const els = [...pg.querySelectorAll(".li")];
-    els.forEach((el) => { if (el.dataset.top) el.style.top = el.dataset.top + "%"; });
-    const boxes = els.map((el) => { const r = el.getBoundingClientRect(); return { el, l: r.left - base.left, r: r.right - base.left, t: r.top - base.top, b: r.bottom - base.top }; })
-      .sort((a, b) => a.t - b.t || a.l - b.l);
-    let low = sheetH;
-    boxes.forEach((x, i) => {
-      for (const y of boxes.slice(0, i)) {
-        const over = Math.min(x.r, y.r) - Math.max(x.l, y.l), vert = y.b - x.t;
-        if (over > 0.15 * Math.min(x.r - x.l, y.r - y.l) && vert > 2 && x.t >= y.t - 2) {
-          const h = x.b - x.t; x.t = y.b + 1; x.b = x.t + h; x.el.style.top = x.t + "px";
-        }
-      }
-      low = Math.max(low, x.b + 4);
-    });
-    if (low > sheetH + 1) pg.style.paddingTop = low + "px";
-  });
+  src = (src + text.slice(pos)).replace(/\$\$[\s\S]+?\$\$/g, (d) => d.replace(/\n/g, " "));   /* a displayed formula stays whole */
+  const parts = [];                           /* a doubtful passage over two lines is marked on each */
+  (marks || []).forEach((x) => String(x || "").split("\n").forEach((t) => {
+    t = t.trim();
+    if (t.length > 2) parts.push(...new Set([t, curly(t), qWords(t), qMath(t)]));    /* as it is shown, quotation marks printed */
+  }));
+  let out = "", para = [];
+  const flush = () => { if (para.length) out += `<div class="rd-p">${para.join("")}</div>`; para = []; };
+  src.split("\n").forEach((raw) => { if (raw.trim()) para.push(readLine(n, raw, held, parts, fmt)); else flush(); });
+  flush();
+  return `<div class="rd">${out}</div>`;
 }
 function pageTextHtml(n) {
-  /* One page as it was read, with its doubtful passages highlighted and its drawings in place: laid out as on the
-     handwritten page when its lines could be placed, otherwise line after line. Kept until the page, its doubts, its
-     drawings or the layout change, so that the whole transcript is not typeset again at every click. */
-  const R = S.review, text = String(S.b.transcript.pages[n].text || ""), marks = reviewFlags(n).map((f) => f.snippet);
-  const L = layoutFor(n);
-  const key = JSON.stringify([text, marks, !!L, L && L.items.length, (S.b.figures || []).filter((f) => f.page === n).map((f) => [f.k, f.choice, f.drawn, f.tikz_ok, f.box])]);
+  /* One page as it was read, as the author reads it (readHtml). Kept until the page, its doubts, its headings or its
+     drawings change, so that the whole transcript is not typeset again at every click. */
+  const R = S.review, rec = S.b.transcript.pages[n], text = String(rec.text || ""), marks = reviewFlags(n).map((f) => f.snippet);
+  const key = JSON.stringify([text, marks, rec.format || {}, figsOn(n).map((f) => [f.k, f.choice, f.drawn, f.tikz_ok, f.box])]);
   if (R.cache[n] && R.cache[n].key === key) return R.cache[n].html;
-  const html = L ? `<div class="laid">${layoutHtml(n, L, marks)}</div>` : renderPiece(n, text, marks, 0);
+  const html = readHtml(n, text, marks);
   R.cache[n] = { key, html };
   return html;
+}
+async function askLines() {
+  /* The author's own lines and headings for each page (relines.py), asked once per page: the server answers at once
+     from what it has and asks a model in the background about a page it has not seen; the page is shown as it is
+     meanwhile, and line for line once its lines are in. A page whose LaTeX is open for editing waits. */
+  const R = S.review;
+  if (!R || R.linesOff || R.linesBusy || !S.b || plan().kind !== "handwritten") return;
+  const want = {};
+  reviewPages().forEach((n) => {
+    const rec = S.b.transcript.pages[n];
+    if (rec && String(rec.text || "").trim() && R.edit !== n && !(saveTranscript.t && saveTranscript.n === n) && (R.linesAsked[n] !== rec.text || R.linesWork[n])) want[n] = rec.text;
+  });
+  if (!Object.keys(want).length) return;
+  R.linesBusy = true;
+  let again = false, changed = false;
+  try {
+    const r = await api(`/api/projects/${S.pid}/lines`, { method: "POST", body: { pages: want } });
+    if (S.review !== R) return;
+    if (r.on === false) R.linesOff = true;
+    for (const [k, v] of Object.entries(r.pages || {})) {
+      const n = +k, rec = S.b.transcript.pages[n];
+      if (!rec) continue;
+      R.linesAsked[n] = want[n];
+      if (v.state === "busy") { again = true; if (!R.linesWork[n]) { R.linesWork[n] = true; changed = true; } continue; }
+      if (R.linesWork[n]) { delete R.linesWork[n]; changed = true; }
+      if (v.state === "stale" && (R.linesStale[n] = (R.linesStale[n] || 0) + 1) < 4) { delete R.linesAsked[n]; again = true; continue; }
+      if (v.state !== "done" || rec.text !== want[n] || R.edit === n) continue;
+      if (typeof v.text === "string" && v.text !== rec.text) { rec.text = v.text; R.linesAsked[n] = v.text; changed = true; }
+      if (v.format && JSON.stringify(v.format) !== JSON.stringify(rec.format || {})) { rec.format = v.format; changed = true; }
+    }
+  } catch (e) { /* the pages stay as they were read */ }
+  finally {
+    R.linesBusy = false;
+    if (S.review === R) {
+      if (changed) render();
+      clearTimeout(R.linesPoll);
+      if (again) R.linesPoll = setTimeout(() => { if (S.review === R) askLines(); }, 4000);
+    }
+  }
 }
 function sheetHtml(pg, openBy) {
   const n = pg.n, R = S.review, rec = S.b.transcript.pages[n], s = pageState(pg, openBy), c = commentOn(n).trim();
   const chips = (s === "doubt" ? `<span class="chip hl">${plural(openBy[n].length, "item")} to check</span>` : "")
     + (s === "ok" ? '<span class="chip green">✓ Confirmed</span>' : "") + (rec && (rec.corrections || []).length ? '<span class="chip blue">Corrected from your comment</span>' : rec && rec.edited ? '<span class="chip blue">Changed by you</span>' : "")
     + (R.busy[n] ? '<span class="chip"><span class="spinner"></span> Correcting…</span>' : "")
-    + (!R.plain && (R.layout || {})[n] && R.layout[n].placing ? '<span class="chip" title="An AI that sees your page is saying which line goes where"><span class="spinner"></span> Placing the lines…</span>' : "");
+    + (R.linesWork[n] ? '<span class="chip" title="An AI that sees your page is finding where its lines end and which are headings, so that the text is shown line for line as you wrote it"><span class="spinner"></span> Matching your lines…</span>' : "");
   const body = pg.skip ? `<div class="ts-out">Left out as ${pg.kind === "blank" ? "a blank page" : pg.kind === "cover" ? "a cover page" : "not part of the notes"}. <button class="linkbtn" data-act="zoom" data-n="${n}">Look at it, or include it</button></div>`
     : !rec ? `<div class="ts-out"><span class="spinner"></span> This page is being read.</div>` : pageTextHtml(n);
   return `<section class="tsheet s-${s} ${n === R.n ? "on" : ""} ${R.fresh === n ? "fresh" : ""}" id="ts-${n}" data-n="${n}">
@@ -1853,7 +1800,7 @@ function answerFlag(f, value, how) {
     if (!/\$/.test(f.snippet)) v = v.replace(/^\$+|\$+$/g, "");      /* typed with dollar signs inside a formula */
     let t = rec.text;
     for (let i = at.length - 1; i >= 0; i--) if (!skip[i]) t = t.slice(0, at[i]) + v + t.slice(at[i] + f.snippet.length);
-    rec.text = t; rec.edited = true; saveTranscript(n, t);
+    rec.text = t; rec.edited = true; saveTranscript(n, t, true);
   }
   S.review.dropped[f.key] = true; delete S.review.own[f.key];
   const ans = { page: n, snippet: f.snippet, alt: f.alt || "", how, value: v, issue: f.issue || "" };
@@ -2035,33 +1982,14 @@ function showOnText(n, f) {
 function pickFromText(n, f, fig) {
   selectPage(n);
   const d = fig && fig.dataset;
-  const box = d && d.box ? d.box.split(",").map(Number)                  /* a drawing: its box */
-    : d && d.y ? [d.y * 1000, d.x * 1000, (+d.y + +d.h) * 1000, (+d.x + +d.w) * 1000] : null;   /* a line: where it stands */
+  const box = d && d.box ? d.box.split(",").map(Number) : null;            /* a drawing: its box */
   if (box) showOnHand(n, box[0] / 1000, box[2] / 1000, box);
   else { const y = textToHand(n, f); showOnHand(n, y - 0.04, y + 0.04); }
   const tb = $(`#tb-${n}`), band = tb && $(".ts-band", tb);
   if (band) { band.style.top = Math.max(0, f * tb.offsetHeight - 18) + "px"; flash(band); }
 }
-function pickFromHand(n, f, fx) {
+function pickFromHand(n, f) {
   selectPage(n);
-  const L = layoutFor(n);
-  if (L) {                                    /* the line written there, when the page is laid out */
-    let best = null, dist = 1e9;
-    L.items.forEach((it, i) => {
-      if (!it.placed) return;
-      const dy = Math.max(it.y - f, 0, f - (it.y + it.h)), dx = fx == null ? 0 : Math.max(it.x - fx, 0, fx - (it.x + it.w));
-      const dd = dy * 3 + dx;
-      if (dd < dist) { dist = dd; best = i; }
-    });
-    const el = best !== null && $(`#li-${n}-${best}`), col = $("#rvtext");
-    if (el && col && dist < 0.08) {
-      quietScroll(col, colY(col, el) - col.clientHeight * 0.4, true);
-      el.classList.remove("hit"); void el.offsetWidth; el.classList.add("hit");
-      const it = L.items[best], img = $(`#hs-${n} .hs-img`), band = img && $(".hs-band", img);
-      if (band) { band.style.top = it.y * 100 + "%"; band.style.height = it.h * 100 + "%"; band.style.left = it.x * 100 + "%"; band.style.width = it.w * 100 + "%"; flash(band); }
-      return;
-    }
-  }
   showOnText(n, handToText(n, f));
   const img = $(`#hs-${n} .hs-img`), band = img && $(".hs-band", img);
   if (band) { band.style.top = (f - 0.04) * 100 + "%"; band.style.height = "8%"; band.style.left = "0"; band.style.width = "100%"; flash(band); }
@@ -2148,6 +2076,7 @@ function viewReview() {
   const open = openItems(), done = settledItems(), openBy = groupOpen(open);
   const readable = list.filter((pg) => !pg.skip && S.b.transcript.pages[pg.n]);
   const conf = readable.filter((pg) => confirmedPage(pg.n)).length, doubtPages = Object.keys(openBy).length;
+  if (!R.linesBusy && !R.linesOff && plan().kind === "handwritten" && pages.some((n) => R.linesAsked[n] !== S.b.transcript.pages[n].text)) setTimeout(askLines, 0);
   return `<div class="review rv3">
     <div class="rv3-top">
       <div class="rv3-title"><h1>${plan().kind === "text_pdf" ? "Your figures" : "Check what was read"}</h1>
@@ -2162,9 +2091,7 @@ function viewReview() {
     <div class="rv3-cols">
       <aside class="rv3-panel" id="rvpanel" aria-label="Page ${R.n}">${panelHtml(open, done, openBy)}</aside>
       <section class="rv3-text" id="rvtext" aria-label="Your notes as read">
-        <div class="col-h"><b>Your notes, as read</b><span class="muted small">Click a line to see it on your page.</span><span class="tb-space"></span>
-          <span class="seg" role="group" aria-label="How the text is shown"><button class="${R.plain ? "" : "on"}" data-act="rvplain" data-v="0" title="Each line where it stands on your page; what you highlighted or underlined as a heading">As on the page</button><button class="${R.plain ? "on" : ""}" data-act="rvplain" data-v="1" title="Line after line">Plain</button></span>
-          ${R.plain ? "" : `<label class="check small rv-aiplace" title="On a crowded page, where the lines cannot be placed surely by their length, an AI that sees the page says which line goes where: one request per such page, with your keys."><input type="checkbox" id="rvaiplace" ${R.layoutAi === false ? "" : "checked"}> AI places crowded pages</label>`}</div>
+        <div class="col-h"><b>Your notes, as read</b><span class="muted small">Line for line as you wrote them. Click a line to see it on your page.</span></div>
         ${list.map((pg) => sheetHtml(pg, openBy)).join("")}</section>
       <section class="rv3-hand" id="rvhand" aria-label="Your handwritten notes" style="--hz:${R.zoom}">
         <div class="col-h dark"><b>Your handwritten notes</b><span class="tb-space"></span>
@@ -3437,7 +3364,7 @@ function settingsDialog() {
         <label class="field"><span>Reference order without a journal</span><select data-set="ref_order"><option value="alphabetical" ${s.ref_order === "alphabetical" ? "selected" : ""}>Alphabetical by author</option><option value="appearance" ${s.ref_order === "appearance" ? "selected" : ""}>Order of first citation</option></select></label>
         <label class="field"><span>Document class without a journal</span><select data-set="document_class"><option value="amsart" ${s.document_class === "amsart" ? "selected" : ""}>amsart (AMS layout)</option><option value="article" ${s.document_class === "article" ? "selected" : ""}>article</option></select></label>
       </div>
-      <label class="check" style="margin-top:12px"><input type="checkbox" data-setbool="layout_ai" ${s.layout_ai === false ? "" : "checked"}> When your notes are checked (step 9), let an AI that sees the page say which line goes where on a crowded page, so the text is laid out as you wrote it. One request per such page; each paper can turn it off on its own.</label>
+      <label class="check" style="margin-top:12px"><input type="checkbox" data-setbool="layout_ai" ${s.layout_ai === false ? "" : "checked"}> When your notes are checked (step 9), let an AI that sees each page find where its lines end and which lines are headings, so the text is shown line for line as you wrote it. One request per page, once.</label>
       <h3>Private mode</h3>
       <label class="check"><input type="checkbox" data-setbool="private" ${s.private ? "checked" : ""}> <b>Keep unpublished work private.</b> Every job then uses only Gemini models that Google sells on its paid tier, or a model running on this computer (Ollama); free services such as Groq or OpenRouter are never used, and your results are not searched for by their statements, on MathOverflow or in OEIS. Your Gemini key's Google Cloud project must have billing enabled: on the paid tier Google does not use prompts or responses to improve its products and keeps them only for a limited time to detect abuse. Short topic phrases are still sent to the literature databases as search queries, and fingerprints to the timestamp services; nothing else leaves this computer.</label>
       <h3>What Scriptavera remembers about you</h3><p>The meanings you confirm and the readings of your handwriting you correct are remembered on this computer, so later papers ask fewer questions: ${M.memory ? `${M.memory.symbols} symbol(s), ${M.memory.readings} handwriting reading(s)` : "nothing yet"}. ${M.memory && (M.memory.symbols || M.memory.readings) ? `<button class="btn small" data-act="forget">Forget all of it</button>` : ""}</p>
@@ -3528,7 +3455,6 @@ function render() {
   $("#app").classList.toggle("rv-wide", S.view === "review" && !!S.review && S.review.pid === S.pid && !!S.review.wide && !!$(".rv3", main) && st("review").status !== "done");
   if (HOSTED.on) HOSTED.paintButtons();             // Google's sign-in buttons, where the page has room for one
   renderMath(main);
-  fitLaid(main);
   drawLog();
   if (S.view === "new" && S.form && S.form.files && S.form.files.length) renderUploadPreview();
   if (S.view === "assemble" && S.tab === "latex" && S.b && S.b.paper) loadTex();
@@ -3556,8 +3482,15 @@ function addFiles(list) {
   S.form.files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   render();
 }
-async function saveTranscript(n, text) {
-  try { await api(`/api/projects/${S.pid}/transcript/${n}`, { method: "PUT", body: { text } }); const s = $("#rvsaved"); if (s) s.textContent = "Saved"; }
+async function saveTranscript(n, text, keepLines) {
+  /* keepLines: an answer to a doubt, which changes a passage and not the lines of the page. The page comes back as
+     saved: with a line break it had on the server kept, when it was put into its lines meanwhile. */
+  try {
+    const r = await api(`/api/projects/${S.pid}/transcript/${n}`, { method: "PUT", body: { text, keep_lines: !!keepLines } });
+    const s = $("#rvsaved"); if (s) s.textContent = "Saved";
+    const rec = S.b && S.b.transcript && S.b.transcript.pages[n];
+    if (rec && typeof r.text === "string" && r.text !== text && rec.text === text && S.view === "review") { rec.text = r.text; render(); }
+  }
   catch (e) { toast(e.message, true); }
 }
 function openEditor(target) {
@@ -4014,20 +3947,6 @@ const ACT = {
     if (n) { selectPage(n); goPage(n); }
   },
   rvmode(el) { S.review.mode = el.dataset.v; render(); const p = $("#rvpanel"); if (p) p.scrollTop = 0; },
-  rvplain(el) {
-    const R = S.review; R.plain = el.dataset.v === "1"; R.cache = {};
-    try { localStorage.setItem("scriptavera-rv-plain", R.plain ? "1" : "0"); } catch (e) { /* ignore */ }
-    render();
-  },
-  async rvaiplace(el) {
-    const R = S.review, on = el.checked;
-    try {
-      const r = await api(`/api/projects/${S.pid}/layout`, { method: "POST", body: { ai: on } });
-      if (S.review !== R) return;
-      R.layoutAi = r.ai !== false; R.layout = { ...(R.layout || {}), ...r.pages }; R.cache = {}; render();
-      if (Object.values(r.pages).some((L) => L && L.placing)) { clearTimeout(R.layoutPoll); R.layoutPoll = setTimeout(() => ensureLayout(0), 4000); }
-    } catch (e) { toast(e.message || String(e)); }
-  },
   rvwide() { const R = S.review; R.wide = !R.wide; try { localStorage.setItem("scriptavera-rv-wide", R.wide ? "1" : "0"); } catch (e) { /* ignore */ } render(); },
   async rvedit(el) {
     const R = S.review, n = +el.dataset.n;
@@ -4452,7 +4371,6 @@ document.addEventListener("change", (ev) => {
     if (el.checked) S.kpick.chosen.add(el.dataset.kpick); else S.kpick.chosen.delete(el.dataset.kpick);
     S.kpick.paint(); return;
   }
-  if (el.id === "rvaiplace" && S.review) { ACT.rvaiplace(el); return; }
   if (el.id === "rvlink" && S.review) { S.review.link = el.checked; if (el.checked) followScroll("rvtext"); return; }
   if (el.dataset.fdeclare !== undefined && S.form) { S.form.declare = el.checked; return; }
   if (el.dataset.optin !== undefined && S.form) { S.form.optIn = el.checked; return; }
@@ -4489,9 +4407,9 @@ document.addEventListener("click", (ev) => {
   if (ev.target.closest("button, a, input, textarea, select, label, summary, [data-act]")) return;
   if (String(window.getSelection ? window.getSelection() : "").trim()) return;       // selecting text, not pointing
   const tb = ev.target.closest("#rvtext .ts-body");
-  if (tb && tb.dataset.n) { const r = tb.getBoundingClientRect(); return pickFromText(+tb.dataset.n, (ev.clientY - r.top) / r.height, ev.target.closest(".tfig[data-box], .li[data-y]")); }
+  if (tb && tb.dataset.n) { const r = tb.getBoundingClientRect(); return pickFromText(+tb.dataset.n, (ev.clientY - r.top) / r.height, ev.target.closest(".tfig[data-box]")); }
   const hi = ev.target.closest("#rvhand .hs-img");
-  if (hi) { const r = hi.getBoundingClientRect(); return pickFromHand(+hi.dataset.n, (ev.clientY - r.top) / r.height, (ev.clientX - r.left) / r.width); }
+  if (hi) { const r = hi.getBoundingClientRect(); return pickFromHand(+hi.dataset.n, (ev.clientY - r.top) / r.height); }
 });
 document.addEventListener("scroll", (ev) => {
   const R = S.review, col = ev.target;

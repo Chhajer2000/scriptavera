@@ -1108,14 +1108,24 @@ textarea.mono { font-family: var(--mono); font-size: 13px; width: 100%; }
 .ts-edit { padding: 0 16px 14px; }
 .ts-edit .rv-src { min-height: 220px; }
 .ts-note { margin: 0 16px 12px; padding: 8px 11px; background: var(--blue-soft); border-radius: 5px; font: 13.5px/1.45 var(--ui); white-space: pre-wrap; cursor: pointer; }
-.tfig { display: block; margin: .8em 0; padding: 8px 12px; border: 1px solid var(--rule); border-radius: 5px; background: #fafbf9; font: 13.5px/1.45 var(--ui); color: var(--graphite); }
-.tfig img { display: block; max-width: 100%; max-height: 300px; margin: 8px auto; background: #fff; }
-.tfig-h { display: block; font-size: 12.5px; font-weight: 600; color: var(--ink); }
-.tfig-d { display: block; }
-.tfig.s-open { border-color: #d6b20c; background: var(--hl-soft); }
-.tfig.s-paper { border-color: #8cc5a6; }
-.tfig.s-gone { opacity: .6; }
-.tfig.s-gone .tfig-d { text-decoration: line-through; }
+/* step 9: the notes as the author reads them: line under line, one size of letters, drawings whole */
+.rd { display: flow-root; }
+.rd .katex { font-size: 1em; }                 /* a formula's letters as large as the words around it */
+.rd-p { margin: 0 0 .8em; }
+.rd-p:last-child { margin-bottom: 0; }
+.rd-l { padding-left: calc(var(--ind, 0) * 1.5em); }
+.rd-head, .rd-lead { font-weight: 700; }
+.rd-bul { padding-left: calc(var(--ind, 0) * 1.5em + 1.2em); }
+.rd-b { display: inline-block; width: 1.2em; margin-left: -1.2em; }
+.rd .math.display { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; }
+.rd .katex-display { margin: .15em 0; }
+.rd-note { padding-left: calc(var(--ind, 0) * 1.5em + 1.3em); color: var(--graphite); }     /* a note, under the line it is on */
+.rd-arrow { display: inline-block; width: 1.3em; margin-left: -1.3em; color: var(--blue); }
+.rd .tfig { display: inline-block; vertical-align: middle; margin: .15em .25em; line-height: 0; }
+.rd .tfig img { display: block; width: 100%; height: auto; background: #fff; }
+.rd .tfig.alone { display: block; margin: .45em auto; }
+.rd .tfig.bare { display: inline; line-height: inherit; margin: 0; padding: 0 .35em; border: 1px dashed var(--rule); border-radius: 4px; color: var(--graphite); font-style: italic; }
+.rd .tfig.bare.alone { display: block; padding: .3em .6em; margin: .3em 0; }
 
 /* the handwritten pages */
 .rv3-hand { background: #3b3f3c; }
@@ -1200,29 +1210,6 @@ button.chip:hover { filter: none; border-color: var(--blue); }
 .pick { border-color: var(--btn-edge); background: var(--btn); color: var(--btn-ink); }
 .pick:hover { border-color: var(--blue); }
 .pick.on { color: #fff; }
-
-/* step 9: the page laid out as written */
-.laid { padding-bottom: .4em; }
-/* the page as written: a sheet of the page's shape, each piece where it stands, never broken over two lines */
-.laidpage { position: relative; height: 0; width: 100%; }
-.laidpage .li { position: absolute; white-space: nowrap; line-height: 1.15; border-radius: 3px; overflow: visible; }
-.laidpage .li p { margin: 0; display: inline; }
-.laidpage .li .katex { font-size: 1.04em; }   /* the words in a formula as large as the words around it: one size on the page */
-.laidpage .li .math.display { display: block; margin: 0; text-align: left; }
-.laidpage .li .katex-display { margin: 0; text-align: left; }
-.laidpage .li.lcenter, .laidpage .li.lcenter .math.display, .laidpage .li.lcenter .katex-display { text-align: center; }
-.laidpage .li.k-figure { white-space: normal; overflow: hidden; }
-.laidpage .li.k-figure img { max-width: 100%; max-height: 100%; }
-.li.lhead { font-weight: 700; }
-.rv-aiplace { margin-left: 10px; font-size: 12.5px; color: var(--graphite); white-space: nowrap; }
-.rv-aiplace input { width: 14px; height: 14px; }
-.li.lul .katex, .li.lul { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
-.li.unplaced { color: var(--graphite); outline: 1px dashed var(--rule); }
-.li.hit { animation: rvband 2.6s ease; background: rgba(39,71,199,.08); }
-.seg { display: inline-flex; border: 1px solid var(--btn-edge); border-radius: 7px; overflow: hidden; }
-.seg button { border: 0; background: var(--paper); color: var(--btn-ink); padding: 3px 10px; font-size: 12.5px; cursor: pointer; }
-.seg button + button { border-left: 1px solid var(--btn-edge); }
-.seg button.on { background: var(--blue); color: #fff; font-weight: 600; }
 
 /* the paper written statement by statement: statements, structure, proofs, first draft */
 .stabs { flex-wrap: wrap; margin-bottom: 14px; }

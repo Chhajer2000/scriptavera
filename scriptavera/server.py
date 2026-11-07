@@ -21,7 +21,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from . import __version__, config, domains, final, ingest, journals, literature, paper as paperlib, pipeline, revision, store, writing
-from . import arxivpack, assist, citecheck, costs, drafting, extras, hosting, memory, phone, placing, provenance, reviews, sources, tenancy, typed, workspace
+from . import arxivpack, assist, citecheck, costs, drafting, extras, hosting, memory, phone, placing, provenance, relines, reviews, sources, tenancy, typed, workspace
 from .llm import KEY_STEPS, PROVIDERS, ROLES, LLMError, router
 
 DOWNLOADS = {
@@ -834,8 +834,7 @@ async def api_transcript(request: Request):
         n = int(request.path_params["n"])
     except ValueError:
         return fail("Unknown page.")
-    pipeline.save_transcript_page(p, n, str(body.get("text") or ""))
-    return ok()
+    return ok(text=pipeline.save_transcript_page(p, n, str(body.get("text") or ""), keep_lines=bool(body.get("keep_lines"))))
 
 
 async def api_doubt(request: Request):
@@ -905,6 +904,19 @@ async def api_layout(request: Request):
     one = request.query_params.get("page")
     return ok(pages=await run_in_threadpool(pipeline.page_layouts, p, int(one) if one and one.isdigit() else None),
               ai=placing.enabled(p))
+
+
+async def api_lines(request: Request):
+    """Step 9: the author's own lines and headings on the pages it shows (relines.py). Body {"pages": {n: text}}, the
+    text each page is shown with; for each page what is known, and whether the lines are asked for at all."""
+    p = _project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    body = await _body(request)
+    given = body.get("pages") if isinstance(body.get("pages"), dict) else {}
+    pages = {int(k): v for k, v in given.items() if str(k).isdigit() and isinstance(v, str)}
+    got = await run_in_threadpool(relines.settle, p, pages)
+    return ok(pages={str(k): v for k, v in got.items()}, on=relines.enabled(p))
 
 
 async def api_figure_image(request: Request):
@@ -1984,6 +1996,7 @@ routes = [
     Route("/api/projects/{pid}/proofs", api_write_proof, methods=["POST"]),
     Route("/api/projects/{pid}/draftcheck", api_draftcheck, methods=["POST"]),
     Route("/api/projects/{pid}/layout", api_layout, methods=["GET", "POST"]),
+    Route("/api/projects/{pid}/lines", api_lines, methods=["POST"]),
     Route("/api/projects/{pid}/figure/{fid}", api_figure_image, methods=["GET"]),
     Route("/api/projects/{pid}/figure/{fid}", api_figure, methods=["POST"]),
     Route("/api/projects/{pid}/review", api_review, methods=["POST"]),
