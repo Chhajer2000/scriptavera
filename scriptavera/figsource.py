@@ -428,15 +428,41 @@ def _tube_width(grp: list) -> float:
     return max(0.05, (P - math.sqrt(max(0.0, P * P - 4 * math.pi * A))) / math.pi)
 
 
-def _points_in_ring(P: np.ndarray, r: np.ndarray) -> np.ndarray:
-    """Which of the points P lie inside the closed outline r (even-odd rule)."""
-    x, y = P[:, 0:1], P[:, 1:2]
-    xs, ys = r[None, :, 0], r[None, :, 1]
-    xs2, ys2 = np.roll(xs, -1, axis=1), np.roll(ys, -1, axis=1)
-    cond = (ys > y) != (ys2 > y)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        xc = xs + (y - ys) * (xs2 - xs) / (ys2 - ys)
-    return (np.count_nonzero(cond & (x < xc), axis=1) % 2).astype(bool)
+RING_CELLS = 1 << 20          # points times edges worked out at once by _points_in_ring: about 8 MB a table
+
+
+def _points_in_ring(P: np.ndarray, r: np.ndarray, any_inside: bool = False) -> np.ndarray:
+    """Which of the points P lie inside the closed outline r (even-odd rule). any_inside: only whether one does; the
+    answer then stops at the first point found inside.
+
+    The outline of a long pen stroke, as a notes app stores it in a PDF, can have tens of thousands of points: all the
+    points against all the edges at once made tables of gigabytes (20,000 points by 14,000 edges is 2 GB a table), and
+    the computer ran out of memory. So only the points within the outline's box are tested, a few at a time, each
+    against the edges at its height; the memory used stays at a few megabytes however long the outlines are."""
+    P, r = np.asarray(P, float), np.asarray(r, float)
+    out = np.zeros(len(P), bool)
+    if not len(P) or len(r) < 3:
+        return out
+    (x0, y0), (x1, y1) = r.min(axis=0), r.max(axis=0)
+    near = np.flatnonzero((P[:, 0] >= x0) & (P[:, 0] <= x1) & (P[:, 1] >= y0) & (P[:, 1] <= y1))
+    xs, ys = r[:, 0], r[:, 1]
+    xs2, ys2 = np.roll(xs, -1), np.roll(ys, -1)
+    lo, hi = np.minimum(ys, ys2), np.maximum(ys, ys2)
+    step = max(1, min(4096, RING_CELLS // len(r)))
+    for k in range(0, len(near), step):
+        idx = near[k:k + step]
+        x, y = P[idx, 0:1], P[idx, 1:2]
+        e = np.flatnonzero((hi > y.min()) & (lo <= y.max()))          # the edges at the height of these points
+        if not len(e):
+            continue
+        ex, ey, ex2, ey2 = xs[e][None, :], ys[e][None, :], xs2[e][None, :], ys2[e][None, :]
+        cond = (ey > y) != (ey2 > y)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            xc = ex + (y - ey) * (ex2 - ex) / (ey2 - ey)
+        out[idx] = (np.count_nonzero(cond & (x < xc), axis=1) % 2).astype(bool)
+        if any_inside and out[idx].any():
+            break
+    return out
 
 
 def _merge_touching(groups: list) -> list:
@@ -461,7 +487,7 @@ def _merge_touching(groups: list) -> list:
             b = boxes[j]
             if a[0] > b[2] or b[0] > a[2] or a[1] > b[3] or b[1] > a[3]:
                 continue
-            if _points_in_ring(outer[i], outer[j]).any() or _points_in_ring(outer[j], outer[i]).any():
+            if _points_in_ring(outer[i], outer[j], True).any() or _points_in_ring(outer[j], outer[i], True).any():
                 ri, rj = f(i), f(j)
                 if ri != rj:
                     parent[rj] = ri
