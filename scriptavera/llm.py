@@ -484,6 +484,79 @@ def _duration(s: str | None) -> float:
     return int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + float(m.group(3) or 0) + float(m.group(4) or 0) / 1000
 
 
+class _Speed:
+    """How long each model has lately kept a request waiting beyond the time its answer and reasoning take to write.
+    Two models of one class are equally good at a job; when one of them answers in seconds and the other keeps every
+    request for minutes (a newly released model in great demand, say), the quick one is asked first. Slowness is
+    forgotten within a day, so a model that has become quick again gets its place back. Kept in memory/ of this
+    computer, so that it is not learned again each time the app starts."""
+
+    RATE = 80.0          # tokens a second a model writes at: what goes beyond is waiting
+    QUICK = 15.0         # seconds of waiting that count as nothing
+    SLOW = 60.0          # seconds of waiting from which a model counts as fully slow
+    HALF = 6 * 3600.0    # after this long without a new answer, half of the slowness is forgotten
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._data: dict[str, dict] | None = None
+        self._where = None
+
+    def _path(self):
+        return config.MEMORY_DIR / "model_speed.json"
+
+    def _load(self) -> dict:
+        path = self._path()
+        if self._data is None or self._where != path:          # tests point MEMORY_DIR elsewhere
+            try:
+                self._data = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(self._data, dict):
+                    self._data = {}
+            except (OSError, ValueError):
+                self._data = {}
+            self._where = path
+        return self._data
+
+    def note(self, m: Model, seconds: float, tokens: int = 0) -> None:
+        """One answer (or a request given up on after `seconds`) of model m."""
+        if config.mock_mode():
+            return
+        wait = max(0.0, seconds - tokens / self.RATE)
+        ref = f"{m.provider}:{m.id}"
+        with self._lock:
+            data = self._load()
+            old = self.waiting(m, _locked=True)
+            cur = wait if ref not in data else 0.6 * old + 0.4 * wait
+            data[ref] = {"wait": round(cur, 1), "t": round(time.time())}
+            try:
+                path = self._path()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(data, indent=0, sort_keys=True), encoding="utf-8")
+                tmp.replace(path)
+            except OSError:
+                pass
+
+    def waiting(self, m: Model, _locked: bool = False) -> float:
+        """Seconds model m lately keeps a request waiting, fading with time."""
+        if not _locked:
+            with self._lock:
+                return self.waiting(m, _locked=True)
+        rec = self._load().get(f"{m.provider}:{m.id}")
+        if not rec:
+            return 0.0
+        try:
+            return float(rec["wait"]) * 0.5 ** (max(0.0, time.time() - float(rec["t"])) / self.HALF)
+        except (KeyError, TypeError, ValueError):
+            return 0.0
+
+    def slowness(self, m: Model) -> float:
+        """0 for a quick model, 1 for one that keeps requests waiting a minute or more."""
+        return min(1.0, max(0.0, (self.waiting(m) - self.QUICK) / (self.SLOW - self.QUICK)))
+
+
+speed = _Speed()
+
+
 class Router:
     def __init__(self, keys: dict[str, list[str]] | None = None) -> None:
         """keys: a person's own keys ({"GEMINI_API_KEY": [...], ...}), held in memory only; None reads .env."""
@@ -711,6 +784,17 @@ class Router:
             pool = [m for m in pool if m.key_fp in allowed]
         return self._free_first(role, pool)
 
+    def _order(self, role: str):
+        """The order models of one class are asked in: by their rank, and of two nearly equal ones the quicker first.
+        A slow model gives up at most the role's margin: for a strict role it only ever goes behind a model of its
+        own class, and never behind one the author pinned below it (a pin is worth far more)."""
+        rank = self._rank(role)
+        margin = ROLES[role].get("margin", 4)
+
+        def order(m: Model) -> float:
+            return rank(m) - 1.01 * margin * speed.slowness(m)
+        return order
+
     @staticmethod
     def _free_first(role: str, pool: list[Model]) -> list[Model]:
         """With keys on a free plan and keys on a paid plan, the free ones are used first, until the best model they
@@ -746,7 +830,7 @@ class Router:
         best = max(m.scores[role] for m in pool)
         margin = ROLES[role].get("margin", 4)
         top = [m for m in pool if m.scores[role] >= best - margin or f"{m.provider}:{m.id}" in pinned]
-        return sorted(top, key=self._rank(role), reverse=True)
+        return sorted(top, key=self._order(role), reverse=True)
 
     def best(self, role: str, vision: bool = False) -> Model | None:
         top = self.peers(role, vision)
@@ -763,6 +847,7 @@ class Router:
             floor = pool[0].scores.get(cap, 0) - 2
             pinned = self._pinned(role)
             pool = [m for m in pool if m.scores.get(cap, 0) >= floor or f"{m.provider}:{m.id}" in pinned]
+            pool.sort(key=self._order(role), reverse=True)      # the quicker of two nearly equal models first
         avail = [m for m in pool if m.available()]
 
         def fits_in(m: Model) -> bool:          # the same sum the request itself will be judged by
@@ -913,6 +998,8 @@ class Router:
                 except _Skip as e:
                     errors.append(f"{m.ref}: {e}")
                     hooks.on_call({"role": role, "label": label, "provider": m.provider, "model": m.id, "ok": False, "note": str(e)})
+                    if e.slow:                  # it kept the request too long: an equal model that is quicker goes next
+                        cands = self.candidates(role, need, vision, max_out, strict) or cands
                     continue
                 finally:
                     with self._lock:
@@ -1071,6 +1158,10 @@ class Router:
             t0 = time.time()
             try:
                 r = requests.post(url, headers=headers, data=json.dumps({**body, **optional}), timeout=timeout)
+            except requests.ReadTimeout as e:
+                # no answer in all this time: asking the same model again would most likely wait as long once more
+                speed.note(m, max(time.time() - t0, timeout))
+                raise _Skip(f"no answer in {int(timeout)}s ({type(e).__name__})", slow=True)
             except requests.RequestException as e:
                 net_errors += 1
                 if net_errors >= 2:
@@ -1107,6 +1198,7 @@ class Router:
                 details = usage.get("completion_tokens_details") or {}
                 total = usage.get("total_tokens") or 0
                 rec["think"] = int(details.get("reasoning_tokens") or (max(0, total - rec["in"] - rec["out"]) if total else 0))
+                speed.note(m, dt, rec["out"] + rec["think"])
                 hooks.on_call(rec)
                 return Result(text, m.id, m.provider, rec["in"], rec["out"], dt, truncated=(finish == "length"))
 
@@ -1215,7 +1307,11 @@ class Router:
 
 
 class _Skip(Exception):
-    """This model cannot serve the request right now; try the next one."""
+    """This model cannot serve the request right now; try the next one. `slow`: it did not answer in time."""
+
+    def __init__(self, message: str = "", slow: bool = False) -> None:
+        super().__init__(message)
+        self.slow = slow
 
 
 # ------------------------------------------------------------------ whose keys

@@ -4,7 +4,7 @@
 import io, json, re, sys, time, zipfile
 from helpers import ROOT, answers, isolate, new_project, wait
 isolate()
-from scriptavera import drafting, final, journals, paper as paperlib, pipeline, revision, store, writing
+from scriptavera import drafting, final, journals, paper as paperlib, pipeline, prompts, revision, store, writing
 from scriptavera.llm import router
 
 journal = journals.search("analysis")[0][0]
@@ -79,6 +79,18 @@ assert A0["results"]["R4"]["proof"] == "gap" and A0["results"]["R2"]["known"] ==
 assert A0["results"]["R5"]["known"] == "new", "a paper the model invented is not believed"
 assert not writing.assessment_is_clean(A0) and p.state["stages"]["scope"]["status"] == "waiting"
 assert writing.default_scope(A0)["results"] == {"R1": "keep", "R2": "credit", "R3": "keep", "R4": "keep", "R5": "keep"}
+# the assessment is advice: 'not yet' is never chosen for the author, and a sketched main result is one the paper proves
+r = lambda proof, known="new": {"proof": proof, "known": known, "where": "", "key": "", "evidence": ""}
+for rec, res, mains, want in [
+        ("not_ready", {"R1": r("sketch"), "R2": r("none"), "R3": r("sketch")}, {"R1", "R3"}, "article"),     # seminar slides
+        ("partial", {"R1": r("gap"), "R2": r("breaks off")}, None, "article"),
+        ("not_ready", {"R1": r("none"), "R2": r("sketch")}, {"R1"}, "partial"),                              # a main result with no argument
+        ("not_ready", {"R1": r("complete", "known"), "R2": r("sketch", "special")}, None, "expository"),
+        ("article", {"R1": r("complete")}, None, "article"), ("expository", {"R1": r("complete")}, None, "expository")]:
+    a_ = {"recommend": rec, "main": "not established", "results": res}
+    assert writing.default_kind(a_, mains) == want and writing.default_scope(a_)["kind"] in ("article", "partial", "expository"), (rec, res, want)
+assert writing.default_scope({"recommend": "not_ready", "results": {"R1": r("sketch"), "R2": r("none")}})["results"] == {"R1": "keep", "R2": "conjecture"}
+assert "Never only because proofs are sketched" in prompts.ASSESS
 S = p.load("statements")
 st = {x["id"]: x for x in S["items"]}
 assert [x["id"] for x in S["items"]] == ["D1", "R1", "R2", "R3", "R4", "R5"] and st["R2"]["placement"] == "preliminaries"

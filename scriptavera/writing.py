@@ -573,12 +573,33 @@ def default_scope(a: dict) -> dict:
     for rid, r in (a.get("results") or {}).items():
         if r["known"] != "new":
             res[rid] = "credit"
-        elif r["proof"] in ("none", "unknown") or (r["proof"] in ("sketch", "breaks off") and a.get("recommend") != "article"):
+        elif r["proof"] in ("none", "unknown"):
             res[rid] = "conjecture"
-        else:
+        else:                                  # a sketch or a gap: the proof is written out in full along the author's lines
             res[rid] = "keep"
-    kind = a.get("recommend") or "article"
-    return {"kind": kind if kind in KINDS else "article", "results": res, "note": ""}
+    return {"kind": default_kind(a), "results": res, "note": ""}
+
+
+ARGUED = ("complete", "gap", "sketch", "breaks off")
+
+
+def default_kind(a: dict, mains: set[str] | None = None) -> str:
+    """The kind of paper chosen until the author chooses: never 'not yet'. The assessment is advice; stopping is
+    the author's own decision. A proof the notes only sketch, or give with a gap, is written out in full along the
+    author's lines and marked for the author to check, so a result with an argument counts as one the paper proves:
+    when every main result has one, the paper is a research article, whatever the assessment suggested; when a main
+    result has no argument at all, a paper on what is proved; when every result is known, an expository note.
+    `mains`: the ids of the main results (the dossier's role); without them every result counts."""
+    res = (a or {}).get("results") or {}
+    if res and all(r.get("known", "new") != "new" for r in res.values()):
+        return "expository"
+    rec = (a or {}).get("recommend") or ""
+    if rec == "expository":
+        return rec
+    main = [r for rid, r in res.items() if not mains or rid in mains] or list(res.values())
+    if all(r.get("proof") in ARGUED for r in main):
+        return "article"
+    return "partial"
 
 
 def submit_scope(p: Project, data: dict) -> dict:

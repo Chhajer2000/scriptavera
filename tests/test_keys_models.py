@@ -10,6 +10,7 @@ os.environ.pop("SCRIPTAVERA_MOCK", None)
 from scriptavera import config
 tmp = pathlib.Path(tempfile.mkdtemp())
 config.SETTINGS_PATH = tmp / "settings.json"; config.ENV_PATH = tmp / ".env"
+config.MEMORY_DIR = tmp / "memory"
 from scriptavera import llm
 from scriptavera.llm import ROLES, LLMError, Model, Router, RunHooks, classify
 

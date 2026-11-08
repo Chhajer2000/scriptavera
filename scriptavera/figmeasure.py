@@ -1739,23 +1739,45 @@ def _join_lines(prims: list, pen: float, h: float, mask: np.ndarray | None, keep
                                     max(0, int(min(A[0], B[0]) - 2)):int(max(A[0], B[0]) + 3)], 1)[
             ys - max(0, int(min(A[1], B[1]) - 2)), xs - max(0, int(min(A[0], B[0]) - 2))].mean()) >= 0.9
 
-    def inner(p: Prim) -> np.ndarray:
-        """The measured centre line without its ends, where it bends into a junction or a head."""
+    # Every pair of lines is tried, again after each join: what is measured of one line (its centre line, its
+    # direction, its box) is kept until the line itself changes, and two lines whose boxes are further apart than
+    # any gap that is joined are passed over at once. (Measured again for every pair, a drawing of a few hundred
+    # lines took minutes.)
+    kept: dict[int, tuple] = {}
+
+    def shape(p: Prim) -> tuple:
+        got = kept.get(p.id)
+        if got is not None and got[0] is p.pts and got[1] is p.p0 and got[2] is p.p1:
+            return got[3]
         cl = _cum(p.pts)
         cut = 2.0 * pen if cl[-1] >= 6 * pen else 1.2 * pen
         k = (cl >= cut) & (cl <= cl[-1] - cut)
-        return p.pts[k] if k.sum() >= 3 else p.pts
+        Q = p.pts[k] if k.sum() >= 3 else p.pts
+        if len(Q) < 3:
+            d = _unit(p.p1 - p.p0)
+        else:
+            d = line_fit(Q)[1]
+            d = d if np.dot(d, p.p1 - p.p0) >= 0 else -d
+        box = np.vstack([p.pts, p.p0[None], p.p1[None]])
+        out = (Q, d, box.min(axis=0), box.max(axis=0))
+        kept[p.id] = (p.pts, p.p0, p.p1, out)
+        return out
+
+    def inner(p: Prim) -> np.ndarray:
+        """The measured centre line without its ends, where it bends into a junction or a head."""
+        return shape(p)[0]
 
     def direction(p: Prim) -> np.ndarray:
-        Q = inner(p)
-        if len(Q) < 3:
-            return _unit(p.p1 - p.p0)
-        d = line_fit(Q)[1]
-        return d if np.dot(d, p.p1 - p.p0) >= 0 else -d
+        return shape(p)[1]
 
     def joinable(a: Prim, b: Prim) -> bool:
         if not _color_close(a.color, b.color) or max(a.width, b.width) > 1.6 * max(1e-6, min(a.width, b.width)):
             return False
+        (_, _, alo, ahi), (_, _, blo, bhi) = shape(a), shape(b)
+        # the gap along the line, and the most a straight line of both may stray from it (see below)
+        reach = gap_max + 2.0 * pen + 0.02 * (a.length + b.length + gap_max)
+        if (alo - reach > bhi).any() or (blo - reach > ahi).any():
+            return False                                      # too far apart to be one line
         da, db = direction(a), direction(b)
         if abs(float(np.dot(da, db))) < math.cos(12 * DEG):
             return False

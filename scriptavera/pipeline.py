@@ -8,6 +8,7 @@ Every stage saves its result, so a stopped run resumes where it left off.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import difflib
 import json
@@ -1511,6 +1512,53 @@ def _closest(text: str, piece: str) -> str:
     return best if best_r >= 0.8 and len(_find(text, best)) == 1 else ""
 
 
+_SCOPE = re.compile(r"\b(throughout|everywhere|elsewhere|likewise|similarly|consistently|as well|(?:every|each|all|other)\s+"
+                    r"(?:occurrences?|places?|instances?|times?)|on (?:this|the|that|each|every|all|other) pages?|"
+                    r"(?:in|on) the (?:rest|whole)|same (?:symbol|reading|letter|change)|as on|as (?:above|below|before))\b", re.I)
+
+
+def _remark_off(alt: str, snippet: str) -> tuple[str, str]:
+    """A suggested reading replaces the passage word for word, so a remark a model put into it ('S\\mathcal{V}_2 (and
+    \\mathcal{V}_2 throughout the page)') would be written into the notes. The remark is taken out: a part in
+    brackets, or after a comma, a semicolon or a dash, that speaks of where else the reading applies, and that the
+    passage itself does not say. Returns the reading and the remark ('' when there is none)."""
+    if not alt:
+        return alt, ""
+    pats = [r"\s*\(([^()]*)\)", r"\s*\[([^\[\]]*)\]", r"\s*(?:[,;]|\s[—–-])\s*((?:and|also|i\.e\.|here and)\b.*)$",
+            r"\s*(?:[,;]|\s[—–-])\s*([^,;]*)$"]
+    for pat in pats:
+        for m in reversed(list(re.finditer(pat, alt))):
+            inner = m.group(1)
+            if _SCOPE.search(inner) and not _SCOPE.search(snippet or ""):
+                rest = (alt[:m.start()] + alt[m.end():]).strip()
+                if rest:
+                    return rest, inner.strip()
+    return alt, ""
+
+
+def _wider(snippet: str, alt: str, remark: str) -> tuple[str, str] | None:
+    """The remark names a smaller piece to change everywhere ('and $\\mathcal{V}_2$ throughout'): the change of the
+    passage made to that piece. Returns (piece as read, piece as it should read), or None."""
+    if not snippet or not alt or snippet == alt:
+        return None
+    i = 0
+    while i < min(len(snippet), len(alt)) and snippet[i] == alt[i]:
+        i += 1
+    j = 0
+    while j < min(len(snippet), len(alt)) - i and snippet[-1 - j] == alt[-1 - j]:
+        j += 1
+    a, b = snippet[i:len(snippet) - j], alt[i:len(alt) - j]
+    if not b:
+        return None
+    for m in re.finditer(r"\$([^$]+)\$|(\\[A-Za-z]+(?:\{[^{}]*\})?(?:[_^](?:\{[^{}]*\}|\w))*)", remark):
+        y = (m.group(1) or m.group(2) or "").strip()
+        if y and y != alt and y.count(b) == 1:
+            x = y.replace(b, a)
+            if x != y and x in snippet:
+                return x, y
+    return None
+
+
 def tidy_doubt(item: dict, pages: dict[int, str], page: int = 0) -> dict | None:
     """A doubt about a reading as a model wrote it, put into the shape the author is shown: the exact passage of the
     page it is about (or nothing), one plain explanation, and the suggested reading. Models sometimes write the
@@ -1532,6 +1580,12 @@ def tidy_doubt(item: dict, pages: dict[int, str], page: int = 0) -> dict | None:
             issue = (raw_snippet + (" " + issue if issue else "")).strip()
         snippet = ""
     every = False
+    alt, remark = _remark_off(alt, snippet)
+    if remark:                       # '... (and $\mathcal{V}_2$ throughout the page)': a remark, never put into the page
+        every = True
+        wider = _wider(snippet, alt, remark)
+        if wider and where(wider[0]):
+            snippet, alt = wider
     m = _REPLACE.search(alt)
     if m:
         x, y = _unquote(m.group("x")).strip("$ "), _unquote(m.group("y")).strip("$ ")
@@ -2358,6 +2412,27 @@ def start_review_job(p: Project, key: str, what: str, work, said=None, **info) -
     return job
 
 
+_PLACE = ("box", "pbox", "th", "exclude", "dup_of")
+
+
+@contextlib.contextmanager
+def _keeping_place(p: Project, rec: dict):
+    """Where a drawing is on its page is found by a model, which can take minutes. When drawing it then fails (a model
+    does not answer, say), the place found is kept, so that the next attempt starts from it instead of asking again."""
+    try:
+        yield
+    except BaseException:
+        if rec.get("pbox"):
+            with p._lock:
+                cur = p.load("figures") or {"items": []}
+                for f in cur["items"]:
+                    if f["id"] == rec["id"] and not f.get("pbox"):
+                        f.update({k: rec[k] for k in _PLACE if k in rec})
+                        f.pop("locate_error", None)
+                p.save("figures", cur)
+        raise
+
+
 def redraw_figure(p: Project, fid: str, instruction: str) -> dict:
     """The author says the drawing is not what they meant: one more attempt, with their correction."""
     data = p.load("figures") or {"items": []}
@@ -2369,7 +2444,8 @@ def redraw_figure(p: Project, fid: str, instruction: str) -> dict:
 
     def ask(role, system, user, **kw):
         return router.chat(role, system, user, hooks=hooks, **kw)
-    _draw_figure(p, rec, ask, p.load("confirmed", {}), instruction.strip())
+    with _keeping_place(p, rec):
+        _draw_figure(p, rec, ask, p.load("confirmed", {}), instruction.strip())
     rec["redrawn"] = rec.get("redrawn", 0) + 1
     with p._lock:
         cur = p.load("figures") or {"items": []}
@@ -2392,7 +2468,8 @@ def print_figure(p: Project, fid: str) -> dict:
 
         def ask(role, system, user, **kw):
             return router.chat(role, system, user, hooks=hooks, **kw)
-        _draw_figure(p, rec, ask, p.load("confirmed", {}))
+        with _keeping_place(p, rec):
+            _draw_figure(p, rec, ask, p.load("confirmed", {}))
     with p._lock:
         cur = p.load("figures") or {"items": []}
         cur["items"] = [rec if f["id"] == fid else f for f in cur["items"]]

@@ -248,6 +248,7 @@ Answer in exactly this format:
 <uncertain>
 exact snippet from your transcript || what is unclear || the alternative reading
 </uncertain>
+The alternative reading replaces the snippet, word for word, wherever the snippet occurs on the page: write only the text itself, never a remark in it (not "(and the same throughout the page)"). When the same symbol is in doubt in many places, quote the smallest piece that differs (for example $\\mathcal{{D}}_2$), so that every place changes with it.
 <changes>
 one line per change you made relative to the draft, with the reason, or none
 </changes>
@@ -271,7 +272,7 @@ page N || exact snippet as transcribed || why it looks misread || suggested read
 - page N: the page the snippet is on.
 - exact snippet: copied character for character from the transcript, a few words or one formula, without quotation marks or "...". Not a description.
 - why: one short sentence in plain words, the mathematics between $...$.
-- suggested reading: the snippet as it should read, written the same way as the snippet, and nothing else (not "replace X with Y").
+- suggested reading: the snippet as it should read, written the same way as the snippet, and nothing else (not "replace X with Y", and no remark such as "(and throughout the page)": it replaces the snippet word for word wherever the snippet occurs; when a symbol is misread in many places, quote the smallest piece that differs, so that every place changes with it).
 Write <flags>none</flags> if there is nothing to report."""
 
 LOCATE = """You point to handwritten mathematical notation on a page image.
@@ -546,13 +547,14 @@ For every result, judge two things from the notes and the reading notes only.
    Say "known" only when the reading notes show it. Absence from the reading notes does not prove novelty; then write new.
 
 Then judge the notes as a whole:
-- main: does the main result stand on what the notes prove? established | partly | not established
+The notes are the author's working notes, slides or a sketch: the paper's proofs are written out in full from them afterwards, along the author's own lines, and every step that is added is checked and shown to the author. So a proof sketch whose steps a specialist can fill in is a sound basis for a paper. Judge the IDEAS: is there an argument for the main result, and does it hold together?
+- main: does the main result stand on the argument of the notes? established (the notes give the argument, even only as a sketch or with steps left to fill in) | partly (the argument covers part of it, or one of its key steps has no idea given) | not established (no argument at all: only the statement, a question or a hope)
 - unfinished: anything left open in the notes: questions, "to do", conjectures, attempts that are abandoned. One per line, or none.
 - recommend one kind of paper:
-   article: a research article; the main result is proved and is not known.
-   partial: a paper on what is proved, with the rest stated as open questions or conjectures.
+   article: a research article; the notes give an argument for the main result (a sketch is enough) and it is not known.
+   partial: a paper on what is argued, with the rest stated as open questions or conjectures; for when a main result has no argument at all.
    expository: the results are known; a note that presents them without any claim of novelty.
-   not_ready: the notes do not yet support a paper (the main claim is unproved, or too little is there).
+   not_ready: only when there is nothing yet to write a paper from: no argument for any main result, or hardly any mathematics. Never only because proofs are sketched, steps are left to fill in, or the notes are slides.
 
 Be honest and specific: the author decides with this. Do not judge the style or the language.
 

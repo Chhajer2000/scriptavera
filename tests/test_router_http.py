@@ -8,6 +8,7 @@ os.environ.pop("SCRIPTAVERA_MOCK", None)
 from scriptavera import config
 tmp = pathlib.Path(tempfile.mkdtemp())
 config.SETTINGS_PATH = tmp / "settings.json"; config.ENV_PATH = tmp / ".env"
+config.MEMORY_DIR = tmp / "memory"
 
 calls = {"flaky": 0, "log": []}
 
@@ -164,6 +165,49 @@ config.save_settings({"routing": {}})
 for m in router.models: m.cooldown_until = 0
 calls["b"] = "ok"
 print("strict roles: the same model on the next key, a lesser model refused, wait time reported")
+
+# ---- of two equally good models, the one that keeps every request waiting for minutes goes second; never a weaker one
+from scriptavera import llm as _llm
+from scriptavera.llm import speed
+router.models = [mk("slowpoke", 90.5), mk("slowpoke", 90.5, "sk-two", 1), mk("next", 90), mk("weak", 70)]
+assert [m.id for m in router.peers("writer")] == ["slowpoke", "slowpoke", "next"]
+sp = router.models[0]
+for _ in range(2):
+    speed.note(sp, 200.0, 300)                       # 200 s for 300 tokens: minutes of waiting
+speed.note(router.models[2], 4.0, 300)
+assert speed.slowness(sp) == 1.0 and speed.slowness(router.models[2]) == 0.0
+assert [m.id for m in router.peers("writer")] == ["next", "slowpoke", "slowpoke"]
+assert [m.id for m in router.candidates("fast")][:1] == ["next"]
+saved = json.loads((config.MEMORY_DIR / "model_speed.json").read_text())
+assert saved["custom:slowpoke"]["wait"] > 150, saved                               # remembered when the app starts again
+speed._data = None
+assert speed.slowness(sp) == 1.0
+rec_ = saved["custom:slowpoke"]                                                     # forgotten within a day
+rec_["t"] -= 4 * speed.HALF
+(config.MEMORY_DIR / "model_speed.json").write_text(json.dumps(saved)); speed._data = None
+assert speed.slowness(sp) == 0.0 and router.peers("writer")[0].id == "slowpoke"
+speed._data = {}
+router.models = [mk("slowpoke", 90.5), mk("weak", 89)]                          # alone in its class: still asked first
+speed.note(router.models[0], 200.0)
+assert [m.id for m in router.peers("writer")] == ["slowpoke"]
+# no answer in time: the next model of the class is asked at once, not the same one again for as long
+router.models = [mk("slowpoke", 90.5), mk("slowpoke", 90.5, "sk-two", 1), mk("next", 90)]
+speed._data = {}
+real_post, posted = _llm.requests.post, []
+def post(url, **kw):
+    mid = json.loads(kw["data"])["model"]; posted.append(mid)
+    if mid == "slowpoke":
+        raise _llm.requests.ReadTimeout("read timed out")
+    return real_post(url, **kw)
+_llm.requests.post = post
+try:
+    res = router.chat("writer", "s", "u", hooks=Quick(), label="slow")
+finally:
+    _llm.requests.post = real_post
+assert res.model == "next" and posted == ["slowpoke", "next"], posted                 # not the slow one on its second key
+assert speed.slowness(router.models[0]) == 1.0
+speed._data = {}
+print("of two equal models the quicker goes first; one that does not answer in time is left at once; slowness fades")
 router.models = keep
 
 os.environ["CUSTOM_API_KEY"] = "sk-wrong"

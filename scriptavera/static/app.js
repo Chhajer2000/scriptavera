@@ -2248,10 +2248,22 @@ function assessRows(editable) {
       ${choices ? `<div class="picks" role="group" aria-label="How to present ${esc(r.id)}">${choices}</div>` : ""}</div>`;
   }).join("");
 }
+const ARGUED = ["complete", "gap", "sketch", "breaks off"];
 function assessSummary() {
-  const A = S.b.assessment, m = MAIN_INFO[A.main] || MAIN_INFO.established, k = KIND_INFO[A.recommend] || KIND_INFO.article;
+  /* The assessment is advice. A sketched proof is written out in full along the author's lines afterwards, so main
+     results that have an argument, even only a sketch, are not shown as a failure, and 'not yet' is never chosen
+     for the author. */
+  const A = S.b.assessment, R = A.results || {};
+  const mains = ((S.b.dossier || {}).results || []).filter((r) => r.role === "main").map((r) => r.id).filter((id) => R[id]);
+  const ids = mains.length ? mains : Object.keys(R);
+  const argued = A.main !== "established" && ids.length && ids.every((id) => ARGUED.includes(R[id].proof));
+  const m = argued ? ["Your notes give the argument for the main results, partly as a sketch.", "hl"] : MAIN_INFO[A.main] || MAIN_INFO.established;
+  const k = KIND_INFO[A.recommend] || KIND_INFO.article;
+  const sketched = ids.filter((id) => ["gap", "sketch", "breaks off"].includes(R[id].proof)).length;
   return `<div class="banner ${m[1] === "green" ? "blue" : m[1] === "red" ? "red" : ""}"><div class="grow"><b>${m[0]}</b> ${A.main_note ? inner(latexLite(A.main_note)) : ""}
-      <div style="margin-top:6px">Suggested: <b>${k[0].toLowerCase()}</b>.${A.recommend_note ? " " + inner(latexLite(A.recommend_note)) : ""}</div></div></div>
+      ${sketched ? `<div style="margin-top:6px">The proofs your notes only sketch are written out in full along your own steps, and every step that is added is marked for you to check.</div>` : ""}
+      <div style="margin-top:6px">The assessment's advice: <b>${k[0].toLowerCase()}</b>.${A.recommend_note ? " " + inner(latexLite(A.recommend_note)) : ""}
+        <span class="muted">This is advice only and changes nothing by itself: you choose the kind of paper below${A.recommend === "not_ready" ? ", and the paper is only stopped if you choose that" : ""}.</span></div></div></div>
     ${(A.unfinished || []).length ? `<div class="dlabel" style="margin-top:12px">Left open in your notes</div>${A.unfinished.map((u) => `<div class="flag">${inner(latexLite(u))}</div>`).join("")}` : ""}`;
 }
 /* ------------------------------------------------- the paper written statement by statement (steps 12 to 17) */

@@ -222,6 +222,17 @@ assert d["page"] == 2 and d["snippet"] == "f(4)" and d["alt"] == "f(n)" and d["e
 assert T({"snippet": "4(f(4)-1) \\le A", "issue": "typo", "alt": "4(f(n)-1) \\le A"}, pg, 5) is None                    # already corrected by the author
 d = T({"snippet": "“at least 4 terms … \\le A”", "issue": "the bound should use $a$", "suggestion": "suggested reading: replace “A” by “a”."}, pg, 5)
 assert d["snippet"] == "A" and d["alt"] == "a" and d["page"] == 5 and d["count"] == 2 and not d["every"], d                     # twice on the page: no button
+# a remark in the suggested reading is never written into the page: it says where else the reading applies
+pgr = {3: "Let $X\\mathcal{B}_3 = Y$, with $\\mathcal{B}_3^{(1)}$ and $Z\\mathcal{B}_3$, so $X\\mathcal{B}_3 \\times H$."}
+for alt in ["X\\mathcal{E}_3 (and \\mathcal{E}_3 throughout the page)", "X\\mathcal{E}_3 (and $\\mathcal{E}_3$ everywhere else)",
+            "X\\mathcal{E}_3 — the same symbol in every place"]:
+    d = T({"snippet": "X\\mathcal{B}_3", "issue": "the letter is the one used on the next page", "alt": alt}, pgr, 3)
+    assert d["alt"] in ("\\mathcal{E}_3", "X\\mathcal{E}_3") and "page" not in d["alt"] and "every" not in d["alt"] and d["every"], d
+    assert d["snippet"] == d["alt"].replace("E", "B"), d
+d = T({"snippet": "X\\mathcal{B}_3", "issue": "x", "alt": "X\\mathcal{E}_3 (and \\mathcal{E}_3 throughout the page)"}, pgr, 3)
+assert (d["snippet"], d["alt"], d["count"]) == ("\\mathcal{B}_3", "\\mathcal{E}_3", 4), d                 # the smaller piece: every place
+d = T({"snippet": "as above", "issue": "x", "alt": "as before"}, {1: "proved as above here."}, 1)
+assert d["alt"] == "as before" and not d["every"], d                                                          # words of the passage itself stay
 print("doubt shapes ok")
 
 # a passage quoted slightly wrongly is found on the page; one that is not there any more asks nothing

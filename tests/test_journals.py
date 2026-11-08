@@ -9,6 +9,7 @@ import tempfile
 import requests
 from scriptavera import config, journals as J
 tmp = pathlib.Path(tempfile.mkdtemp()); config.SETTINGS_PATH = tmp / "settings.json"; config.ENV_PATH = tmp / ".env"
+config.MEMORY_DIR = tmp / "memory"
 for k in ("OPENALEX_API_KEY", "CONTACT_EMAIL"): os.environ.pop(k, None)
 
 OPENALEX = {"meta": {"count": 3, "db_response_time_ms": 31, "page": 1, "per_page": 12, "groups_count": None}, "results": [

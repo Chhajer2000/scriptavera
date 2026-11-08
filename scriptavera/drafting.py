@@ -33,7 +33,7 @@ from .pipeline import (Run, _room, _side_by_side, emit, find_figures, notation_t
 from .store import Project
 from .texutil import check_balance, clean_fragment, leaks
 from .util import extract_tag, fit, parse_lines
-from .writing import (KINDS, KIND_TEXT, _none, _view, citable, cited_keys, dossier_text, drop_unsourced, fields,
+from .writing import (KINDS, KIND_TEXT, default_kind, _none, _view, citable, cited_keys, dossier_text, drop_unsourced, fields,
                       fix_keys, organisation, page_list, sources_text)
 
 ITEM_KINDS = ("definition", "lemma", "proposition", "theorem", "corollary", "conjecture", "example", "remark", "question")
@@ -197,7 +197,7 @@ def prepare_statements(run: Run) -> None:
         run.log(f"No statement came back for {', '.join(missing)}: the wording of the notes is shown for "
                 f"{'it' if len(missing) == 1 else 'them'}; check and edit it.", "warn")
     S = {"sig": sig, "items": merged, "model": model, "unused": unused_pages(merged, pages),
-         "kind": a.get("recommend") if a.get("recommend") in KINDS else "article", "note": ""}
+         "kind": default_kind(a, {x["id"] for x in merged if x.get("role") == "main"}), "note": ""}
     p.save("statements", S)
     remember(p, S)
     asks = sum(1 for x in merged if not x["settled"])
@@ -1207,7 +1207,11 @@ def view(p: Project) -> dict:
                      "author": c.get("author", ""), "statement": c.get("statement", ""), "proof": c.get("proof", ""),
                      "doubt": v.get("doubt", ""), "settled": v.get("settled"), "comment": v.get("comment", ""),
                      "tries": len(v.get("tries") or []), "problems": v.get("problems", [])}
-    return {"items": items, "kind": S.get("kind"), "note": S.get("note", ""), "unused": S.get("unused", []),
+    kind = S.get("kind")
+    if kind == "not_ready" and (p.load("scope") or {}).get("kind") != "not_ready":
+        # proposed by an earlier version, never chosen by the author: stopping is only ever the author's choice
+        kind = default_kind(p.load("assessment") or {}, {x["id"] for x in items if x.get("role") == "main"})
+    return {"items": items, "kind": kind, "note": S.get("note", ""), "unused": S.get("unused", []),
             "leave_out": O.get("leave_out") or [], "chat": O.get("chat") or [],
             "tabs": by_tab, "outline": O.get("sections") or [], "numbers": nums, "proofs": proofs,
             "abstract": (p.load("abstract_draft") or {}).get("abstract", ""),

@@ -155,4 +155,31 @@ def nothing(role, system, user, images=None, **kw):
 pipeline._draw_figure(p, rec, nothing, {})
 assert rec["tikz_ok"] is False and "did not find" in rec["error"], rec
 print("5. a drawing the model does not find on the page is reported, not guessed")
+
+# 6. drawing it fails after the drawing was found (a model does not answer): the place found is kept for the next attempt
+from scriptavera.llm import LLMError
+p, page = project()
+rec = {"id": "f1", "page": 1, "k": 0, "of": 1, "desc": "A triangle, a circle and an arrow."}
+p.save("figures", {"items": [dict(rec)]})
+found, _ = scripted([])
+
+
+def no_labels(role, system, user, images=None, **kw):
+    if kw.get("label", "").startswith("Read the labels"):
+        raise LLMError("The strongest models failed on 'Read the labels': no answer in 240s", kind="transient")
+    return found(role, system, user, images=images, **kw)
+
+
+try:
+    with pipeline._keeping_place(p, rec):
+        pipeline._draw_figure(p, rec, no_labels, {})
+    raise SystemExit("the failure must reach the caller")
+except LLMError:
+    pass
+kept = p.load("figures")["items"][0]
+assert kept.get("pbox") and kept.get("box") and kept["pbox"] == rec["pbox"] and not kept.get("tikz"), kept
+ask, again = scripted([])
+pipeline._draw_figure(p, kept, ask, {})
+assert not any(c.startswith("Find the drawings") for c in again) and kept["tikz_ok"], again
+print("6. a drawing found on its page keeps its place when drawing it then fails; the next attempt does not look again")
 print("figflow ok")
