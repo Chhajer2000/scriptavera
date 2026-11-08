@@ -66,7 +66,7 @@ for cls in ("amsart", "article"):
     print(cls, "engine", res["engine"], "ok", res["ok"], res["errors"][:3], len(res["pdf"] or b""))
     assert res["ok"], res["errors"]
     pathlib.Path(tempfile.gettempdir(), f"scriptavera_test_{cls}.pdf").write_bytes(res["pdf"])
-open(pathlib.Path(tempfile.gettempdir(), "scriptavera_test.html"), "w").write(P.standalone_html(paper, refs))
+open(pathlib.Path(tempfile.gettempdir(), "scriptavera_test.html"), "w", encoding="utf-8").write(P.standalone_html(paper, refs))
 print(P.lint(paper))
 print(P.reference_latex(refs[0]))
 print(P.reference_bibtex(refs[1]))

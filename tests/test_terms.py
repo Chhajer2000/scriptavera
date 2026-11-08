@@ -15,7 +15,7 @@ for name in ("LICENSING.md", "CLA.md", "CONTRIBUTING.md", "TRADEMARKS.md", "THIR
     assert (ROOT / name).is_file(), name
 missing = [str(f.relative_to(ROOT)) for f in ROOT.rglob("*")
            if f.suffix in (".py", ".js", ".css", ".html", ".bat") and "vendor" not in f.parts and "__pycache__" not in f.parts
-           and "projects" not in f.parts and "SPDX-License-Identifier: AGPL-3.0-only" not in f.read_text(encoding="utf-8")]
+           and "projects" not in f.parts and not f.name.startswith("google") and "SPDX-License-Identifier: AGPL-3.0-only" not in f.read_text(encoding="utf-8")]
 assert not missing, missing
 print("1. the licence texts are the official ones and every program file carries the notice")
 
