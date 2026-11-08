@@ -76,6 +76,11 @@ try:
     pipeline.submit_review(p, {}); raise SystemExit("the figure for the paper still needs an answer")
 except ValueError as e:
     assert "page 1)" in str(e), e                            # only page 1: the explanation is settled
+# approving without an answer: each open question gets the most likely answer
+assert pipeline.assumed_choice({"judged": {"use": "paper"}, "tikz_ok": True}) == "tikz"
+assert pipeline.assumed_choice({"judged": {"use": "paper"}, "tikz_ok": False}) == "orig"
+assert pipeline.assumed_choice({"judged": {"use": "explanation"}}) == "explain" == pipeline.assumed_choice({"judged": {"use": "annotation"}})
+assert pipeline._assume_reading("so $x$ is [?compact|complete?] and [?open?], [?] stays") == "so $x$ is compact and open, [?] stays"
 pipeline.submit_review(p, {"figures": {"f1": "orig"}})
 wpages, wfigs = pipeline.writing_pages(p)
 t3 = next(pg["text"] for pg in wpages if pg["n"] == 3)

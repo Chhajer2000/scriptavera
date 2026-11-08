@@ -297,6 +297,23 @@ function autoView() {
 
 let refreshTimer = null;
 function refreshSoon(ms = 250) { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, ms); }
+/* Changes asked for in step 9 (a figure drawn again, a page corrected) run on the server by themselves: what is being
+   done comes with the paper (S.b.jobs), so that it shows after a reload too and the transcript cannot be approved
+   meanwhile; what each came to (S.b.jobs_done) is said once, when it is ready. */
+const jobFor = (key) => ((S.b && S.b.jobs) || []).find((j) => j.key === key);
+const jobsNow = () => (S.b && S.b.jobs) || [];
+function announceJobs() {
+  const seen = (S.jobsSeen = S.jobsSeen || {}), first = !S.jobsPid || S.jobsPid !== S.pid;
+  S.jobsPid = S.pid;
+  for (const d of (S.b && S.b.jobs_done) || []) {
+    const k = `${d.key}|${d.at}`;
+    if (seen[k]) continue;
+    seen[k] = true;
+    if (first) continue;                          /* finished before the paper was opened: not said again */
+    toast(d.message || "Done.", !d.ok);
+    if (d.ok && d.page && S.review && S.review.pid === S.pid) { S.review.fresh = d.page; setTimeout(() => { if (S.review) S.review.fresh = 0; }, 3000); }
+  }
+}
 async function refresh() {
   if (!S.pid) return;
   const pid = S.pid;
@@ -306,6 +323,7 @@ async function refresh() {
     const before = S.view;
     const live = !!S.b && S.view === autoView();     // looking at the step in progress, even if it was clicked by hand
     S.b = data;
+    announceJobs();
     if (S.follow || live) {                            // ... then the screen moves on with the work
       S.view = autoView();
       if (!S.follow && S.view !== before) { S.follow = true; history.replaceState(null, "", `#p/${S.pid}`); }
@@ -1632,7 +1650,7 @@ function sheetHtml(pg, openBy) {
   const n = pg.n, R = S.review, rec = S.b.transcript.pages[n], s = pageState(pg, openBy), c = commentOn(n).trim();
   const chips = (s === "doubt" ? `<span class="chip hl">${plural(openBy[n].length, "item")} to check</span>` : "")
     + (s === "ok" ? '<span class="chip green">✓ Confirmed</span>' : "") + (rec && (rec.corrections || []).length ? '<span class="chip blue">Corrected from your comment</span>' : rec && rec.edited ? '<span class="chip blue">Changed by you</span>' : "")
-    + (R.busy[n] ? '<span class="chip"><span class="spinner"></span> Correcting…</span>' : "")
+    + (jobFor("page:" + n) ? '<span class="chip"><span class="spinner"></span> Correcting…</span>' : "")
     + (R.linesWork[n] ? '<span class="chip" title="An AI that sees your page is finding where its lines end and which are headings, so that the text is shown line for line as you wrote it"><span class="spinner"></span> Matching your lines…</span>' : "");
   const body = pg.skip ? `<div class="ts-out">Left out as ${pg.kind === "blank" ? "a blank page" : pg.kind === "cover" ? "a cover page" : "not part of the notes"}. <button class="linkbtn" data-act="zoom" data-n="${n}">Look at it, or include it</button></div>`
     : !rec ? `<div class="ts-out"><span class="spinner"></span> This page is being read.</div>` : pageTextHtml(n);
@@ -1671,7 +1689,7 @@ function panelHtml(open, done, openBy) {
       ${mine.map((x) => x.type === "fig" ? figureCard(x.f) : flagCard(x.f, rec.text)).join("")}</div>`;
     const auto = (S.b.figures || []).filter((f) => f.page === n && f.choice === "explain" && f.auto);
     if (auto.length) h += `<div class="autoline">${auto.length === 1 ? "One drawing on this page only explains" : plural(auto.length, "drawing") + " on this page only explain"} your argument, so ${auto.length === 1 ? "it is" : "they are"} not printed. The writers still read ${auto.length === 1 ? "it" : "them"}, to understand the proof.</div>`;
-    const last = lastCorrection(n), busy = !!R.busy[n];
+    const last = lastCorrection(n), busy = !!jobFor("page:" + n);
     if (last) h += `<div class="pp-sec pp-done ${R.fresh === n ? "fresh" : ""}"><div class="pp-h">${last.changes && last.changes.length ? "Corrected from your comment" : "Your comment was read; nothing needed changing"}</div>
       <div class="pp-quote">“${esc(last.comment)}”</div>
       <div>${explained(last.reply)}</div>
@@ -1829,7 +1847,7 @@ function figVerdict(f) {
   return `<div class="figverdict v-${f.asked_print ? "paper" : j.use}"><b>${head}.</b> ${f.asked_print ? (j.use === "explanation" ? "The app had taken it for an explanation of your argument." : "") : explained(j.why)}${doubt}</div>`;
 }
 function figureCard(f) {
-  const busy = S.review.figBusy === f.id ? (S.review.figMode || "draw") : false;
+  const job = jobFor("fig:" + f.id), busy = job ? job.mode || "draw" : false;
   const drawn = !!f.drawn, j = f.judged || {};
   const opt = (v, label, hint, off) => `<button class="choice ${f.choice === v ? "on" : ""}" role="radio" data-act="figchoice" data-id="${f.id}" data-v="${v}" aria-checked="${f.choice === v}" ${off || busy ? "disabled" : ""}><span class="dot" aria-hidden="true"></span><span><b>${label}</b>${hint ? `<small>${hint}</small>` : ""}</span></button>`;
   const asText = `<button class="choice" data-act="figtext" data-id="${f.id}" ${busy ? "disabled" : ""}><span class="dot" aria-hidden="true"></span><span><b>${busy === "text" ? "Writing it into the text…" : "It is not a figure: write it into the text"}</b><small>for your own labels or notes on a formula; labels become braces under the formula</small></span></button>`;
@@ -1847,7 +1865,8 @@ function figureCard(f) {
       ${order.join("")}${opt("none", "Leave it out completely", "for a doodle or an abandoned attempt; the writers do not see it")}
     </div>
     ${drawn ? `<div class="figfoot"><input type="text" class="grow figwhy" id="figwhy-${f.id}" placeholder="Optional: what it is, or what is wrong with the drawing" ${busy ? "disabled" : ""}>
-      <button class="btn small" data-act="figredraw" data-id="${f.id}" ${busy ? "disabled" : ""}>${busy === "draw" ? "Drawing…" : "Draw it again"}</button></div>
+      <button class="btn small" data-act="figredraw" data-id="${f.id}" ${busy ? "disabled" : ""}>${busy === "draw" ? '<span class="spinner"></span> Drawing…' : "Draw it again"}</button></div>
+    ${job ? `<div class="figjob"><span class="spinner"></span> ${esc(job.what)}, started ${ago(job.since)}. You can go on checking: it appears here as soon as it is ready, and Approve waits for it.</div>` : ""}
     ${captionBox(f)}` : ""}</div>`;
 }
 function captionBox(f, compact) {
@@ -1901,8 +1920,13 @@ function approveTab(open, done) {
   const P = reviewPages(), edited = P.filter((n) => S.b.transcript.pages[n].edited), figs = S.b.figures || [];
   const kept = figs.filter((f) => f.choice === "tikz" || f.choice === "orig").length, out = figs.filter((f) => f.choice === "none").length;
   const expl = figs.filter((f) => f.choice === "explain").length;
-  if (open.length) return `<div class="rv-empty"><b>${plural(open.length, "item")} still to check.</b><p class="muted">The paper is written from the approved transcript, so answer them first.</p>
-      <button class="btn primary" data-act="rvpage" data-n="${open[0].n}">Go to page ${open[0].n}</button></div>`;
+  const work = jobsNow();
+  if (work.length) return `<div class="rv-empty"><b><span class="spinner"></span> Wait: ${esc(work.map((j) => j.what.toLowerCase()).join("; "))}.</b>
+      <p class="muted">The transcript is approved with your changes in it, so Approve waits until they are done. You can go on checking meanwhile.</p></div>`;
+  if (open.length) return `<div class="rv-empty"><b>${plural(open.length, "item")} not answered yet.</b>
+      <p class="muted">You can answer them, or approve now: for each one the app then takes its most likely answer. A doubtful reading stays as it was read (the first of two readings), and a figure goes as it was judged: printed (the redrawn figure, or your own drawing if it could not be redrawn) or, if it only explains your argument, kept for the writers but not printed.</p>
+      <div class="row" style="gap:8px;justify-content:center"><button class="btn" data-act="rvpage" data-n="${open[0].n}">Go to page ${open[0].n}</button>
+      <button class="btn primary" data-act="approve" ${S.busy || running() ? "disabled" : ""}>Approve with the most likely answers</button></div></div>`;
   const adding = S.b.adding;
   return `<div class="approve-card"><div class="big-tick">✓</div><h2>Everything is checked</h2>
     <ul class="sumlist"><li>${plural(P.length, "page")} read${adding ? ", and more still being read" : ""}</li>
@@ -2021,21 +2045,13 @@ async function correctPage(n, quiet) {
   const R = S.review, text = commentOn(n).trim();
   if (!text) { toast("Write what is wrong on the page first.", true); return false; }
   clearTimeout(savePageNote.t); savePageNote.t = null;
-  R.busy[n] = true; render();
   try {
+    /* started on the server and carried on there: the page is shown corrected as soon as it is ready */
     const r = await api(`/api/projects/${S.pid}/correct_page`, { method: "POST", body: { page: n, comment: text } });
-    const rec = S.b.transcript.pages[n];
-    rec.text = r.text; if (r.changed) rec.edited = true;
-    (rec.corrections = rec.corrections || []).push(r.correction);
-    S.b.page_notes = r.notes; delete R.conf[n];
-    const typed = R.draft[n];
-    delete R.draft[n];
-    if (typed !== undefined && typed.trim() && typed.trim() !== text) { R.draft[n] = typed; savePageNote.n = n; savePageNote(); }   // typed more meanwhile: a new comment
-    delete R.busy[n]; R.fresh = n; render();
-    setTimeout(() => { if (S.review && S.review.fresh === n) S.review.fresh = 0; }, 3000);
-    if (!quiet) toast(r.changed ? `Page ${n} is corrected. Compare it with your page; if something is still wrong, say so.` : `Nothing was changed on page ${n}. ${r.correction.reply}`);
+    S.b.jobs = r.jobs || []; delete R.conf[n]; delete R.draft[n]; render();
+    if (!quiet) toast(`Correcting page ${n}. You can go on checking: the page is shown corrected as soon as it is ready, and Approve waits for it.`);
     return true;
-  } catch (e) { delete R.busy[n]; render(); toast(e.message, true); return false; }
+  } catch (e) { render(); toast(e.message, true); return false; }
 }
 async function savePageNote() {
   const n = savePageNote.n; clearTimeout(savePageNote.t); savePageNote.t = null;
@@ -2053,8 +2069,8 @@ function changeLine(x) {
 }
 function mainButton(open) {
   /* The one button that moves on: while a comment is waiting it carries the comments out instead, and says so. */
-  const pend = pendingPages(), busy = Object.keys(S.review.busy).length;
-  if (busy) return `<button class="btn small primary" disabled><span class="spinner"></span> Correcting…</button>`;
+  const pend = pendingPages(), work = jobsNow();
+  if (work.length) return `<button class="btn small primary" disabled title="${esc(work.map((j) => j.what).join("; "))}"><span class="spinner"></span> Wait: ${work.length === 1 ? esc(work[0].what.toLowerCase()) : plural(work.length, "change") + " being made"}…</button>`;
   if (pend.length) return `<button class="btn small primary" data-act="rvcorrectall">Correct ${pend.length === 1 ? "page " + pend[0] : plural(pend.length, "page")} from your comment${pend.length === 1 ? "" : "s"}</button>`;
   if (open.length) return `<button class="btn small" data-act="rvmode" data-v="approve">${plural(open.length, "item")} left to check</button>`;
   return `<button class="btn small primary" data-act="approve" ${S.busy || running() ? "disabled" : ""}>Approve and continue ›</button>`;
@@ -3507,17 +3523,19 @@ async function savePaper(body) {
   S.busy = ""; render();
 }
 async function setFigure(id, body, busy) {
-  const mode = typeof busy === "string" ? busy : "draw";
-  if (busy) { S.review.figBusy = id; S.review.figMode = mode; render(); }
+  /* An answer for a figure is saved at once. A drawing asked for (drawn again, printed after all) is started on the
+     server and goes on by itself: the card says so until it is ready, and the author goes on checking meanwhile. */
   let ok = false;
   try {
     const r = await api(`/api/projects/${S.pid}/figure/${id}`, { method: "POST", body });
-    const i = S.b.figures.findIndex((f) => f.id === id); if (i >= 0) S.b.figures[i] = r.figure;
-    if (busy) toast(r.figure.tikz_ok ? (mode === "print" ? "Drawn for the paper. Check it against your page." : "Drawn again. Is it right now?")
-      : "It could not be redrawn. You can use your own drawing.", !r.figure.tikz_ok);
+    if (r.started) {
+      S.b.jobs = r.jobs || [];
+      toast("Started. You can go on checking: the drawing appears here as soon as it is ready, and Approve waits for it.");
+    } else {
+      const i = S.b.figures.findIndex((f) => f.id === id); if (i >= 0) S.b.figures[i] = r.figure;
+    }
     ok = true;
   } catch (e) { toast(e.message, true); }
-  if (busy) S.review.figBusy = "";
   if (!ok || busy || !body.choice) render();      // a chosen answer redraws through advanceReview
   return ok;
 }
@@ -3959,10 +3977,9 @@ const ACT = {
     const pend = pendingPages();
     for (let i = 0; i < pend.length; i++) {
       selectPage(pend[i]); goPage(pend[i]);
-      if (pend.length > 1) toast(`Correcting page ${pend[i]} (${i + 1} of ${pend.length})…`);
       if (!await correctPage(pend[i], pend.length > 1)) return;
     }
-    if (pend.length > 1) toast(`${plural(pend.length, "page")} corrected from your comments. Compare each with your page.`);
+    if (pend.length > 1) toast(`Correcting ${plural(pend.length, "page")} from your comments. Each is shown corrected as soon as it is ready.`);
   },
   async rvundo(el) {
     const R = S.review, n = +el.dataset.n;
@@ -4091,22 +4108,22 @@ const ACT = {
   async figtext(el) {
     const id = el.dataset.id, why = $(`#figwhy-${id}`), note = why ? why.value.trim() : "";
     if (saveTranscript.t) { clearTimeout(saveTranscript.t); saveTranscript.t = null; const n = saveTranscript.n; await saveTranscript(n, S.b.transcript.pages[n].text); }
-    S.review.figBusy = id; S.review.figMode = "text"; render();
     try {
       const r = await api(`/api/projects/${S.pid}/figure/${id}`, { method: "POST", body: { astext: note } });
-      S.b.figures = (S.b.figures || []).filter((f) => f.id !== id);
-      if (S.b.transcript && S.b.transcript.pages[r.page]) { S.b.transcript.pages[r.page].text = r.text; S.b.transcript.pages[r.page].edited = true; }
-      S.review.figBusy = ""; await refresh();
-      advanceReview("Your note is now part of the text.");
-    } catch (e) { toast(e.message, true); S.review.figBusy = ""; render(); }
+      S.b.jobs = r.jobs || []; render();
+      toast("Started. You can go on checking: the page shows it as soon as it is ready.");
+    } catch (e) { toast(e.message, true); render(); }
   },
   figredraw(el) { const why = $(`#figwhy-${el.dataset.id}`); setFigure(el.dataset.id, { redraw: why ? why.value.trim() : "" }, true); },
   async approve() {
     if (S.review && S.review.pid === S.pid && pendingPages().length) return ACT.rvcorrectall();
+    const work = jobsNow();
+    if (work.length) return toast(`Wait: ${work.map((j) => j.what.toLowerCase()).join("; ")}. Approve waits until it is done.`, true);
     const open = openItems();
-    if (open.length) { selectPage(open[0].n); render(); goPage(open[0].n); return toast(`${plural(open.length, "item")} still to check. The first one is shown.`, true); }
+    if (open.length && !await askConfirm({ title: `Approve with ${plural(open.length, "item")} not answered?`, danger: false, yes: "Approve",
+      body: "For each one the app takes its most likely answer: a doubtful reading stays as it was read, and a figure goes as it was judged (printed, or only explaining your argument)." })) return;
     S.busy = "approve"; render();
-    try { await api(`/api/projects/${S.pid}/review`, { method: "POST", body: {} }); S.follow = true; history.replaceState(null, "", `#p/${S.pid}`); toast("Approved. Now the whole of the notes is read together."); await refresh(); }
+    try { await api(`/api/projects/${S.pid}/review`, { method: "POST", body: open.length ? { assume: true } : {} }); S.follow = true; history.replaceState(null, "", `#p/${S.pid}`); toast("Approved. Now the whole of the notes is read together."); await refresh(); }
     catch (e) { toast(e.message, true); }
     S.busy = ""; render();
   },

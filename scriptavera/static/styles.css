@@ -698,6 +698,7 @@ textarea.mono { font-family: var(--mono); font-size: 13px; width: 100%; }
 .figverdict { font-size: 13.5px; margin: 2px 0 8px; padding: 6px 10px; border-left: 3px solid var(--blue); background: var(--blue-soft); border-radius: 0 4px 4px 0; }
 .figverdict.v-explanation { border-left-color: var(--green); background: var(--green-soft); }
 .figverdict.v-annotation { border-left-color: #c9a227; background: var(--hl-soft); }
+.figjob { margin: 8px 0 4px; padding: 8px 10px; border-radius: 5px; background: var(--hl-soft); font: 13px/1.45 var(--ui); color: var(--ink); }   /* a change being made, on the server */
 .figdesc { font: 15px/1.5 var(--tex); border: 1px solid var(--rule); border-radius: 4px; background: #fff; padding: 10px 14px; margin: 6px 0 12px; }
 .figdesc .muted { font-family: var(--ui); margin-top: 4px; }
 .figdesc-s { font-family: var(--tex); font-size: 14.5px; color: var(--graphite); margin-top: 2px; }

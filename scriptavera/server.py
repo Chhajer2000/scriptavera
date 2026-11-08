@@ -521,7 +521,7 @@ def _bundle(p: store.Project) -> dict:
                    for n, v in (p.load("survey") or {}).items()},
         "brief": p.load("brief"), "transcript": shown_tr, "flags": shown_flags, "language_settled": settled,
         "figures": (p.load("figures") or {}).get("items"), "approved": bool(p.load("approved")),
-        "doubt_answers": p.load("doubt_answers", []), "page_notes": pipeline.page_notes(p), "source_plan": store.source_plan(p.state, p.dir), "adding": pipeline.adding_now(p),
+        "doubt_answers": p.load("doubt_answers", []), "page_notes": pipeline.page_notes(p), "jobs": pipeline.review_jobs(p), "jobs_done": pipeline.review_jobs_done(p), "source_plan": store.source_plan(p.state, p.dir), "adding": pipeline.adding_now(p),
         "dossier": p.load("dossier"), "intro": p.load("intro"), "plan": p.load("plan"), "draft": draft,
         "assessment": assessment, "novelty": p.load("novelty"), "scope": p.load("scope"), "scope_default": writing.default_scope(assessment) if assessment else None,
         "writing": drafting.view(p),
@@ -886,7 +886,17 @@ async def api_correct_page(request: Request):
         if body.get("undo"):
             return ok(**pipeline.undo_correction(p, n))
         comment = body.get("comment") if isinstance(body.get("comment"), str) else None
-        return ok(**await run_in_threadpool(pipeline.correct_page, p, n, comment))
+        if not p.load("transcript", {"pages": {}})["pages"].get(str(n)):
+            raise ValueError("This page has not been read yet.")
+        if not (comment if comment is not None else (pipeline.page_notes(p)["comments"].get(str(n)) or {}).get("text", "")).strip():
+            raise ValueError("Write your comment on the page first.")
+
+        def said(r):
+            return (f"Page {n} is corrected. Compare it with your page; if something is still wrong, say so." if r.get("changed")
+                    else f"Nothing was changed on page {n}. {r['correction'].get('reply', '')}".strip())
+        pipeline.start_review_job(p, f"page:{n}", f"Correcting page {n}", lambda: pipeline.correct_page(p, n, comment),
+                                  said, page=n)
+        return ok(started=True, jobs=pipeline.review_jobs(p))
     except (ValueError, LLMError) as e:
         return fail(str(e))
 
@@ -943,13 +953,24 @@ async def api_figure(request: Request):
     if ("astext" in body or "redraw" in body or "print" in body) and drawing:
         return fail("A figure is being drawn right now. Try again in a minute; your other answers are saved.")
     try:
-        if "astext" in body:
-            got = await run_in_threadpool(pipeline.figure_as_text, p, fid, str(body.get("astext") or "")[:1200])
-            return ok(figure=None, page=got["page"], text=got["text"])
-        if "print" in body:                         # print a drawing the app took for an explanation
-            rec = await run_in_threadpool(pipeline.print_figure, p, fid)
-        elif "redraw" in body:
-            rec = await run_in_threadpool(pipeline.redraw_figure, p, fid, str(body.get("redraw") or "")[:1200])
+        page = next((f["page"] for f in (p.load("figures") or {}).get("items", []) if f["id"] == fid), None)
+        if page is None:
+            raise ValueError("Unknown figure.")
+        name = f"figure {fid[1:]} (page {page})"
+        drawn = lambda r: (f"The {name} is drawn again. Is it right now?" if r.get("tikz_ok")
+                           else f"The {name} could not be redrawn: {r.get('error') or 'no reason given'}. You can use your own drawing.")
+        if "astext" in body or "print" in body or "redraw" in body:      # carried out at once, in the background
+            if "astext" in body:
+                note = str(body.get("astext") or "")[:1200]
+                job = ("text", f"Writing {name} into the text", lambda: pipeline.figure_as_text(p, fid, note),
+                       lambda r: f"Page {page}: your note is now part of the text, not a figure.")
+            elif "print" in body:                   # print a drawing the app took for an explanation
+                job = ("print", f"Drawing {name} for the paper", lambda: pipeline.print_figure(p, fid), drawn)
+            else:
+                why = str(body.get("redraw") or "")[:1200]
+                job = ("draw", f"Drawing {name} again", lambda: pipeline.redraw_figure(p, fid, why), drawn)
+            pipeline.start_review_job(p, f"fig:{fid}", job[1], job[2], job[3], mode=job[0], fid=fid, page=page)
+            return ok(started=True, jobs=pipeline.review_jobs(p))
         else:
             choice = body.get("choice") if isinstance(body.get("choice"), str) else None
             caption = body.get("caption") if isinstance(body.get("caption"), str) else None
@@ -965,6 +986,8 @@ async def api_review(request: Request):
         return fail("Project not found.", 404)
     if pipeline.is_running(p.id):
         return fail("Wait for the current step to finish, or press Stop.")
+    if pipeline.review_jobs(p):
+        return fail("Wait: " + "; ".join(j["what"].lower() for j in pipeline.review_jobs(p)) + " is still being done.")
     if p.state["stages"]["review"].get("status") not in ("waiting", "done"):
         return fail("The project is not at the review step.")
     try:

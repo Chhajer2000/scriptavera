@@ -2303,6 +2303,61 @@ def _save_figures(p: Project, items: list[dict]) -> None:
         p.save("figures", {"items": items})
 
 
+# ---------------------------------------------------------------- changes asked for in step 9, carried out at once
+# A change the author asks for while checking the transcript (a figure drawn again, a page corrected from a comment) is
+# started the moment it is asked for and runs in the background: the author goes on checking, the result appears in
+# step 9 when it is done (with any new question it raises), and the transcript cannot be approved while one runs.
+_jobs: dict[str, dict[str, dict]] = {}          # project -> what is being done: key -> {"key", "what", "since", ...}
+_jobs_done: dict[str, list[dict]] = {}          # project -> the latest outcomes: {"key", "ok", "message", "at", ...}
+_jobs_lock = threading.Lock()
+_job_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="scriptavera-review")
+
+
+def review_jobs(p: Project) -> list[dict]:
+    with _jobs_lock:
+        return sorted(_jobs.get(p.id, {}).values(), key=lambda j: j["since"])
+
+
+def review_jobs_done(p: Project) -> list[dict]:
+    """What the changes finished in the last quarter of an hour came to, for the screen to say once."""
+    with _jobs_lock:
+        return [d for d in _jobs_done.get(p.id, []) if time.time() - d["at"] < 900]
+
+
+def start_review_job(p: Project, key: str, what: str, work, said=None, **info) -> dict:
+    """Start one change in the background: work() does it; said(result) is what to tell the author when it is done.
+    One change at a time for each figure or page (key)."""
+    with _jobs_lock:
+        if key in _jobs.get(p.id, {}):
+            raise ValueError("This is being done already. It appears here as soon as it is ready.")
+        job = {"key": key, "what": what, "since": time.time(), **info}
+        _jobs.setdefault(p.id, {})[key] = job
+
+    def run():
+        ok, message = True, ""
+        try:
+            got = work()
+            message = said(got) if said else ""
+        except Cancelled:
+            ok, message = False, f"{what}: stopped."
+        except (ValueError, LLMError) as e:
+            ok, message = False, str(e)
+        except Exception as e:  # noqa: BLE001 - the author is told; the rest of step 9 goes on
+            traceback.print_exc()
+            ok, message = False, f"{what} failed ({type(e).__name__}: {e})."
+        finally:
+            with _jobs_lock:
+                _jobs.get(p.id, {}).pop(key, None)
+                done = _jobs_done.setdefault(p.id, [])
+                done.append({"key": key, "ok": ok, "message": message, "at": time.time(), **info})
+                del done[:-20]
+            emit(p.id, "log", stage="review", level="done" if ok else "error", message=message or f"{what}: done.")
+            emit(p.id, "state")
+    _job_pool.submit(contextvars.copy_context().run, run)          # the same owner's keys
+    emit(p.id, "state")
+    return job
+
+
 def redraw_figure(p: Project, fid: str, instruction: str) -> dict:
     """The author says the drawing is not what they meant: one more attempt, with their correction."""
     data = p.load("figures") or {"items": []}
@@ -2632,12 +2687,44 @@ def submit_topic(p: Project, data: dict) -> str:
     return "confirm"
 
 
+def assumed_choice(f: dict) -> str:
+    """The most likely answer for a figure the author did not answer: as it was judged (drawings.py), the redrawn
+    figure when it was drawn, else the author's own drawing; a drawing judged to explain the argument (or to be a
+    note on a formula) is not printed, and the writers still read it."""
+    use = (f.get("judged") or {}).get("use")
+    if use in ("explanation", "annotation"):
+        return "explain"
+    return "tikz" if f.get("tikz_ok") else "orig"
+
+
+def _assume_reading(text: str) -> str:
+    """A doubtful reading the author did not settle: the reading first given, the most likely one ([?a|b?] gives a)."""
+    return re.sub(r"\[\?([^\[\]|?]+?)(?:\|[^\[\]]*?)?\?\]", lambda m: m.group(1).strip(), text)
+
+
 def submit_review(p: Project, data: dict) -> None:
-    """Gate 2. The author approves the transcript (after any edits) and says, for each figure, which drawing to use."""
+    """Gate 2. The author approves the transcript (after any edits) and says, for each figure, which drawing to use.
+    assume: what is left unanswered gets the most likely answer (a reading stays as it was read, a figure goes as it
+    was judged), instead of stopping the approval. Never while a change asked for in step 9 is still being made."""
+    if review_jobs(p):
+        raise ValueError("Wait: " + "; ".join(j["what"].lower() for j in review_jobs(p)) + " is still being done. "
+                         "The transcript is approved with it.")
     for n, text in (data.get("pages") or {}).items():
         save_transcript_page(p, int(n), text)
     for fid, choice in (data.get("figures") or {}).items():
         set_figure(p, fid, choice=choice)
+    if data.get("assume"):
+        present = {(f["page"], f["k"]) for f in transcript_figures(p)}
+        with p._lock:
+            figs = p.load("figures") or {"items": []}
+            for f in figs["items"]:
+                if (f["page"], f["k"]) in present and f.get("choice") not in ("tikz", "orig", "none", "explain"):
+                    f["choice"], f["auto"] = assumed_choice(f), True
+            p.save("figures", figs)
+            tr = p.load("transcript", {"pages": {}})
+            for v in tr["pages"].values():
+                v["text"] = _assume_reading(v.get("text", ""))
+            p.save("transcript", tr)
     tr = p.load("transcript", {"pages": {}})
     pages = [{"n": int(n), "text": v["text"]} for n, v in sorted(tr["pages"].items(), key=lambda kv: int(kv[0]))
              if v["text"].strip()]

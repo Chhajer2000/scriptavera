@@ -29,6 +29,14 @@ def post(path, body=None, expect=200):
     return call("POST", path, expect, json=body if body is not None else {})
 
 
+def _raises(fn):
+    try:
+        fn()
+    except Exception as e:  # noqa: BLE001
+        return e
+    raise AssertionError("no error")
+
+
 def project(pid):
     return call("GET", f"/api/projects/{pid}")
 
@@ -204,13 +212,27 @@ assert "not been carried out" in post(f"/api/projects/{pid}/review", expect=400)
 before3 = project(pid)["transcript"]["pages"]["3"]["text"]
 word = next(w for w in before3.split() if w.isalpha() and len(w) > 3)
 post(f"/api/projects/{pid}/page_note", {"page": 3, "comment": f"{word} -> {word.upper()}"})
+def carried_out(key, seconds=60):
+    """A change asked for in step 9 runs on the server by itself: wait until it is done, and say what it came to."""
+    t0 = time.time()
+    while any(j["key"] == key for j in project(pid)["jobs"]):
+        assert time.time() - t0 < seconds, f"{key} still being done"
+        time.sleep(0.1)
+    return [d for d in project(pid)["jobs_done"] if d["key"] == key][-1]
+
+
 r = post(f"/api/projects/{pid}/correct_page", {"page": 3})
-assert r["changed"] and word.upper() in r["text"] and r["notes"]["comments"] == {} and "3" not in r["notes"]["confirmed"], r
-assert project(pid)["transcript"]["pages"]["3"]["corrections"][-1]["comment"] == f"{word} -> {word.upper()}"
+assert r["started"] and [j["key"] for j in r["jobs"]] == ["page:3"], r
+done = carried_out("page:3")
+assert done["ok"] and "Page 3 is corrected" in done["message"], done
+b = project(pid)
+assert word.upper() in b["transcript"]["pages"]["3"]["text"] and b["page_notes"]["comments"] == {} and "3" not in b["page_notes"]["confirmed"]
+assert b["transcript"]["pages"]["3"]["corrections"][-1]["comment"] == f"{word} -> {word.upper()}"
 r = post(f"/api/projects/{pid}/correct_page", {"page": 3, "undo": True})
 assert r["text"] == before3 and r["notes"]["comments"]["3"]["text"] == f"{word} -> {word.upper()}"
-r = post(f"/api/projects/{pid}/correct_page", {"page": 3, "comment": "The arrow means 'implies'."})
-assert not r["changed"] and "nothing" in r["correction"]["reply"].lower() and r["notes"]["comments"] == {}
+assert post(f"/api/projects/{pid}/correct_page", {"page": 3, "comment": "The arrow means 'implies'."})["started"]
+done = carried_out("page:3")
+assert done["ok"] and "Nothing was changed on page 3" in done["message"] and project(pid)["page_notes"]["comments"] == {}, done
 assert "Write your comment" in post(f"/api/projects/{pid}/correct_page", {"page": 3}, 400)["error"]
 b = project(pid)
 fig = b["figures"][0]
@@ -220,7 +242,15 @@ if fig["tikz_ok"]:
     assert call("GET", f"/api/projects/{pid}/figure/f1", params={"kind": "tikz"}).headers["content-type"] == "image/png"
 assert call("GET", f"/api/projects/{pid}/figure/f9", 404)
 assert "each figure" in post(f"/api/projects/{pid}/review", expect=400)["error"]
-assert post(f"/api/projects/{pid}/figure/f1", {"redraw": "Make the curve steeper."})["figure"]["redrawn"] == 1
+# a figure drawn again: started at once, carried on by the server; meanwhile the transcript cannot be approved
+release = threading.Event()
+pipeline.start_review_job(p_, "fig:test", "Drawing a test figure again", lambda: release.wait(30) and {})
+assert "Wait: drawing a test figure again" in post(f"/api/projects/{pid}/review", expect=400)["error"]
+assert "being done already" in str(_raises(lambda: pipeline.start_review_job(p_, "fig:test", "x", lambda: None)))
+release.set()
+assert carried_out("fig:test")["ok"]
+assert post(f"/api/projects/{pid}/figure/f1", {"redraw": "Make the curve steeper."})["started"]
+assert carried_out("fig:f1")["key"] == "fig:f1" and project(pid)["figures"][0]["redrawn"] == 1
 assert "Unknown choice" in post(f"/api/projects/{pid}/figure/f1", {"choice": "maybe"}, 400)["error"]
 post(f"/api/projects/{pid}/figure/f1", {"choice": "tikz" if fig["tikz_ok"] else "orig", "caption": "Rectangles under a decreasing graph."})
 text5 = b["transcript"]["pages"]["5"]["text"]
