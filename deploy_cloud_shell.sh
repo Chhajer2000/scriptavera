@@ -3,6 +3,10 @@ set -e
 
 echo "=== Scriptavera Cloud Run Deployment ==="
 
+# Switch to the correct Google Cloud Project for Scriptavera
+echo "Setting project to gen-lang-client-0978702057..."
+gcloud config set project gen-lang-client-0978702057
+
 # Check if scriptavera directory exists in home
 if [ -d "$HOME/scriptavera" ]; then
     echo "Entering existing scriptavera directory..."
@@ -16,7 +20,7 @@ else
     cd scriptavera
 fi
 
-echo "Deploying to Google Cloud Run in region asia-south1..."
-gcloud run deploy scriptavera --source . --region asia-south1 --allow-unauthenticated
+echo "Deploying to Google Cloud Run in region asia-south1 on project gen-lang-client-0978702057..."
+gcloud run deploy scriptavera --source . --region asia-south1 --allow-unauthenticated --project gen-lang-client-0978702057
 
 echo "=== Deployment Complete! ==="
