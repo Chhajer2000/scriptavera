@@ -1,0 +1,6 @@
+@echo off
+echo Pulling latest main branch from GitHub...
+git pull origin main
+echo Deploying scriptavera to Google Cloud Run...
+gcloud run deploy scriptavera --source . --region asia-south1
+pause
