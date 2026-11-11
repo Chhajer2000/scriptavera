@@ -207,7 +207,13 @@ finally:
 assert res.model == "next" and posted == ["slowpoke", "next"], posted                 # not the slow one on its second key
 assert speed.slowness(router.models[0]) == 1.0
 speed._data = {}
-print("of two equal models the quicker goes first; one that does not answer in time is left at once; slowness fades")
+# a second opinion goes to another model of the class when there is one; alone, the same model gives it
+router.models = [mk("weak", 90.5), mk("next", 90)]
+assert router.chat("writer", "s", "u", hooks=Quick(), label="again", other_than="weak").model == "next"
+router.models = [mk("weak", 90.5)]
+assert router.chat("writer", "s", "u", hooks=Quick(), label="again", other_than="weak").model == "weak"
+print("of two equal models the quicker goes first; one that does not answer in time is left at once; slowness fades; "
+      "a second opinion from another model")
 router.models = keep
 
 os.environ["CUSTOM_API_KEY"] = "sk-wrong"

@@ -17,11 +17,12 @@ author is told which step could not be completed and why. One that passes is put
 sketch with it, edits it first, asks for changes, or keeps the sketch."""
 from __future__ import annotations
 
+import hashlib
 import re
 
 from . import compute, prompts
 from .pipeline import Run, _room, notation_text
-from .store import Project
+from .store import Project, reuse_ok
 from .texutil import check_balance, clean_fragment
 from .util import est_tokens, extract_tag, fit, loads_lenient
 
@@ -341,8 +342,17 @@ def stage(run: Run, blocks: list[dict], units: list[dict], sig: str) -> None:
     """Part of the proof check: every sketched proof is completed, if it can be, and kept for the author's decision."""
     p = run.p
     state = p.load("completion") or {}
+
+    def ukey(u: dict) -> str:
+        return hashlib.sha256(f"{u['statement']}\n{u['proof']}".encode("utf-8")).hexdigest()[:24]
     if state.get("sig") != sig:
+        prev = state.get("items") or {}
         state = {"sig": sig, "items": {}}
+        if reuse_ok(p.state):                  # brought up to date: a sketch that did not change keeps its completion
+            for u in units:
+                r = prev.get(u["label"])
+                if r and r.get("ukey") == ukey(u):
+                    state["items"][u["label"]] = r
     todo = sketched(p, units)
     if not todo:
         state["done"] = True
@@ -354,6 +364,7 @@ def stage(run: Run, blocks: list[dict], units: list[dict], sig: str) -> None:
             continue
         run.progress(i, len(todo), f"completing the sketch of {u['name']} by its own steps")
         rec = complete_one(run, u, env)
+        rec["ukey"] = ukey(u)
         state["items"][u["label"]] = rec
         p.save("completion", state)
         if rec["status"] == "ready":

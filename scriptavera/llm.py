@@ -551,6 +551,8 @@ class _Speed:
 
     def slowness(self, m: Model) -> float:
         """0 for a quick model, 1 for one that keeps requests waiting a minute or more."""
+        if config.mock_mode():
+            return 0.0
         return min(1.0, max(0.0, (self.waiting(m) - self.QUICK) / (self.SLOW - self.QUICK)))
 
 
@@ -953,22 +955,27 @@ class Router:
     def _chat(self, role: str, system: str, user: str, *, images: list[bytes] | None = None,
               json_mode: bool = False, max_out: int = 3000, temperature: float = 0.1,
               effort: str | None = None, label: str = "", hooks: RunHooks | None = None,
-              allow_continue: bool = True, strict: bool | None = None, patience: int | None = None) -> Result:
+              allow_continue: bool = True, strict: bool | None = None, patience: int | None = None,
+              other_than: str = "") -> Result:
         """One job for one role.
 
         strict: None follows the role. True uses only the role's top class of models and waits (by raising an
         LLMError of kind "limits" with the time to retry) when none of them is free. False lets weaker models help.
-        patience: extra tries on a model that answers "overloaded" before the next one is asked."""
+        patience: extra tries on a model that answers "overloaded" before the next one is asked.
+        other_than: a model id asked only when no other model of the class can take the job (a second opinion is
+        worth more from a model that did not give the first)."""
         hooks = hooks or RunHooks()
         images = images or []
         vision = bool(images)
         strict = ROLES[role].get("strict", False) if strict is None else strict
         patience = (2 if strict else 0) if patience is None else patience
         need = est_tokens(system) + est_tokens(user) + 2100 * len(images)
-        cands = self.candidates(role, need, vision, max_out, strict)
+        def ordered(cs: list[Model]) -> list[Model]:
+            return [m for m in cs if m.id != other_than] + [m for m in cs if m.id == other_than] if other_than else cs
+        cands = ordered(self.candidates(role, need, vision, max_out, strict))
         if not cands and not self.models:
             self.discover(force=True)
-            cands = self.candidates(role, need, vision, max_out, strict)
+            cands = ordered(self.candidates(role, need, vision, max_out, strict))
         if not cands:
             if strict and self.peers(role, vision):
                 raise self._busy_error(role, vision)
@@ -999,7 +1006,7 @@ class Router:
                     errors.append(f"{m.ref}: {e}")
                     hooks.on_call({"role": role, "label": label, "provider": m.provider, "model": m.id, "ok": False, "note": str(e)})
                     if e.slow:                  # it kept the request too long: an equal model that is quicker goes next
-                        cands = self.candidates(role, need, vision, max_out, strict) or cands
+                        cands = ordered(self.candidates(role, need, vision, max_out, strict)) or cands
                     continue
                 finally:
                     with self._lock:

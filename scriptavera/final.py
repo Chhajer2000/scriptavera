@@ -26,7 +26,7 @@ import re
 import time
 
 from . import audit as fidelity
-from . import config, journals, paper as paperlib, prompts, revision
+from . import config, journals, paper as paperlib, prompts, revision, store as storelib
 from .llm import LLMError, router
 from .pipeline import Run, _room, approved_pages, audit_pages, figure_file, notation_text, passing
 from .store import Project
@@ -302,7 +302,7 @@ def _polish_one(run: Run, text: str, points: list[dict], notation: str, choice: 
     listing = "\n".join(f"- ({x['type']}) {x['comment']} {x['action']}".strip() for x in points) or "(none for this part)"
     ckey = hashlib.sha256(f"{listing}\n{notation}\n{choice}\n{text}".encode("utf-8")).hexdigest()[:24]
     cache = run.p.load("polish_cache", {}) or {}
-    if run.p.state.get("incremental") and ckey in cache:
+    if storelib.reuse_ok(run.p.state) and ckey in cache:
         return cache[ckey][0], "kept from the last version (unchanged)"
     out = _polish_fresh(run, system, listing, text, notation, choice, label)
     if out[0]:
@@ -498,7 +498,8 @@ def stage_assemble(run: Run) -> None:
     prof = journals.profile(meta.get("journal"))
     library = {x["key"]: x for x in p.load("library", [])}
     front = p.load("front") or {}
-    sig = hashlib.sha1((revision.body_sig(p) + json.dumps(p.load("decisions") or {}, sort_keys=True)).encode("utf-8")).hexdigest()[:16]
+    decided = {k: v for k, v in (p.load("decisions") or {}).items() if k != "at"}     # the same answers given again: the same
+    sig = hashlib.sha1((revision.body_sig(p) + json.dumps(decided, sort_keys=True)).encode("utf-8")).hexdigest()[:16]
     state = p.load("final_partial") or {}
     if state.get("sig") != sig:
         state, front = {"sig": sig}, {}
@@ -902,6 +903,13 @@ def cite_intro(p: Project, keys: list[str], instruction: str = "") -> dict:
     return build_outputs(p, paper)
 
 
+def finish_needed(p: Project) -> list[str]:
+    """After the paper was brought up to date: the last step needs the author again only when there is no title to
+    keep (the files are then built again with the author's choices)."""
+    t = (p.load("finished") or {}).get("title") or (p.load("paper") or {}).get("title", "")
+    return [] if t and t != "First draft" else ["the title"]
+
+
 def finish(p: Project, data: dict) -> dict:
     """The author's last word: the title, the introduction as approved. The files are built once more."""
     paper = p.load("paper")
@@ -926,4 +934,5 @@ def finish(p: Project, data: dict) -> dict:
 
 
 __all__ = ["build_outputs", "stage_assemble", "revise_block", "set_journal", "read_guide", "good_title", "draft_html",
-           "math_bag", "config", "related_papers", "open_items", "finish_info", "more_titles", "cite_intro", "finish"]
+           "math_bag", "config", "related_papers", "open_items", "finish_info", "more_titles", "cite_intro", "finish",
+           "finish_needed"]

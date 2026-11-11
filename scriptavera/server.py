@@ -612,7 +612,10 @@ async def api_run(request: Request):
     frm = body.get("from")
     if frm in store.STAGE_IDS:
         pipeline.disarm(p.id)
-        p.reset_from(frm)
+        if frm == store.STAGE_IDS[0] or body.get("whole"):
+            p.reset_from(frm)               # starting over: everything from here is done again, nothing kept
+        else:
+            p.redo_from(frm)                # this step anew; what comes after it is brought up to date from it
     else:                                   # continue: clear the stopped state, keep everything that is finished
         def f(st):
             st["error"] = None
@@ -746,7 +749,9 @@ async def api_confirm(request: Request):
         return fail(str(e))
     if _later_started(p, "confirm"):
         pipeline.disarm(p.id)
-        p.reset_from("reading")             # confirming again invalidates what was built on the old answers
+        # confirmed again after the paper went further: every later step is brought up to date, and only what the
+        # changed answers bear on is done again (the pages where a changed symbol occurs, and what is built on them)
+        p.update_from("reading", "your answers on the notation")
     pipeline.start(p)
     return ok()
 
@@ -935,7 +940,7 @@ async def api_figure_image(request: Request):
     fid = request.path_params.get("fid", "")
     if not p or not fid.isalnum():
         return Response(status_code=404)
-    kind = request.query_params.get("kind") if request.query_params.get("kind") in ("tikz", "check") else "orig"
+    kind = request.query_params.get("kind") if request.query_params.get("kind") in ("tikz", "check", "pro") else "orig"
     path = pipeline.figure_file(p, fid, kind)
     if not path.exists():
         return Response(status_code=404)
@@ -996,7 +1001,9 @@ async def api_review(request: Request):
         return fail(str(e))
     if _later_started(p, "review"):
         pipeline.disarm(p.id)
-        p.reset_from("understand")          # a transcript approved again: the paper is written again from it
+        # a transcript approved again: the paper is brought up to date from it; only what the corrections touch is done
+        # again (a drawing added to a page is copied first, and put to the author here)
+        p.update_from("figures" if pipeline.figures_to_copy(p) else "understand", "your corrections in step 9")
     pipeline.start(p)
     return ok()
 
@@ -1011,14 +1018,12 @@ async def api_topic(request: Request):
     if p.state["stages"]["topiccheck"].get("status") not in ("waiting", "done"):
         return fail("The project is not at this step.")
     body = await _body(request)
-    later = _later_started(p, "topiccheck")
     try:
         done = pipeline.submit_topic(p, body)
     except ValueError as e:
         return fail(str(e))
-    if done == "confirm" and later and (body.get("comment") or "").strip():
-        pipeline.disarm(p.id)
-        p.reset_from("survey")              # a comment after the notes were read: they are read again with it
+    # a comment on a confirmed topic is kept with it and used whenever the topic is searched again; it changes nothing
+    # that was read, so nothing is done again ("Search again" brings the paper up to date from a new search)
     pipeline.start(p)
     return ok(action=done)
 
@@ -1039,7 +1044,8 @@ async def api_scope(request: Request):
         return fail(str(e))
     if later:
         pipeline.disarm(p.id)
-        p.reset_from("outline")             # new statements: the paper is written again from them (or, if not ready, not at all)
+        # the statements confirmed again: the rest is brought up to date; only what the changed statements touch is redone
+        p.update_from("outline", "your changes to the statements")
     if scope["kind"] == "not_ready":
         pipeline.emit(p.id, "state")
         return ok(scope=scope)
@@ -1048,10 +1054,16 @@ async def api_scope(request: Request):
 
 
 def _at(p: store.Project, sid: str) -> str:
-    """Why the author cannot act on this step now, or "" when they can."""
+    """Why the author cannot act on this step now, or "" when they can. A step the author already passed can be
+    changed at any time: it is opened again (the steps after it keep what they made), and confirming it again brings
+    the rest of the paper up to date, redoing only what the change touches."""
     if pipeline.is_running(p.id):
         return "Wait for the current step to finish, or press Stop."
-    if p.state["stages"].get(sid, {}).get("status") != "waiting":
+    status = p.state["stages"].get(sid, {}).get("status")
+    if status == "done" and _later_started(p, sid):
+        p.set_stage(sid, status="waiting", since=time.time(), reopened=True)
+        return ""
+    if status != "waiting":
         return "The project is not at this step."
     return ""
 
@@ -1101,7 +1113,7 @@ async def api_outline(request: Request):
             drafting.submit_outline(p)
             if later:
                 pipeline.disarm(p.id)
-                p.reset_from("proofs")
+                p.update_from("figdesign", "your changes to the structure")
             pipeline.start(p)
         else:
             try:
@@ -1133,12 +1145,42 @@ async def api_write_proof(request: Request):
             await run_in_threadpool(drafting.rewrite_proof, p, iid, str(body.get("comment") or ""), st)
         elif action in ("keep", "conjecture", "omit"):
             drafting.decide_proof(p, iid, action)
+        elif action == "figure":                # the author's answer on one figure drawn for print
+            from . import figpro
+            before = _writers_view(p)
+            figpro.set_choice(p, str(body.get("fid") or ""), str(body.get("choice") or ""))
+            if _writers_view(p) != before:      # what the proofs are told the figure shows changed: they are checked again
+                pipeline.disarm(p.id)
+                p.update_from("proofs", f"your answer on figure {str(body.get('fid') or '')[1:]}")
+                pipeline.start(p)
+        elif action == "figredo":               # drawn again for print with the author's instruction, in the background
+            from . import figpro
+            fid = str(body.get("fid") or "")
+            note = str(body.get("comment") or "").strip()[:1500]
+            if not note:
+                raise ValueError("Say what should change in the figure.")
+            name = f"figure {fid[1:]}"
+
+            def work(fid=fid, note=note):
+                before = _writers_view(p)
+                rec = figpro.redraw(p, fid, note)
+                if _writers_view(p) != before and not pipeline.is_running(p.id):
+                    p.update_from("proofs", f"your instruction for {name}")
+                    pipeline.start(p)
+                return rec
+            pipeline.start_review_job(p, f"pro:{fid}", f"Drawing {name} again for print", work,
+                                      lambda r: f"The {name} is drawn again for print. Is it right now?" if r.get("ok")
+                                      else f"The {name} could not be drawn for print as asked: {r.get('error') or 'no reason given'}.",
+                                      mode="pro", fid=fid)
+            return ok(started=True, jobs=pipeline.review_jobs(p), writing=drafting.view(p))
         elif action == "approve":
+            if pipeline.review_jobs(p):
+                raise ValueError("Wait: " + "; ".join(j["what"].lower() for j in pipeline.review_jobs(p)) + " is still being done.")
             later = _later_started(p, "proofcheck")
-            drafting.submit_proofs(p)
+            drafting.submit_proofs(p, assume=bool(body.get("assume", True)))
             if later:
                 pipeline.disarm(p.id)
-                p.reset_from("draft")
+                p.update_from("draft", "your decisions on the proofs and figures")
             pipeline.start(p)
         else:
             return fail("Unknown action.")
@@ -1146,6 +1188,12 @@ async def api_write_proof(request: Request):
         return fail(str(e))
     pipeline.emit(p.id, "state")
     return ok(writing=drafting.view(p))
+
+
+def _writers_view(p: store.Project) -> str:
+    """What the writers of the proofs read of the notes, figures included: when it changes, the proofs are checked."""
+    pages, figs = pipeline.writing_pages(p, final=True)
+    return hashlib.sha1(json.dumps([pages, sorted(figs)], ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
 async def api_draftcheck(request: Request):
@@ -1163,7 +1211,7 @@ async def api_draftcheck(request: Request):
             drafting.submit_draft(p, body)
             if later:
                 pipeline.disarm(p.id)
-                p.reset_from("simplify")
+                p.update_from("simplify", "your changes to the first draft")
             pipeline.start(p)
         else:
             drafting.edit_draft(p, body)
@@ -1216,7 +1264,7 @@ async def api_decisions(request: Request):
         return fail(str(e))
     if _later_started(p, "decide"):
         pipeline.disarm(p.id)
-        p.reset_from("assemble")            # decided again: the final version is made again
+        p.update_from("assemble", "your decisions")   # decided again: the final version is brought up to date
     pipeline.start(p)
     return ok()
 

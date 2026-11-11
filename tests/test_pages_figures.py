@@ -131,9 +131,14 @@ for f in p.load("figures")["items"]:
     pipeline.set_figure(p, f["id"], choice="orig")
 pipeline.submit_review(p, {})
 p.update_state(lambda st: [x.update(skip=True, kind="cover") for x in st["pages"] if x["n"] == 5])
+tr_ = p.load("transcript"); tr_["pages"].pop("5"); p.save("transcript", tr_)        # as if it had never been read
 assert pipeline.include_page(p, 5) == "confirm" and next(x for x in p.state["pages"] if x["n"] == 5)["skip"]
-assert pipeline.include_page(p, 5, force=True) == "now" and not p.load("approved")
+assert pipeline.include_page(p, 5, force=True) == "now" and p.load("approved")
+assert p.state["stages"]["review"]["status"] == "stale" and p.state["stages"]["transcribe"]["status"] == "pending"
 pipeline.start(p); wait(p, "review")
-print("8. putting a page back after the review asks first, then redoes from the review only")
+assert p.state["stages"]["review"]["status"] == "waiting" and "page 5 is new" in (p.state["stages"]["review"].get("changed") or []), \
+    p.state["stages"]["review"]
+assert [c["label"] for c in p.calls(100000) if c.get("label", "").startswith("Transcribe page")][-1] == "Transcribe page 5", "only that page is read"
+print("8. putting a page back after the review asks first, then brings the paper up to date: only that page is read, and shown")
 sim.respond = orig
 print("pages and figures: all checks passed")

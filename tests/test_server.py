@@ -98,7 +98,7 @@ print("0. the page names the files the program was started with; its own files a
 
 # ------------------------------------------------------------------ meta, journals, creation
 m = call("GET", "/api/meta")
-assert m["mock"] and [x["id"] for x in m["phases"]] == ["read", "write", "revise", "final"] and len(m["stages"]) == 23
+assert m["mock"] and [x["id"] for x in m["phases"]] == ["read", "write", "revise", "final"] and len(m["stages"]) == 24
 assert {s["phase"] for s in m["stages"]} == {"read", "write", "revise", "final"}
 assert [s["id"] for s in m["stages"] if s.get("gate")] == ["topiccheck", "confirm", "review", "scope", "outline", "proofcheck", "draftcheck", "decide", "finish"]
 assert m["plan"]["writer"]["chain"] == ["mock:sim-text"] and m["plan"]["writer"]["weaker"] == ["mock:sim-small", "mock:sim-vision"], m["plan"]["writer"]
@@ -241,7 +241,7 @@ assert call("GET", f"/api/projects/{pid}/figure/f1").headers["content-type"] == 
 if fig["tikz_ok"]:
     assert call("GET", f"/api/projects/{pid}/figure/f1", params={"kind": "tikz"}).headers["content-type"] == "image/png"
 assert call("GET", f"/api/projects/{pid}/figure/f9", 404)
-assert "each figure" in post(f"/api/projects/{pid}/review", expect=400)["error"]
+assert "each drawing" in post(f"/api/projects/{pid}/review", expect=400)["error"]
 # a figure drawn again: started at once, carried on by the server; meanwhile the transcript cannot be approved
 release = threading.Event()
 pipeline.start_review_job(p_, "fig:test", "Drawing a test figure again", lambda: release.wait(30) and {})
@@ -358,15 +358,22 @@ assert P["audit"]["preserved"] == P["audit"]["total"] and not P["audit"]["added"
 
 # ------------------------------------------------------------------ failures: a limit, an unexpected error, stopping, redoing
 os.environ.update(SCRIPTAVERA_MOCK_FAIL="limits:Referee", SCRIPTAVERA_MOCK_RESET="600")
-post(f"/api/projects/{pid}/run", {"from": "verify"})
+post(f"/api/projects/{pid}/run", {"from": "referee"})        # this step anew; the later ones are brought up to date from it
 b = wait(pid, "referee", ("paused",))
-assert b["state"]["stages"]["verify"]["status"] == "done" and b["paper"] is None and b["downloads"] == [] and b["revision"]["verify"]["done"]
+st_ = b["state"]["stages"]
+assert st_["verify"]["status"] == "done" and st_["assemble"]["status"] == "stale" and b["paper"] and b["revision"]["verify"]["done"], st_
+assert b["state"]["catchup"]["from"] == "referee" and b["state"]["catchup"]["anew"] == "referee"
 post(f"/api/projects/{pid}/autostop")
 s = project(pid)["state"]["stages"]["referee"]
 assert s["status"] == "error" and s["resume_at"] is None and "free-tier limit" in s["error"]
+os.environ["SCRIPTAVERA_MOCK_FAIL"] = ""
+n_before = len(project(pid)["calls"])
+post(f"/api/projects/{pid}/run")                              # Continue: the step is done anew, the rest brought up to date
+b = wait(pid, "finish", ("done",))
+again = [c["label"] for c in b["calls"][n_before:]]
+assert again == ["Referee report"], again                     # the decisions stand, the final version is unchanged: nothing else
+assert "catchup" not in b["state"] and b["state"]["stages"]["decide"].get("passed_again"), b["state"]["stages"]["decide"]
 os.environ["SCRIPTAVERA_MOCK_FAIL"] = "Propose titles"
-post(f"/api/projects/{pid}/run")
-b = wait(pid, "decide")
 post(f"/api/projects/{pid}/decisions", {"simplify": {"S1": "accept"}, "issues": {iid: {"choice": "instruct", "note": "Replace the last value by log(n+1)."}}})
 b = wait(pid, "assemble", ("error",))
 assert "simulated failure" in b["state"]["stages"]["assemble"]["error"] and b["state"]["error"]["stage"] == "assemble"
@@ -380,7 +387,7 @@ print("limit pause, cancelled restart, unexpected error and exact resume ok")
 
 # ------------------------------------------------------------------ a run in which the readings find nothing: the third stop is passed
 os.environ["SCRIPTAVERA_MOCK_CLEAN"] = "1"
-post(f"/api/projects/{pid}/run", {"from": "review"})
+post(f"/api/projects/{pid}/run", {"from": "review", "whole": True})     # this step and every later one done again
 b = wait(pid, "review")
 assert b["approved"] is False and b["paper"] is None and b["transcript"]["pages"]["5"]["edited"], "redoing from the review keeps the transcript"
 post(f"/api/projects/{pid}/review", {"figures": {"f1": "none"}})

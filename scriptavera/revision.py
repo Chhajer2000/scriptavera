@@ -23,7 +23,7 @@ import time
 from . import completion, compute, paper as paperlib, prompts
 from .llm import LLMError
 from .pipeline import Run, _room, emit, notation_text, passing
-from .store import Project
+from .store import Project, reuse_ok
 from .texutil import check_balance, clean_fragment
 from .util import est_tokens, extract_tag, fit, loads_lenient
 from .writing import fields, skeleton
@@ -134,8 +134,24 @@ def stage_simplify(run: Run) -> None:
     proved = [u for u in units if u["proof"] and u["label"]]
     sig = body_sig(p)
     state = p.load("simplify") or {}
+    proofs_now = {u["label"]: u["proof"] for u in proved}
     if state.get("sig") != sig:
-        state = {"sig": sig, "found": None, "next": 0, "proposals": [], "dropped": []}
+        old = state
+        if reuse_ok(p.state) and old.get("done") and old.get("found") is not None:
+            # brought up to date after a change: a proposal about proofs that did not change is kept, with the author's
+            # decision on it; only proposals that involve a changed proof are looked for
+            was = old.get("proofs") or {}
+            keep = [pr for pr in old.get("proposals", []) if all(proofs_now.get(l) == pr["before"].get(l) for l in pr["affects"])]
+            drops = [dr for dr in old.get("dropped", []) if was and all(proofs_now.get(l) == was.get(l) for l in dr.get("affects", []))]
+            changed = [l for l in proofs_now if (was.get(l) if was else None) != proofs_now[l]] if was else list(proofs_now)
+            state = {"sig": sig, "found": None, "next": 0, "proposals": keep, "dropped": drops, "only": changed,
+                     "base": max([int(re.sub(r"\D", "", x["id"]) or 0) for x in old.get("proposals", []) + old.get("dropped", [])] or [0])}
+            if keep:
+                run.log(f"{len(keep)} proposal{'s' if len(keep) != 1 else ''} about proofs that did not change "
+                        f"{'are' if len(keep) != 1 else 'is'} kept, with your decision.")
+        else:
+            state = {"sig": sig, "found": None, "next": 0, "proposals": [], "dropped": []}
+    state["proofs"] = proofs_now
     if len(proved) < 2:
         state.update(found=[], done=True)
         p.save("simplify", state)
@@ -145,14 +161,22 @@ def stage_simplify(run: Run) -> None:
     body_tex = paperlib.blocks_to_latex(blocks)
 
     # a. what could be shorter
+    only = state.get("only")
+    if state["found"] is None and only is not None and not only:
+        state["found"] = []                    # no proof changed: the proposals kept are all there is
     if state["found"] is None:
         run.progress(0, 1, "re-reading the whole draft for repeated arguments")
         system = prompts.SIMPLIFY_FIND.format(limit=5)
-        res = run.ask("reason", system, "THE DRAFT\n\n" + fit(body_tex, _room("reason", system, 1800), "middle"),
-                      max_out=1800, effort="high", label="Find shared arguments")
+        ask = ("THE DRAFT\n\n" + fit(body_tex, _room("reason", system, 1800), "middle"))
+        if only is not None:
+            ask = (f"ONLY PROPOSALS THAT INVOLVE AT LEAST ONE OF THESE PROOFS: {', '.join(only)}. These proofs changed since "
+                   "the draft was last read; what concerns only the others was proposed then.\n\n" + ask)
+        res = run.ask("reason", system, ask, max_out=1800, effort="high", label="Find shared arguments")
         found = []
         for f in fields(res.text, "proposal", ("kind", "affects", "idea", "benefit")):
             affects = [l for l in _labels_in(f.get("affects", ""), known) if (_unit(units, l) or {}).get("proof")]
+            if only is not None and not set(affects) & set(only):
+                continue
             if affects and f.get("idea"):
                 kind = next((k for k in ("same-argument", "general-lemma", "direct-step", "repeated-computation")
                              if k in f.get("kind", "").lower()), "same-argument")
@@ -164,14 +188,15 @@ def stage_simplify(run: Run) -> None:
     if not found:
         state["done"] = True
         p.save("simplify", state)
-        run.log("No argument is carried out twice and no proof takes a detour: nothing to shorten.")
+        if not state["proposals"]:
+            run.log("No argument is carried out twice and no proof takes a detour: nothing to shorten.")
         return
 
     # b. each proposal is written out in full, then examined by an independent call
     taken = {l for pr in state["proposals"] for l in pr["affects"]}
     for k in range(state["next"], len(found)):
         f = found[k]
-        sid = f"S{k + 1}"
+        sid = f"S{state.get('base', 0) + k + 1}"
         run.progress(k, len(found), f"working out proposal {k + 1} of {len(found)}")
 
         def drop(reason: str) -> None:
@@ -340,7 +365,7 @@ def stage_verify(run: Run) -> None:
         if u["label"] in state["results"]:
             continue
         ukey = hashlib.sha256(f"{u['statement']}\n{u['proof']}".encode("utf-8")).hexdigest()[:24]
-        if p.state.get("incremental") and ukey in cache:
+        if reuse_ok(p.state) and ukey in cache:
             state["results"][u["label"]] = {**cache[ukey], "label": u["label"], "name": u["name"], "kept": True}
             p.save("verify", state)
             run.log(f"{u['name']}: the proof is unchanged since the last version, so its check is kept.")
@@ -395,7 +420,10 @@ def stage_verify(run: Run) -> None:
                     c["correction"] = clean_fragment(corr)
                 elif upheld and corr.lower().strip(".") == "none":
                     c["correction"] = ""
-                c.update(id=f"V{i + 1}.{n}", status="upheld" if upheld else "dismissed", ruling=_norm_space(r.get("reason", "")),
+                # named after the result, not its place: a check kept when the paper is brought up to date keeps the
+                # author's decision on it
+                c.update(id=f"V{re.sub(r'[^A-Za-z0-9]', '', u['label'])}.{n}", status="upheld" if upheld else "dismissed",
+                         ruling=_norm_space(r.get("reason", "")),
                          second_model=adj.model)
                 if c["correction"] and (check_balance(c["correction"]) or c["correction"].strip() == c["quote"].strip()):
                     c["correction"] = ""
@@ -426,6 +454,10 @@ _TYPES = ("mathematics", "structure", "presentation", "notation", "citation", "t
 
 def stage_referee(run: Run) -> None:
     p = run.p
+    old = p.load("referee") or {}
+    if reuse_ok(p.state) and old.get("points") is not None and old.get("sig") == body_sig(p):
+        run.log("The paper the referee read is unchanged: the report is kept.")
+        return
     body = p.load("body") or {}
     blocks = body.get("blocks", [])
     intro = (p.load("intro") or {}).get("text", "")
@@ -549,6 +581,29 @@ def settle_if_nothing_to_decide(p: Project) -> bool:
         return False
     p.save("decisions", {"simplify": {}, "complete": {}, "issues": {}, "remarks": {}, "at": time.time(), "auto": True})
     return True
+
+
+def _saved_choices(p: Project) -> dict:
+    d = p.load("decisions") or {}
+    return {"simplify": d.get("simplify") or {}, "complete": d.get("complete") or {}, "issues": d.get("issues") or {},
+            "remarks": d.get("remarks") or {}}
+
+
+def decisions_needed(p: Project) -> list[str]:
+    """After the paper was brought up to date: the proposals that are new since the author decided (the others keep
+    the author's decision). [] when every proposal still has one."""
+    items, had = decision_items(p), _saved_choices(p)
+    out = [f"the proposal {pr['id']} is new" for pr in items["simplify"] if had["simplify"].get(pr["id"]) not in ("accept", "reject")]
+    out += [f"the completed proof {c['id']} is new" for c in items["complete"]
+            if (had["complete"].get(c["id"]) or {}).get("choice") not in ("accept", "edit", "instruct", "keep")]
+    out += [f"the problem {c['id']} in {c.get('name') or c.get('label')} is new" for c in items["issues"]
+            if (had["issues"].get(c["id"]) or {}).get("choice") not in ("fix", "keep", "instruct")]
+    return out
+
+
+def reconfirm_decisions(p: Project) -> None:
+    """The author's decisions recorded again for the proposals of the brought-up-to-date draft (none of them new)."""
+    submit_decisions(p, _saved_choices(p))
 
 
 def submit_decisions(p: Project, data: dict) -> None:

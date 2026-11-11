@@ -74,7 +74,11 @@ dec = revision.decision_items(q)
 revision.submit_decisions(q, {"simplify": {x["id"]: "reject" for x in dec["simplify"]}, "issues": {x["id"]: {"choice": "keep"} for x in dec["issues"]}})
 pipeline.start(q); wait(q, "assemble", ("done",))
 P = q.load("paper")
-assert P["title"] == "Explicit bounds for partial sums of reciprocal powers" and "figures/f1.jpg" in (q.dir / "out" / "main.tex").read_text()
+tex = (q.dir / "out" / "main.tex").read_text()
+from scriptavera import paper as paperlib
+# the figure the paper prints: drawn for print (step 14) where LaTeX is installed, else the author's own drawing
+assert P["title"] == "Explicit bounds for partial sums of reciprocal powers" and \
+    (("\\begin{tikzpicture}" in tex) if paperlib.find_engine() else ("figures/f1.jpg" in tex)), tex[:3000]
 assert "\\log(n+1)" in (q.dir / "out" / "main.tex").read_text() and (q.dir / "out_before_update" / "main.tex").exists()
 print("... and is finished by the new steps:", P["title"])
 

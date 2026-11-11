@@ -1,29 +1,30 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Vaibhav Chhajer
-"""What each drawing in the notes is for: a figure the paper's reader needs, or the author's own explanation of an
-argument, which is not printed.
+"""What each drawing in the notes is for, decided once the whole paper is known: a figure the paper's reader needs,
+printed where it belongs, or the author's own explanation of an argument, which is not printed.
 
-A drawing in a proof or a proof sketch is usually the author's aid to see a step, and the proof is complete without
-it; a drawing that shows something the text relies on (a construction, labels named only in the drawing, data)
-belongs in the paper. The decision is made from the text around each drawing, not from the drawing itself, so it
-does not depend on how well a model reads a sketch:
-  1. the code finds where each drawing sits (in a proof, a sketch, a definition, an example ...), the passage around
-     it, and every place in the notes that mentions a drawing;
-  2. one reading of the drawings with their passages decides each: for the paper, an explanation, or the author's
-     labels on a formula; and whether that is sure;
+Up to the check of the transcript, the notes are copied as they are, drawings included: nothing is decided there.
+The decision is made at the structure step, when the paper is known as a whole: its problem and storyline, its
+sections, every statement in its order, and the statement each drawing belongs to. A drawing in a proof or a proof
+sketch is usually the author's aid to see a step, and the proof is complete without it; a drawing that shows
+something the text relies on (a construction, labels named only in the drawing, data) belongs in the paper:
+  1. the code finds the statement each drawing belongs to, where it sits (in a proof, a sketch, a definition ...),
+     the passage around it, and every place in the notes that mentions a drawing;
+  2. one reading of the drawings, with the whole paper, decides each: printed (with which statement, inside its
+     proof or after it, and a caption) or an explanation; and whether that is sure;
   3. the code holds each verdict to its own reasons: an explanation that the text relies on, a numbered one, or a
      figure for the paper inside a proof that nothing relies on is not sure, and the author is asked.
-A sure explanation is settled at once: it is not redrawn and not printed, and the author sees it with one button to
-print it instead. Every other drawing is redrawn and put to the author. An explanation is not thrown away: its
-description stays in the notes the writers read, marked as not printed, and a sketched proof is completed with the
-drawings made for it."""
+The author sees every decision on the structure screen and can change it; confirming the structure confirms them.
+An explanation is not thrown away: its description stays in the notes the writers read, marked as not printed, and a
+sketched proof is completed with the drawings made for it. A decision is kept as long as what it was made from (the
+drawing, its passage, its statement and section) is unchanged, and an answer of the author's is always kept."""
 from __future__ import annotations
 
 import re
 
 from . import prompts
 from .llm import LLMError
-from .pipeline import Run, _room, _topic_text, approved_pages, find_figures, passing, strip_figures
+from .pipeline import Run, _room, _topic_text, approved_pages, find_figures, passing, strip_figures, transcript_figures
 from .store import Project
 from .util import fit, loads_lenient
 
@@ -179,98 +180,211 @@ def settle(it: dict, row: dict | None, model: str = "") -> dict:
             "needed": needed, "doubt": "" if sure else doubt, "by": model}
 
 
-def judge(run: Run, recs: list[dict], pages: dict[int, str]) -> None:
-    """Decide what each drawing in `recs` is for. The verdict goes into rec["judged"]; a sure explanation that the
-    author has not answered yet is settled as not printed (rec["choice"] = "explain", rec["auto"] = True)."""
-    if not recs:
-        return
-    items = [item(r, pages) for r in recs]
-    seen = mentions(pages)
-    problem, _ = _topic_text(run.p)
-    system = prompts.FIG_ROLE.format(field=run.field)
-    batches = [items[i:i + BATCH] for i in range(0, len(items), BATCH)]
-    for bi, batch in enumerate(batches, 1):
-        run.check()
-        ids = {it["id"] for it in batch}
-        user = ((f"WHAT THE NOTES ARE ABOUT\n{problem}\n\n" if problem else "") + "\n\n".join(_block(it) for it in batch)
-                + "\n\nPLACES IN THE NOTES THAT MENTION A DRAWING\n" + ("\n".join(seen) or "none"))
-        rows: dict[str, dict] = {}
-        model, last = "", ""
-        for attempt in range(2):
-            try:
-                res = run.ask("reason", system, fit(user, _room("reason", system, 2400), "middle"), json_mode=True,
-                              max_out=600 + 260 * len(batch), effort="medium", temperature=0.0,
-                              label="Decide which drawings are for the paper" + (f" (part {bi} of {len(batches)})" if len(batches) > 1 else "")
-                              + (" (retry)" if attempt else ""))
-                model = res.model
-                data = loads_lenient(res.text)
-                got = (data.get("drawings") or data.get("figures") or []) if isinstance(data, dict) else data
-                for row in got if isinstance(got, list) else []:
-                    if isinstance(row, dict) and _clean(row.get("id")) in ids:
-                        rows[_clean(row.get("id"))] = row
-                if rows:
-                    break
-                last = "no verdict for any drawing"
-            except ValueError as e:
-                last = str(e)
-            except LLMError as e:
-                if passing(e):
-                    raise
-                last = str(e)
-                break
-        if len(rows) < len(batch):
-            run.log(f"{len(batch) - len(rows)} drawing(s) could not be judged by a model ({_short(last, 120) or 'no answer'}); "
-                    "you will be asked about them.", "warn")
-        for it in batch:
-            rec = it["rec"]
-            rec["judged"] = settle(it, rows.get(it["id"]), model)
-            if rec["judged"]["use"] == "explanation" and rec["judged"]["sure"] and not rec.get("choice"):
-                rec["choice"], rec["auto"] = "explain", True
-
-
-def wanted_drawn(rec: dict) -> bool:
-    """Whether a drawing is redrawn: everything that may be printed. A sure explanation and the author's labels on a
-    formula are not, nor a drawing the author has already kept out of the paper."""
-    if rec.get("choice") in ("explain", "none"):
-        return False
-    if rec.get("asked_print"):
-        return True
-    j = rec.get("judged") or {}
-    return j.get("use") != "annotation" and not (j.get("use") == "explanation" and j.get("sure"))
-
-
 def _sq(s: str) -> str:
     return re.sub(r"[\s$]+", "", s or "")
 
 
-def for_results(p: Project, units: list[dict]) -> dict[str, list[dict]]:
-    """The explanation drawings made for each result's proof: label -> [{"page", "desc", "illustrates"}]. A drawing
-    belongs to the result whose pages it is on; where a page has several, to the last one stated before it."""
-    figs = [f for f in (p.load("figures") or {}).get("items", []) if f.get("choice") == "explain"]
+def owner(rec: dict, seq: list[dict], pages: dict[int, str]) -> dict | None:
+    """The statement a drawing belongs to: the one of the paper whose pages it is drawn on; where a page has several,
+    the last one stated before the drawing; a drawing on a page no statement comes from belongs to the last statement
+    before that page."""
+    n = rec["page"]
+    cands = [x for x in seq if n in (x.get("pages") or [])]
+    if not cands:
+        before = [x for x in seq if (x.get("pages") or [10 ** 6])[0] <= n]
+        return before[-1] if before else (seq[0] if seq else None)
+    if len(cands) == 1:
+        return cands[0]
+    text = pages.get(n, "")
+    found = find_figures(text)
+    head = _sq(text[:found[rec["k"]][0]] if rec.get("k", 0) < len(found) else text)
+    best, who = -1, None
+    for x in cands:
+        words = _sq(x.get("words") or x.get("original") or "")[:50]
+        at = head.rfind(words) if len(words) >= 8 else -1
+        if at > best:
+            best, who = at, x
+    if who is None:                              # stated on an earlier page and continued on this one
+        who = next((x for x in cands if min(x.get("pages") or [n]) < n), cands[0])
+    return who
+
+
+def context_block(it: dict, x: dict | None, nums: dict, sec: dict | None, si: int | None) -> str:
+    from .drafting import kind_name
+    pos = f", drawing {it['k'] + 1} of {it['of']} on the page" if it["of"] > 1 else ""
+    belongs = "no statement of the paper"
+    if x:
+        belongs = (f"{kind_name(x['kind'])} {nums.get(x['id'], '')} ({x['id']})" + (f" ({x['name']})" if x.get("name") else "")
+                   + f": {_short(x.get('statement', ''), 600)}")
+        if sec is not None:
+            belongs += f"\n  It is in section {si + 2}, \"{sec['title']}\"" + (f" ({sec['purpose']})" if sec.get("purpose") else "")
+    return (f"DRAWING {it['id']}: page {it['page']}{pos}\nDescription (from the copy of the notes): {it['desc']}\n"
+            f"It belongs to: {belongs}\nWhere it sits in the notes: {it['where']}\n"
+            f"Passage of the notes (the drawing is at {HERE}):\n{it['passage']}")
+
+
+def plan_key(it: dict, x: dict | None, sec: dict | None, problem: str) -> str:
+    """What the decision on a drawing rests on: the drawing, the passage of the notes around it, and the statement it
+    belongs to. A change elsewhere (another statement, the title of its section, the wording of the topic) leaves the
+    decision as it is."""
+    import hashlib
+    import json
+    raw = json.dumps([it["desc"], it["passage"], (x or {}).get("id"), (x or {}).get("statement")], ensure_ascii=False)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def printable(p: Project) -> list[dict]:
+    """The drawings whose copy the author kept in step 9 (their own drawing, or the copy drawn again)."""
+    present = {(w["page"], w["k"]) for w in transcript_figures(p)}
+    return [f for f in (p.load("figures") or {}).get("items", [])
+            if f.get("choice") in ("tikz", "orig") and not f.get("dup") and (f["page"], f["k"]) in present]
+
+
+def plan(run: Run, seq: list[dict], secs: list[dict], nums: dict, fresh_ok: bool = True) -> dict:
+    """The decision on every drawing, with the whole paper in view (see the module's description). A decision made
+    from the same drawing, passage, statement and section is kept; the author's own answer is always kept (it is
+    looked at again only if the drawing itself changed). Returns the plan, saved as figure_plan.json."""
+    p = run.p
+    P = p.load("figure_plan") or {"items": {}}
+    figs = printable(p)
     if not figs:
-        return {}
-    res = {x["id"]: x for x in (p.load("dossier") or {}).get("results", [])}
+        if P.get("items"):
+            p.save("figure_plan", {"items": {}})
+        return {"items": {}}
     pages = {pg["n"]: pg["text"] for pg in approved_pages(p)}
-    out: dict[str, list[dict]] = {}
+    problem, _ = _topic_text(p)
+    d = p.load("dossier") or {}
+    sec_of = {i: (si, s) for si, s in enumerate(secs) for i in s["items"]}
+    items, ctx = {}, {}
     for f in figs:
-        cands = [u for u in units if u.get("label") and f["page"] in (res.get(u["label"].split(":", 1)[-1]) or {}).get("pages", [])]
-        if not cands:
+        it = item(f, pages, before=1500, after=800)
+        x = owner(f, seq, pages)
+        si, sec = sec_of.get((x or {}).get("id"), (None, None))
+        items[f["id"]] = it
+        ctx[f["id"]] = (x, sec, si, plan_key(it, x, sec, problem))
+    old = P.get("items") or {}
+    out: dict = {}
+    todo = []
+    for fid, (x, sec, si, key) in ctx.items():
+        e = old.get(fid)
+        same_drawing = e and e.get("desc", items[fid]["desc"]) == items[fid]["desc"]
+        if e and (e.get("key") == key or (not e.get("auto", True) and same_drawing) or (e.get("legacy") and not e.get("key"))):
+            out[fid] = {**e, "key": key if e.get("auto", True) else e.get("key", key)}
+            if not out[fid].get("with") and x:
+                out[fid]["with"] = x["id"]
             continue
-        owner = cands[0]
-        if len(cands) > 1:
-            text = pages.get(f["page"], "")
-            found = find_figures(text)
-            before = _sq(text[:found[f["k"]][0]] if f["k"] < len(found) else text)
-            best = -1
-            for u in cands:
-                words = _sq((res.get(u["label"].split(":", 1)[-1]) or {}).get("author_words", ""))[:50]
-                at = before.rfind(words) if len(words) >= 8 else -1
-                if at > best:
-                    best, owner = at, u
-            if best < 0:                         # stated on an earlier page and continued here
-                owner = next((u for u in cands if min((res.get(u["label"].split(":", 1)[-1]) or {}).get("pages") or [f["page"]]) < f["page"]), cands[0])
-        out.setdefault(owner["label"], []).append({"page": f["page"], "desc": f.get("desc", ""),
-                                                   "illustrates": (f.get("judged") or {}).get("illustrates", "")})
+        todo.append(fid)
+    if todo:
+        seen = mentions(pages)
+        structure = "\n".join(f"{si + 2}. {s['title']}" + (f" ({s['purpose']})" if s.get("purpose") else "") + "\n"
+                               + "\n".join(f"   - {nums.get(i, '')} {i}: " + _short(next((y.get('statement', '') for y in seq if y['id'] == i), ''), 160)
+                                           for i in s["items"]) for si, s in enumerate(secs))
+        paper = (f"THE PROBLEM OF THE PAPER\n{d.get('problem') or problem}\n\n"
+                 + (f"HOW THE ARGUMENT GOES\n{d['storyline']}\n\n" if d.get("storyline") else "")
+                 + f"THE STRUCTURE OF THE PAPER (sections after the introduction, with every statement)\n{structure}")
+        system = prompts.FIG_PLAN.format(field=run.field)
+        batches = [todo[i:i + BATCH] for i in range(0, len(todo), BATCH)]
+        for bi, batch in enumerate(batches, 1):
+            run.check()
+            user = (paper + "\n\n" + "\n\n".join(context_block(items[fid], ctx[fid][0], nums, ctx[fid][1], ctx[fid][2]) for fid in batch)
+                    + "\n\nPLACES IN THE NOTES THAT MENTION A DRAWING\n" + ("\n".join(seen) or "none"))
+            rows: dict[str, dict] = {}
+            model, last = "", ""
+            for attempt in range(2):
+                try:
+                    res = run.ask("reason", system, fit(user, _room("reason", system, 3000), "middle"), json_mode=True,
+                                  max_out=700 + 320 * len(batch), effort="medium", temperature=0.0,
+                                  label="Decide which drawings the paper prints" + (f" (part {bi} of {len(batches)})" if len(batches) > 1 else "")
+                                  + (" (retry)" if attempt else ""))
+                    model = res.model
+                    data = loads_lenient(res.text)
+                    got = (data.get("drawings") or data.get("figures") or []) if isinstance(data, dict) else data
+                    for row in got if isinstance(got, list) else []:
+                        if isinstance(row, dict) and _clean(row.get("id")) in batch:
+                            rows[_clean(row.get("id"))] = row
+                    if rows:
+                        break
+                    last = "no verdict for any drawing"
+                except ValueError as e:
+                    last = str(e)
+                except LLMError as e:
+                    if passing(e):
+                        raise
+                    last = str(e)
+                    break
+            if len(rows) < len(batch):
+                run.log(f"{len(batch) - len(rows)} drawing(s) could not be decided by a model ({_short(last, 120) or 'no answer'}); "
+                        "they are put to you on the structure screen.", "warn")
+            for fid in batch:
+                x, sec, si, key = ctx[fid]
+                v = settle(items[fid], rows.get(fid), model)
+                if v["use"] == "annotation":         # copied in step 9 as a drawing: treated as one that only explains
+                    v["use"] = "explanation"
+                row = rows.get(fid) or {}
+                with_id = _clean(row.get("with"))
+                if with_id not in {y["id"] for y in seq}:
+                    with_id = (x or {}).get("id", "")
+                ip = row.get("in_proof")
+                out[fid] = {**v, "with": with_id, "in_proof": ip is True or _clean(ip).lower() in ("true", "yes"),
+                            "caption": _clean(row.get("caption")) or items[fid]["desc"], "key": key, "auto": True,
+                            "desc": items[fid]["desc"], "page": items[fid]["page"]}
+                if fresh_ok:
+                    out[fid]["fresh"] = True
+    P = {"items": dict(sorted(out.items(), key=lambda kv: int(re.sub(r"\D", "", kv[0]) or 0)))}
+    p.save("figure_plan", P)
+    if todo:
+        shown = sum(1 for fid in todo if out[fid]["use"] == "paper")
+        run.log(f"Drawings: {plural_drawings(len(todo))} decided with the whole paper in view: {shown} printed as "
+                f"figure{'s' if shown != 1 else ''}, {len(todo) - shown} only explain an argument. You see each on the "
+                "structure screen and can change it.")
+    return P
+
+
+def plural_drawings(n: int) -> str:
+    return f"{n} drawing" + ("s" if n != 1 else "")
+
+
+def set_plan(p: Project, fid: str, use: str | None = None, with_id: str | None = None, in_proof: bool | None = None,
+             caption: str | None = None) -> dict:
+    """The author's own decision on one drawing: printed or not, with which statement, its caption."""
+    with p._lock:
+        P = p.load("figure_plan") or {"items": {}}
+        e = P["items"].get(fid)
+        if e is None:
+            raise ValueError("Unknown drawing.")
+        if use is not None:
+            if use not in ("paper", "explanation"):
+                raise ValueError("Unknown choice.")
+            e["use"] = use
+        if with_id is not None:
+            e["with"] = with_id
+        if in_proof is not None:
+            e["in_proof"] = bool(in_proof)
+        if caption is not None:
+            e["caption"] = re.sub(r"\s+", " ", caption).strip()[:600]
+        e["auto"], e["sure"], e["doubt"] = False, True, ""
+        e.pop("fresh", None)
+        p.save("figure_plan", P)
+        return e
+
+
+def plan_items(p: Project) -> dict:
+    return (p.load("figure_plan") or {}).get("items") or {}
+
+
+def for_results(p: Project, units: list[dict]) -> dict[str, list[dict]]:
+    """The explanation drawings made for each result's proof: label -> [{"page", "desc", "illustrates"}]: those the
+    plan keeps as explanations, with the statement it gave them to."""
+    figs = {f["id"]: f for f in (p.load("figures") or {}).get("items", [])}
+    labels = {u["label"].split(":", 1)[-1]: u["label"] for u in units if u.get("label")}
+    out: dict[str, list[dict]] = {}
+    for fid, e in plan_items(p).items():
+        if e.get("use") != "explanation" or fid not in figs:
+            continue
+        lab = labels.get(e.get("with") or "")
+        if lab:
+            out.setdefault(lab, []).append({"page": figs[fid]["page"], "desc": figs[fid].get("desc", ""),
+                                            "illustrates": e.get("illustrates", "")})
     return out
 
 

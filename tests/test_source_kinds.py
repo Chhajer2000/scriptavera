@@ -91,7 +91,7 @@ figs = [f for f in (t.load("figures") or {}).get("items", []) if f.get("choice")
 if figs:                                                    # a figure for the paper: the step stops, for the figures only
     assert t.state["stages"]["review"]["status"] == "waiting" and "review" not in store.hidden_stages(t.state, t.dir)
     for f in figs:
-        pipeline.set_figure(t, f["id"], choice="explain")
+        pipeline.set_figure(t, f["id"], choice="orig")
     t.set_stage("review", status="pending")
 pipeline.start(t); wait(t, "review", seconds=900)
 assert t.state["stages"]["review"]["status"] == "done" and t.state["stages"]["review"].get("skipped") and t.load("approved")

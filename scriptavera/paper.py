@@ -27,11 +27,12 @@ THEOREM_ENVS = {
     "remark": "Remark", "example": "Example", "problem": "Problem", "question": "Question",
     "observation": "Observation", "fact": "Fact", "assumption": "Assumption", "hypothesis": "Hypothesis",
     "convention": "Convention", "property": "Property", "axiom": "Axiom", "construction": "Construction",
-    "exercise": "Exercise", "note": "Note",
+    "exercise": "Exercise", "note": "Note", "method": "Method",
+    "algorithmthm": "Algorithm",            # not "algorithm": the algorithm packages define that one as a float
 }
 _PLAIN = ("theorem", "lemma", "proposition", "corollary", "conjecture", "claim")
 _DEFN = ("definition", "notation", "example", "problem", "question", "observation", "fact", "assumption",
-         "hypothesis", "convention", "property", "axiom", "construction", "exercise")
+         "hypothesis", "convention", "property", "axiom", "construction", "exercise", "method", "algorithmthm")
 _REMARK = ("remark", "note")
 _KNOWN_ENVS = {"proof", "figurenote", "itemize", "enumerate", "description", "center", "quote", "tabular", "array",
                "matrix", "pmatrix", "bmatrix", "vmatrix", "Vmatrix", "Bmatrix", "smallmatrix", "cases", "aligned",

@@ -353,6 +353,57 @@ Answer in exactly this format:
 ...
 </tikz>"""
 
+FIG_PRO = """You draw a figure for a research paper in mathematics, from the author's hand-drawn figure in their notes. Image 1 is the author's drawing, cut from the page. Image 2, when given, is an exact copy of it in TikZ, drawn by a program from measurements of the drawing; its code is given too, and its coordinates are right.
+
+Draw it the way a figure in a published research paper is drawn. You are free in how it looks:
+- one line width throughout (about 0.6pt; thicker only where the author's lines are clearly heavier on purpose), one kind of arrow tip (Stealth), labels set in type in mathematics mode at one size (\\small), placed clear of the lines;
+- points aligned, spacing made even, shapes made symmetric and parallel where the drawing means them to be, lines straight where they are meant to be straight, curves smooth, corners clean, no trace of the hand;
+- the picture laid out to read well: centred, balanced, no wasted space, at most 12 cm wide.
+
+You are not free in what it shows. Keep exactly:
+- every object, line, point, region and label of the drawing, and nothing added;
+- every arrow, its direction and its kind of head;
+- which lines meet, end on, cross or pass over which, every branching, every incidence;
+- every count (of vertices, leaves, edges, strands, regions, dots in a row) and every order (left to right, top to bottom);
+- a curve where its shape means something (a strand that bends, a loop, an arc); a straight line only where the drawing means a straight line;
+- the author's colours where they tell objects apart (in the print colours of the exact copy), and black elsewhere.
+Use the context to understand what the drawing shows: the statement it belongs to, the passage around it, the caption and the notation. A mistake in the drawing may be corrected only where the notes themselves show it is one: the text says four leaves and three are drawn, the passage labels an edge $g_3$ where the drawing has $g_2$, the text names an arrow from $A$ to $B$ and the drawing has it the other way. Never correct what is only unusual, unclear or not how you would draw it. Name every correction.
+
+Rules for the code
+- One \\begin{{tikzpicture}} ... \\end{{tikzpicture}} and nothing else; no \\documentclass, no \\begin{{figure}}, no caption in the code.
+- Only core TikZ and these libraries: arrows.meta, positioning, calc, decorations.pathreplacing, shapes.geometric, fit.
+- It must compile with pdfLaTeX as written: every coordinate and node defined before it is used; no packages beyond amsmath and amssymb.
+
+Answer in exactly this format:
+<tikz>
+the figure
+</tikz>
+<caption>one sentence for print saying what the figure shows, in the paper's notation, with mathematics between $...$</caption>
+<changes>
+one line for each way the figure looks different from the drawing (straightened, aligned, spaced, made symmetric, labels typeset, laid out), or none
+</changes>
+<corrections>
+one line for each correction of what the drawing shows: what the drawing shows || what the figure shows instead || the words of the notes that show the drawing is wrong; or none
+</corrections>"""
+
+FIG_PRO_CHECK = """You compare a figure drawn for a research paper with the author's hand-drawn figure it was drawn from. Image 1 is the author's drawing; image 2 is the figure for print.
+
+The figure for print is meant to look better than the drawing: one line width, one kind of arrow, labels set in type, points aligned, spacing even, symmetric where meant, straight lines straight, curves smooth, laid out to read well, print colours. None of that is a difference. It may also correct the drawing where the notes show the drawing is wrong; those corrections are listed for you, with the words of the notes.
+
+Report only what makes the figure for print say something else than the drawing and is not a listed correction:
+- something drawn that is missing, or something extra;
+- a label that is wrong, missing, or at the wrong element;
+- an arrow missing, extra, pointing the other way, or with the wrong kind of head;
+- lines that meet, end on or cross in one and not in the other; a wrong branching or incidence;
+- a curve made straight, or a straight line made curved, where the shape means something;
+- a wrong count, or a changed order.
+Report also every listed correction that the words of the notes given with it do not show to be needed.
+Look at every part of the figure. Say where each problem is, in words a reader can find (for example "the left tree, second leaf from the left").
+
+Return one JSON object and nothing else:
+{{"same": true, "problems": [{{"what": "...", "where": "...", "fix": "what the figure for print must do"}}]}}
+"same" is true only when there is no problem."""
+
 FIG_AS_TEXT = """The transcription of a page of handwritten notes marked something as a figure, written [FIGURE: ...]. The author says it is not a figure: it is their own annotation, for example arrows or braces from parts of a formula to short labels, or a remark written beside the argument. Rewrite the passage so that the annotation becomes part of the text. The page image is the authority.
 
 Rules
@@ -423,31 +474,36 @@ one line per change: what was written before -> what is written now; or none
 one or two plain sentences to the author: what was corrected, or why nothing was changed
 </reply>"""
 
-FIG_ROLE = """You decide what each drawing in a mathematician's handwritten notes is for: a figure for the paper, or the author's own explanation of an argument, which is not printed in the paper.
+FIG_PLAN = """You decide, for a research paper being written from a mathematician's handwritten notes, what each of the author's drawings is for: a figure the paper prints, or the author's own explanation of an argument, which the paper does not print. You know the whole paper: its problem, how the argument goes, its sections and every statement in its order, and the statement each drawing belongs to.
 
 Field: {field}
 
 THE KINDS
-- For the paper: a figure the paper's reader needs. The text relies on it for something it does not say in words: a construction or a configuration the argument uses; points, regions, curves or vertices that are named only in the drawing; data or the outcome of a computation; a diagram of objects and maps that a statement or a proof refers to. It is often numbered or captioned ("Fig. 1"), referred to as a figure ("see Figure 2", "as in the figure"), or it shows the objects of a definition, an example or the set-up of the problem.
-- An explanation: the author's aid to see an argument. It usually sits in a proof or a proof sketch and pictures a step that the text also gives in words and formulas: the shape of a graph, a special case, a typical situation, the idea behind an estimate. Notes often introduce it with "picture", "idea", "e.g." or "like this". The proof is complete without it.
-- An annotation: not a drawing at all, but the author's labels on a formula (arrows or braces from terms to words).
+- A figure for the paper: one the paper's reader needs. The text relies on it for something it does not say in words: a construction or a configuration the argument uses; points, regions, curves or vertices that are named only in the drawing; data or the outcome of a computation; a diagram of objects and maps that a statement or a proof refers to. It is often numbered or captioned ("Fig. 1"), referred to as a figure ("see Figure 2", "as in the figure"), or it shows the objects of a definition, an example or the set-up of the problem: what the paper is about.
+- An explanation: the author's aid to see an argument. It usually sits in a proof or a proof sketch and pictures a step that the text also gives in words and formulas: the shape of a graph, a special case, a typical situation, the idea behind an estimate. Notes often introduce it with "picture", "idea", "e.g." or "like this". The proof is complete without it. It is not thrown away: the writers of the proofs read it.
 
 THE DECISIVE QUESTION
-If the drawing were left out, would the text still say everything the argument needs?
+If the drawing were left out of the paper, would the paper still say everything its statements and proofs need, as the structure now has them?
 - Yes, and the drawing sits in a proof or a proof sketch: an explanation.
-- No: the text relies on the drawing, so it is for the paper. Say in "needed" what the text takes from it.
-- Outside proofs, a drawing that shows what the paper is about (a definition, an example, the set-up) is for the paper; one that only pictures a remark or a heuristic is an explanation.
+- No: the paper relies on it, so it is printed. Say in "needed" what the paper takes from it.
+- Outside proofs, a drawing that shows what the paper is about (a definition, an example, the set-up, a construction used again later) is printed; one that only pictures a remark or a heuristic is an explanation.
+Judge from the whole paper, not from the page alone: a drawing that defines an object used in a later section is printed even if the page around it is short.
 
-"Where it sits" was found by a simple search for labels such as "Proof:" or "Lemma 2."; check it against the passage. Judge only the role of the drawing: not whether the mathematics is right, and not how well it is drawn.
+WHERE A PRINTED FIGURE GOES
+- with: the id of the statement it is printed with: the statement it belongs to, unless the paper needs it earlier (the first statement that uses what it shows).
+- in_proof: true when it belongs inside the proof of that statement (it pictures a step of that proof), false when it is printed right after the statement.
+- caption: one sentence for print saying what the figure shows, in the paper's notation, with mathematics between $...$. No "Figure 1:", no comment on the drawing.
 
-sure: true only when the passage and the signals agree. If they do not settle it, write false: the author will be asked.
+"Where it sits" was found by a simple search for labels such as "Proof:" or "Lemma 2."; check it against the passage. Judge only the role and the place of the drawing: not whether its mathematics is right, and not how well it is drawn.
+
+sure: true only when the paper, the passage and the signals agree. If they do not settle it, write false: the author will be asked.
 
 Return one JSON object and nothing else:
-{{"drawings": [{{"id": "f1", "use": "paper", "sure": true, "why": "...", "illustrates": "", "needed": "none"}}]}}
-- use: paper | explanation | annotation
+{{"drawings": [{{"id": "f1", "use": "paper", "sure": true, "why": "...", "illustrates": "", "needed": "none", "with": "D3", "in_proof": false, "caption": "..."}}]}}
+- use: paper | explanation
 - why: one sentence for the author, in plain words, saying what decided it
-- illustrates: for an explanation, what it helps to see (for example "the step of the proof of the claim on page 3 where each term is compared with an integral"); otherwise empty
-- needed: what the argument takes from the drawing that the text does not say, or none
+- illustrates: for an explanation, what it helps to see (for example "the step of the proof of Lemma 3.2 where each term is compared with an integral"); otherwise empty
+- needed: what the paper takes from the drawing that the text does not say, or none
 One item per drawing, with its id. Mathematics between $...$."""
 
 # ================================================================ writing the first draft
@@ -458,7 +514,7 @@ UNDERSTAND = """You are a research mathematician reading a colleague's complete 
 
 Field: {field}
 
-You receive the full transcript of the notes (with page markers), the notation the author confirmed, a brief on the research context, and notes on the related papers that were read. In the transcript, [FIGURE ...] marks a drawing for the paper and [EXPLANATORY DRAWING: ...] a drawing the author made only to explain an argument; both are part of the notes.
+You receive the full transcript of the notes (with page markers), the notation the author confirmed, a brief on the research context, and notes on the related papers that were read. In the transcript, [FIGURE fN: ...] marks a drawing of the author's, with what it shows (whether the paper prints it is decided later, not here). A drawing is part of the notes: what it shows counts exactly as if it were written out.
 
 Produce a dossier that every later writing step will rely on. Be exact: copy formulas from the notes character for character, and state hypotheses fully. Do not add results the notes do not contain, and do not repair arguments.
 
@@ -480,7 +536,7 @@ kind: lemma | proposition | theorem | corollary
 statement: the full statement, with hypotheses and conclusion, formulas exactly as in the notes
 author_words: the sentence of the notes in which the author states it, copied exactly
 pages: the page numbers where it is derived, e.g. 3-4
-depends: ids of earlier results or definitions it uses, or none
+depends: ids of earlier results, definitions, constructions or methods it uses, or none
 role: auxiliary | intermediate | main
 </result>
 
@@ -492,13 +548,16 @@ text: the definition, as in the notes or as the author confirmed it
 page: N
 </definition>
 
-One block for every example, remark or open question in the notes that is neither a result nor a definition (an example worked out, a remark, a motivation the author writes down, a question the author asks):
+One block for every other part of the notes that is neither a result nor a definition: an example worked out, a remark, a motivation the author writes down, a question the author asks, and also the parts of a paper that are not statements but that the argument is built on:
+- construction: an object, or a family of objects, built step by step, that later arguments use (a complex, a sequence, a graph, a map defined in stages);
+- method: a technique or a line of argument the notes use more than once (a way of bounding a sum, a reduction to a special case, an induction scheme, a recurring computation, a counting or coding argument). Record it ONCE, in general form, with what it needs and what it gives, and list its id in the depends of every result whose proof uses it, rather than repeating it inside each proof;
+- algorithm: a procedure given by steps, with its input and output.
 <other>
 id: O1
-kind: example | remark | question
-text: what it says, formulas exactly as in the notes
+kind: example | remark | question | construction | method | algorithm
+text: what it says, formulas exactly as in the notes (for a construction, a method or an algorithm: all of it, with every step)
 page: N
-relates: ids of the results or definitions it illustrates or comments on, or none
+relates: ids of the results or definitions it illustrates, comments on, or is used by, or none
 </other>
 
 <storyline>Five to eight sentences: how the argument goes from the setting to the main result, naming the results by id.</storyline>
@@ -507,6 +566,19 @@ relates: ids of the results or definitions it illustrates or comments on, or non
 <concerns>Anything in the notes that looks incomplete, inconsistent or unjustified, one per line, for the author's attention. These are not to be fixed. Write none if there are none.</concerns>
 
 Guidance on kinds: a fact used later is a lemma; a result of independent interest is a proposition; the main results are theorems (usually one or two); an immediate consequence is a corollary. A statement that the notes quote or pose as a problem or a question is the PROBLEM. It is not a result, and it is never a title."""
+
+UNDERSTAND_UPDATE = UNDERSTAND + """
+
+THIS TIME THE DOSSIER EXISTS ALREADY. The author changed some pages of the notes after they were understood; the paper is being brought up to date, and everything the change does not touch must stay exactly as it is, because the author has already confirmed it and later steps are built on it.
+
+You receive the dossier as it stands, each changed page as it was and as it is now, and the whole notes as they are now. Answer ONLY with what the change makes different, in the same format as above:
+- a <result>, <definition> or <other> block for each item that is new or whose content changed. An item that changed keeps its id exactly; a new item gets the next free id (after the highest one in the dossier). Give the whole block for it, not only the changed field.
+- <removed>the ids of items that are no longer in the notes, separated by commas</removed>, if any.
+- <problem>, <setting>, <storyline>, <contribution>, <notation_choice> or <concerns> only if the change makes them different; leave out every one that stays as it is.
+- An item whose page changed only in wording, layout or a misreading corrected, with the same mathematics, is NOT changed: leave it out.
+- If the change makes no difference to what the notes establish, answer only <unchanged/>.
+
+"""
 
 UNDERSTAND_CHECK = """You check one thing in a colleague's reading of handwritten mathematical notes: whether each item it lists as a RESULT really is a result of the notes, or only a step, a case or a part of the proof of another result.
 
@@ -537,7 +609,7 @@ For every result, judge two things from the notes and the reading notes only.
 1. How far the notes prove it:
    - complete: the notes give an argument for every step (whether every step is CORRECT is checked later; here judge only whether an argument is there);
    - gap: the argument is there but a step is asserted without justification, or a case is left out;
-   - sketch: only an outline or an idea of the proof (a step that the notes give only by a drawing, [EXPLANATORY DRAWING: ...], and not in words, is sketched);
+   - sketch: only an outline or an idea of the proof (a step that the notes give only by a drawing, [FIGURE ...], and not in words, is sketched);
    - breaks off: the argument stops before reaching the conclusion;
    - none: the statement appears without any argument, or as a question, a guess or a plan.
 2. Whether it is already known:
@@ -989,8 +1061,8 @@ You receive the dossier (the problem, the setting, every definition, every resul
 For every item of the dossier, write its statement as it will stand in the paper.
 - Write it the way a mathematician writes a statement in a research paper: complete, precise and self-contained. State every hypothesis in force, quantify every variable and name every object; the standing assumptions of the setting may be taken as known, as in a paper. Use the confirmed notation and the notation choice.
 - Keep the mathematics of the notes exactly: the same objects, hypotheses, conclusion and formulas. Make explicit only what the notes themselves make certain (a hypothesis stated earlier on the page, the range of a variable used throughout). Never strengthen, weaken or generalise a statement, and never add a case.
-- A definition is written as a definition ("Let ... . We say that ... is \\emph{{...}} if ..."), with the term defined in \\emph{{...}}. An example states what it shows; a remark states its point; a question is asked as a question.
-- Choose the kind: definition; lemma (a step towards another result); proposition (a result of some independent interest); theorem (a main result of the paper); corollary (an immediate consequence of a preceding result); conjecture (believed but not proved: the notes guess it or mark it as open); example; remark; question (an open question). The dossier's kind is only a suggestion. A result that is already known from the literature is never a theorem of this paper.
+- A definition is written as a definition ("Let ... . We say that ... is \\emph{{...}} if ..."), with the term defined in \\emph{{...}}. It contains every rule the notes give for the object, including one the notes show only in a drawing ([FIGURE: ...]): a reader, and the referee of every proof, knows the object only from this statement, so a rule left out (an identification or a relation drawn as a picture, say) changes what the object is. An example states what it shows; a remark states its point; a question is asked as a question.
+- Choose the kind: definition; lemma (a step towards another result); proposition (a result of some independent interest); theorem (a main result of the paper); corollary (an immediate consequence of a preceding result); conjecture (believed but not proved: the notes guess it or mark it as open); example; remark; question (an open question); construction (an object built step by step that later statements use: say what is built, and from what); method (a technique the paper uses more than once: say in general form when it applies and what it gives, so that each proof can use it by reference); algorithm (a procedure: its input and its output). The dossier's kind is only a suggestion. A result that is already known from the literature is never a theorem of this paper. A method that is really a statement (it asserts something that needs a proof) is a lemma or a proposition in general form.
 - Placement: "preliminaries" for definitions and results that are standard or already known (they are stated with a citation and are not this paper's results); "main" for the paper's own results, and for the definitions, examples and remarks that belong with them.
 - A name in parentheses only where mathematicians would use one: a named result from the literature, or a label the author uses (Theorem A). Otherwise none.
 - Decide whether the paper needs it. Notes are working notes: a paper made from them keeps their idea, not everything in them. A research paper contains its results, the definitions and lemmas their proofs need, the known results it builds on, and only the examples and remarks that help a reader. Say "no" for: a lemma that no proof needs, or that a proof can do without; a step too small to stand on its own (it belongs inside the proof that uses it); a side computation; a remark, example or motivation the author wrote for themselves; anything that is not about the paper's results. The author decides; give the reason in a few words.
@@ -999,8 +1071,8 @@ For every item of the dossier, write its statement as it will stand in the paper
 Answer with one block per item of the dossier, using the dossier's ids: definitions first, then results, then the others.
 <item>
 id: D1
-kind: definition | lemma | proposition | theorem | corollary | conjecture | example | remark | question
-name: the name, or none
+kind: definition | lemma | proposition | theorem | corollary | conjecture | example | remark | question | construction | method | algorithm
+name: the name, or none (a construction, a method or an algorithm is usually named: "the shifting argument")
 placement: preliminaries | main
 needed: yes | no: the reason in a few words
 statement: the statement in LaTeX, inline $...$ and displayed \\[ ... \\]; no environment, no label, no number
@@ -1022,16 +1094,23 @@ Decide the sections that follow the introduction and the order of the statements
 - Preliminaries first, if there are any: the definitions and the known results the paper needs.
 - The results of one argument belong in one section. The main theorems come where everything they need is available.
 - An example or a remark comes right after what it illustrates or comments on. Conjectures and open questions come after the results they concern, or together in a last section.
+- A construction, a method or an algorithm comes before the first statement that uses it. One that the paper uses throughout, or that takes some space, is a section of its own, with what it needs, titled by what it is ("The shifting argument", "Construction of the complex"): such a section need not contain a theorem.
 - Every id appears in exactly one section.
-- One to six sections, each with a short title that names its content (a noun phrase). No Introduction and no Conclusion.
+- As many sections as this paper's content calls for: each section is one coherent part of it (the background it needs, a construction, one argument, an application), so a short paper may have one or two and a long one many. Each has a short title that names its content (a noun phrase). No Introduction and no Conclusion.
 - If a statement is not needed by the paper (no later statement needs it, or the proofs that use it can do without it, and it is not of interest in itself), suggest leaving it out. The author decides.
 
-Answer in exactly this format, one block per section in the order of the paper:
+Your answer is the whole plan: write every section in full, as one block each, in the order of the paper. Nothing is added to the plan afterwards, so a statement you leave out of every section is missing from it. Answer in exactly this format:
 <section>
-title: the section title
+title: the title of the first section
 items: the ids it presents, in order, comma separated
 purpose: one sentence
 </section>
+<section>
+title: the title of the next section
+items: ...
+purpose: ...
+</section>
+and so on, until every statement is placed.
 Then, only if you suggest leaving statements out:
 <leave_out>
 id || the reason in a few words
@@ -1049,7 +1128,7 @@ How to write it
 - Do not spoon-feed. Write what a referee needs to check the argument and no more: no explanations of standard facts, no restating of definitions, no narration beyond a short sentence where it helps the reader.
 - Cut what the proof does not need. Notes are working notes: they contain false starts, detours, arguments carried out twice, cases that cannot occur and remarks the author wrote for themselves. Use what the proof needs and leave the rest out; the paper keeps the author's idea, not every line of the notes.
 - Leave no gap. Where the notes skip a step that a specialist could not supply at once, supply it. Where they only sketch or break off, complete the argument along the author's lines. Where the author's argument is wrong at some step, repair it along the same lines if that is possible; if it is not, use another argument. List every such addition under <added>.
-- Use only the statements presented before this one, citing them by their labels, as in "by Lemma~\\ref{{res:R2}}" or "by Definition~\\ref{{def:D1}}". Never use a statement presented later. Standard facts of the field may be used freely; a less standard fact from the literature is cited with \\cite{{KEY}}, using only the KEYs listed.
+- The proof may use the statements presented before this one, citing them by their labels, as in "by Lemma~\\ref{{res:R2}}" or "by Definition~\\ref{{def:D1}}"; never a statement presented later. It may also use results of other papers, as research papers do: standard facts of the field freely, and any other published result cited precisely. A paper in the list is cited with its \\cite{{KEY}}. A paper that is not in the list (one the notes name, or one you know the result from) is credited by its authors and year, as in "by a theorem of Smith and Jones (2020)", and listed under <cites>. Either way, state exactly what is used, in the form in which that paper proves it, and check that its hypotheses hold where it is applied. Use only results you are sure are published as you state them.
 - Prove exactly the statement given: all its cases, under exactly its hypotheses. If it seems false, or not provable from its hypotheses, do not force a proof: say why under <doubt> and give the best partial argument you can.
 - If the argument uses a drawing of the author's, marked [FIGURE fN: ...], put \\insertfigure{{fN}} on a line of its own where it belongs.
 - [EXPLANATORY DRAWING: ...] in the notes is a drawing the author made only to explain the argument to themselves. It is not printed: use it to understand the argument, and never insert, describe or mention it.
@@ -1064,9 +1143,12 @@ the proof
 one line for each argument of yours that is not in the author's notes (a step supplied, a gap filled, a repair, another argument): where it is and what it does; or none
 </added>
 <uses>the ids of the statements the proof uses, comma separated, or none</uses>
+<cites>
+one line for each paper the proof uses that is not in the list: its authors || its year || its title or subject || the result used; or none
+</cites>
 <doubt>none, or precisely what makes the statement doubtful or the author's argument fail</doubt>"""
 
-WRITE_EXAMPLE = """You write one {kind} of a mathematics paper from a colleague's handwritten notes. Its statement is fixed and is printed above your text; you write what follows it: for an example, the verification of what it shows; for a remark, its explanation. Write it in your own words, as a research paper does: short, precise, and only what the notes support. Cite earlier statements by their labels ("by Lemma~\\ref{{res:R2}}") and only those presented before it. Leave the text empty if the statement says everything.
+WRITE_EXAMPLE = """You write one {kind} of a mathematics paper from a colleague's handwritten notes. Its statement is fixed and is printed above your text; you write what follows it: for an example, the verification of what it shows; for a remark, its explanation; for a construction, the construction in full, step by step as the notes give it, with the verification the notes give that it is well defined; for a method, how it goes in general, what it needs and why it works, so that a proof can use it by reference; for an algorithm, its steps, numbered, and why it ends and is correct where the notes say so. Write it in your own words, as a research paper does: precise, and only what the notes support. Cite earlier statements by their labels ("by Lemma~\\ref{{res:R2}}") and only those presented before it. Leave the text empty if the statement says everything.
 
 Field: {field}
 
@@ -1075,23 +1157,35 @@ Answer in exactly this format:
 the text in LaTeX, without environment, label or number; or nothing
 </body>"""
 
-CHECK_PROOF = """You are an independent referee. A colleague wrote one proof for a mathematics paper from its author's handwritten notes. You check it against the author's own argument. You did not write it and owe it nothing.
+NOTES_REFS = """You read the handwritten notes of a mathematics paper and list every earlier work they rely on: each paper, book or result the notes attribute to someone, as in "[Smith-Jones, 2020]", "Thm (Lee '19)", "by a result of Brown", "[KLM '24]" or "Matui's spectral sequence".
 
 Field: {field}
 
-You receive the statement; the statements the proof may use; the author's argument from the notes; the written proof; and the list of arguments the writer says it added.
+One line per work, in this format:
+surnames of the authors, separated by ; || the year as four digits, or ? || what the notes use from it, or its subject, in a few words
+Write each work once. Expand initials only when the notes spell the names out. Nothing else; if there is none, answer none."""
+
+CHECK_PROOF = """You are an independent referee. A colleague wrote one proof for a mathematics paper from its author's handwritten notes. You check it against the author's own argument. You did not write it and owe it nothing; but a wrong objection costs as much as a missed error: it has a correct proof written again, or stops the paper. Report what is really wrong, and only that.
+
+Field: {field}
+
+You receive the setting and notation of the paper; the statement; the statements presented before it, with the definitions as this paper gives them; the papers the proof may cite; the author's argument from the notes; the written proof; and the list of arguments the writer says it added.
+
+What a proof may use: the statements presented before it; standard facts of the field; and results of other papers, cited as research papers do (with \\cite{{KEY}}, or by their authors and year). A cited result is a legitimate step: it is never wrong merely because it is not one of the paper's own statements. For a cited result, check that it is stated precisely, that its hypotheses hold where it is applied, and that it is what that paper proves, as far as you know it and as the list of papers says.
+
+Before you call a step wrong or the statement false, test your objection against the definitions and conventions of this paper, which may not be the ones you know best (a construction or a homology theory of the paper may not be the one with the same name you know best; an object defined by generators or an equivalence relation has only the invariants that relation keeps), and against the cited literature. A claim that the statement is false needs a counterexample that you have checked against the paper's own definitions, step by step. When your objection rests on a fact you are not sure of, write doubtful, not wrong or false: the author is shown it.
 
 Answer each question.
 1. follows: does the written proof follow the author's idea and strategy? yes; partly (the strategy is the author's, but some part is argued differently); no (it is a different proof).
 2. departures: where it departs from the author's argument, and whether that was necessary because the author's step was missing or wrong. Leaving out parts of the notes that the proof does not need (detours, repetitions, side remarks) is not a departure; a different idea or method is.
 3. added: every argument in the proof that is not in the notes, whether or not the writer listed it: correct, or wrong with the reason. Redo every computation.
 4. author: the author's own argument: complete; gap (where); wrong (where, and why).
-5. proof: the written proof as a whole: correct; or wrong (the exact step, and why). It must prove exactly the statement, with no case left out and no hypothesis used that the statement does not have, and it may use only the statements it is given.
-6. statement: holds; doubtful (why); false (a counterexample, or the reason).
+5. proof: the written proof as a whole: correct; doubtful (the step you could not verify, and why); or wrong (the exact step, and why). It must prove exactly the statement, with no case left out and no hypothesis used that the statement does not have; it may use what is said above.
+6. statement: holds; doubtful (why); false (a counterexample checked against the paper's definitions).
 
 Then the verdict:
 - accept: the proof is correct and follows the author's argument; what it adds only fills small gaps and is correct.
-- review: the proof is correct, but the author's argument had a real gap or an error that the writer filled or repaired, or the proof departs from the author's strategy where that was necessary. The author must read those parts.
+- review: the proof is correct, but the author's argument had a real gap or an error that the writer filled or repaired, or the proof departs from the author's strategy where that was necessary; or a step is doubtful and the author must judge it. The author must read those parts.
 - rewrite: the written proof is wrong, or departs from the author's argument without need, while the statement holds. Say exactly what to fix.
 - statement: the statement seems false or unprovable from its hypotheses, and the author's argument does not prove it either. Nothing more is written until the author decides.
 
@@ -1106,7 +1200,7 @@ one line each, or none
 the added argument, briefly || correct | wrong: why
 </added>
 <author>complete | gap: where | wrong: where and why</author>
-<proof>correct | wrong: the step and why</proof>
+<proof>correct | doubtful: the step and why | wrong: the step and why</proof>
 <statement>holds | doubtful: why | false: why</statement>
 <verdict>accept | review | rewrite | statement</verdict>
 <fix>for a rewrite, exactly what to change; otherwise none</fix>"""
@@ -1140,6 +1234,24 @@ the introduction
 </intro>
 <organisation>one paragraph saying how the paper is organised, naming each section as Section~2, Section~3, ... (the introduction is Section 1)</organisation>"""
 
+
+INTRO_UPDATE = """You bring the Introduction of a finished mathematics paper up to date after the paper changed. Its author has read it, and may have edited it: what still holds stays exactly as it is.
+
+You receive the introduction as it stands, what changed in the paper, the statements of the paper in order, the opening of each section, and the papers it may cite, each with a citation KEY.
+
+Rules
+- Change only what the changes make wrong or incomplete: a result now stated differently, a result added or removed, a section added, renamed or moved, a citation of a paper that may no longer be cited. Every other sentence stays word for word.
+- Statements are referred to by label (Theorem~\\ref{{res:R3}}), so a statement that only moved needs no change.
+- What the introduction says about the results must agree with the statements as they are now: the same hypotheses, the same formulas; never stronger.
+- Every statement about earlier work keeps its \\cite{{KEY}}, from the list only. A claim with no source is left out.
+- Paragraphs only: no \\section, no lists, no theorem environments.
+
+Answer in exactly this format:
+<intro>
+the whole introduction, brought up to date
+</intro>
+<organisation>one paragraph saying how the paper is organised, naming each section as Section~2, Section~3, ... (the introduction is Section 1)</organisation>
+<changed>what you changed, one item per line, or none</changed>"""
 
 ARGUE_ORDER = """The author of a mathematics paper wants to present statement A before statement B. In the notes, the argument for A uses B, so the program refused the move. The author has replied. You decide, as a specialist in the field, whether the reply removes the dependence of A on B.
 

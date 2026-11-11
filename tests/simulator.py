@@ -450,12 +450,12 @@ page 5 || Does the last display of the proof end with $\log n$ or with $\log(n+1
                 # suggestion described in the explanation column
                 "page 0 || The argument of the logarithm is written n here but n+1 everywhere else in the notes, which suggests a misreading. "
                 "|| suggested reading: replace \u201c\\log n\u201d by \u201c\\log(n+1)\u201d (so the line reads $\\int_{1}^{n+1} \\frac{dx}{x} = \\log(n+1)$). ||\n</flags>")
-    if label.startswith("Decide which drawings are for the paper"):
+    if label.startswith("Decide which drawings"):
         # as a careful reader would: a drawing inside a proof that pictures a step the text states is an explanation;
         # the picture of the method next to the problem is for the paper. SCRIPTAVERA_MOCK_DRAWINGS=relies makes the
         # reader say the proof takes something from the drawing, so that the code asks the author instead.
         out = []
-        for fid, where in re.findall(r"DRAWING (f\d+): .*?\nWhere it sits: ([^\n]*)", user, flags=re.S):
+        for fid, where in re.findall(r"DRAWING (f\d+): .*?\nWhere it sits(?: in the notes)?: ([^\n]*)", user, flags=re.S):
             if where.startswith("inside a proof"):
                 relies = os.environ.get("SCRIPTAVERA_MOCK_DRAWINGS") == "relies"
                 out.append({"id": fid, "use": "explanation", "sure": True,
@@ -463,9 +463,31 @@ page 5 || Does the last display of the proof end with $\log n$ or with $\log(n+1
                             "illustrates": "the step of the proof where a term is compared with an integral over an interval of length $1$",
                             "needed": "the rectangle that the inequality compares" if relies else "none"})
             else:
-                out.append({"id": fid, "use": "paper", "sure": True, "illustrates": "", "needed": "none",
+                out.append({"id": fid, "use": "paper", "sure": True, "illustrates": "", "needed": "none", "with": "", "in_proof": False,
+                            "caption": "The sum compared with the integral of $1/x$: rectangles of width $1$ under the graph.",
                             "why": "It shows the comparison of the sum with an integral, the method the notes announce with the problem."})
         return json.dumps({"drawings": out})
+    if re.match(r"Draw figure \d+ for print", label):
+        # the copy of the drawing, set the way a paper sets it; SCRIPTAVERA_MOCK_FIGFIX=1 names a correction the notes show
+        m = re.search(r"\\begin\{tikzpicture\}.*?\\end\{tikzpicture\}", user, re.S)
+        pic = m.group(0) if m else ("\\begin{tikzpicture}[line width=0.6pt]\n\\draw[->] (0,0) -- (4,0) node[right] {$x$};\n"
+                                    "\\draw[->] (0,0) -- (0,3) node[above] {$y$};\n\\draw (0.5,2.5) .. controls (1.5,1) .. (3.8,0.5);\n\\end{tikzpicture}")
+        fix = os.environ.get("SCRIPTAVERA_MOCK_FIGFIX") == "1"
+        return (f"<tikz>\n{pic}\n</tikz>\n<caption>Rectangles of width $1$ under the graph of $1/x$.</caption>\n"
+                "<changes>\none line width for every line\nlabels set in type\n</changes>\n<corrections>\n"
+                + ("a fourth rectangle is drawn || the drawing shows three || the notes count four rectangles on page 3\n" if fix else "none\n")
+                + "</corrections>")
+    if label.startswith("Bring the understanding up to date"):
+        # a changed page that says "now: R2 states ..." changes that result; anything else changes nothing
+        now = "\n".join(re.findall(r"AS IT IS NOW:\n(.*?)(?=\n%%% page|\n\nTHE NOTES AS THEY ARE NOW|\Z)", user, flags=re.S))
+        hits = re.findall(r"now: (R\d+) states (.+?)(?:\n|$)", now)
+        if not hits:
+            return "<unchanged/>"
+        return "\n".join(f"<result>\nid: {rid}\nkind: lemma\nstatement: {st.strip()}\npages: 3\ndepends: D1\nrole: auxiliary\n</result>"
+                         for rid, st in hits)
+    if label.startswith("Bring the introduction up to date"):
+        old = user.split("\n", 1)[1].split("\n\nWHAT CHANGED IN THE PAPER", 1)[0]
+        return f"<intro>\n{old}\n</intro>\n<organisation>The paper is organised as follows.</organisation>\n<changed>none</changed>"
 
     # ---- the first draft
     if label.startswith("Understand"):
@@ -556,19 +578,27 @@ page: 1
     if label.startswith("Write the statements"):
         clean = os.environ.get("SCRIPTAVERA_MOCK_CLEAN") == "1"
         q4 = "none" if clean else "On page 5 the last display ends with $\\log n$. Is the bound you mean $\\log(n+1)$ or $\\log n$?"
-        return "\n".join(f"<item>\nid: {i}\nkind: {k}\nname: none\nplacement: {pl}\nstatement: {s}\nquestion: {q}\n</item>" for i, k, pl, s, q in (
+        rows = [
             ("D1", "definition", "preliminaries", r"For a real number $s > 0$ and an integer $n \ge 1$ we put \emph{$H_n^{(s)} = \sum_{k=1}^{n} \frac{1}{k^s}$}.", "none"),
             ("R1", "lemma", "main", r"For all $n \ge 1$ we have $H_n^{(2)} \le 2 - \frac{1}{n}$.", "none"),
             ("R2", "lemma", "preliminaries", r"For all $n \ge 1$ we have $H_n^{(1)} \le 1 + \log n$.", "none"),
             ("R3", "theorem", "main", r"Let $s > 1$. Then for all $n \ge 1$ we have $H_n^{(s)} \le \frac{s}{s-1}$. In particular $\zeta(s) \le \frac{s}{s-1}$.", "none"),
             ("R4", "proposition", "main", r"For all $n \ge 1$ we have $H_n^{(1)} \ge \log(n+1)$.", q4),
-            ("R5", "corollary", "main", r"For all $n \ge 1$ we have $\log(n+1) \le H_n^{(1)} \le 1 + \log n$.", "none")))
+            ("R5", "corollary", "main", r"For all $n \ge 1$ we have $\log(n+1) \le H_n^{(1)} \le 1 + \log n$.", "none")]
+        only = re.match(r"WRITE ONLY THESE ITEMS: ([^.]*)\.", user)
+        if only:                             # brought up to date: only those, as the changed page now states them
+            ids = [x.strip() for x in only.group(1).split(",")]
+            now = dict(re.findall(r"now: (R\d+) states (.+?)(?:\n|$)", user))
+            rows = [(i, k, pl, now.get(i, s).strip(), q) for i, k, pl, s, q in rows if i in ids]
+        return "\n".join(f"<item>\nid: {i}\nkind: {k}\nname: none\nplacement: {pl}\nstatement: {s}\nquestion: {q}\n</item>"
+                         for i, k, pl, s, q in rows)
     if re.match(r"Rewrite R\d+ with your answer", label):
         return "<statement>For all $n \\ge 1$ we have $H_n^{(1)} \\ge \\log(n+1)$.</statement>\n<question>none</question>"
     if label.startswith("Plan the structure"):
         return ("<section>\ntitle: Preliminaries\nitems: D1, R2\npurpose: The partial sums and the known upper bound.\n</section>\n"
                 "<section>\ntitle: Upper bounds\nitems: R1, R3\npurpose: The bounds for the exponent two and the main theorem.\n</section>\n"
-                "<section>\ntitle: The harmonic sums\nitems: R5, R4\npurpose: The lower bound and the two-sided estimate.\n</section>")
+                "<section>\ntitle: The harmonic sums\nitems: " + ("R4, R5" if "again" in label else "R5, R4")   # asked again, it puts R4 first
+                + "\npurpose: The lower bound and the two-sided estimate.\n</section>")
     if label.startswith("Write the proof of"):
         rid = re.search(r"\((R\d+)\)", label).group(1)
         page = {"R1": 2, "R2": 3, "R3": 4, "R4": 5}.get(rid)
@@ -742,6 +772,14 @@ Adding the term $k = 1$ gives $H_n^{(s)} \le 1 + \frac{1}{s-1} = \frac{s}{s-1}$.
                     "problem: This inequality needs $s > 1$, which is not said at this point.\ncorrection: none\n</issue>\n"
                     "<summary>One step may need a hypothesis.</summary>")
         return "<verdict>correct</verdict>\n<summary>Every step follows; the computation was redone and agrees.</summary>"
+    if label.startswith("Find the papers your notes cite"):
+        return "Sample || 2018 || the integral comparison for monotone functions\nNobody; Else || 1999 || a bound for alternating sums"
+    if label.startswith("Second opinion on the proof of"):           # a real slip is upheld; anything else dismissed
+        if "FIRSTTRY" in user:
+            return "<ruling>\nn: 1\ndecision: upheld\nreason: The integral of $t^{-s}$ over $[1, n]$ has $s-1$ in the denominator.\ncorrection: none\n</ruling>"
+        n = len(re.findall(r"(?m)^\d+\. At:", user.split("CLAIMS OF THE FIRST READER", 1)[-1])) or 1
+        return "\n".join(f"<ruling>\nn: {k}\ndecision: dismissed\nreason: The step is correct under the paper's own definition.\n"
+                         "correction: none\n</ruling>" for k in range(1, n + 1))
     if label.startswith("Second opinion"):
         if "res:R4" in user.split("THE RESULT TO CHECK", 1)[-1].split("\n", 2)[1]:
             return ("<ruling>\nn: 1\ndecision: upheld\nreason: The integral equals $\\log(n+1) - \\log 1 = \\log(n+1)$.\n"

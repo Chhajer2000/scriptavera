@@ -20,11 +20,14 @@ from . import config, literature, paper as paperlib, prompts, relevance
 from .llm import LLMError, router
 from .pipeline import (Run, _PAGE_MARK, _json, _room, _topic_text, audit_pages, emit, find_explanations, find_figures, notation_text,
                        page_gaps, page_marks, passing, strip_explanations, writing_pages)
-from .store import Project
+from .store import Project, reuse_ok
 from .texutil import check_balance, clean_fragment, find_group, leaks, split_math
 from .util import parse_rows, est_tokens, extract_tag, fit, parse_lines
 
 RESULT_KINDS = ("lemma", "proposition", "theorem", "corollary")
+# parts of the notes that are not statements: kept as such, and the last three (what the argument is built on) printed
+# as their own environments, before what uses them, in a section of their own when the paper uses them throughout
+OTHER_KINDS = ("example", "remark", "question", "construction", "method", "algorithm")
 
 # ------------------------------------------------------------- citations
 
@@ -88,8 +91,11 @@ def drop_unsourced(text: str, valid: dict[str, dict], log: list[str]) -> str:
 
 
 def citable(p: Project) -> list[dict]:
+    """The papers the paper may cite: those read and found relevant, those the author pinned, and those the
+    author's own notes cite (see drafting.find_cited_papers)."""
     return [x for x in p.load("library", []) if x.get("state") != "excluded"
-            and ((x.get("read") and x.get("verdict") in ("core", "related", "background")) or x.get("pinned"))]
+            and ((x.get("read") and x.get("verdict") in ("core", "related", "background")) or x.get("pinned")
+                 or x.get("notes_cite"))]
 
 
 def sources_text(p: Project, per: int = 5) -> str:
@@ -99,8 +105,10 @@ def sources_text(p: Project, per: int = 5) -> str:
         authors = ", ".join(a.get("family", "") for a in x.get("authors", [])[:4])
         facts = (nt.get("citable") or nt.get("results") or [fit(x.get("abstract", ""), 300, "head")])[:per]
         out.append(f"KEY {x['key']} | {authors} ({x.get('year')}) | {x['title']}\n"
-                   f"  relevance: {x.get('verdict') or 'given by the author'}; {nt.get('relation', '')}\n"
-                   f"  supports: " + " | ".join(str(f) for f in facts if f))
+                   f"  relevance: {x.get('verdict') or ('cited in the notes' if x.get('notes_cite') else 'given by the author')}; "
+                   f"{nt.get('relation', '')}\n"
+                   + (f"  the notes use it for: {x['notes_cite']}\n" if isinstance(x.get("notes_cite"), str) else "")
+                   + "  supports: " + " | ".join(str(f) for f in facts if f))
     return "\n".join(out)
 
 
@@ -173,7 +181,7 @@ def parse_dossier(text: str) -> dict:
         oid = re.sub(r"[^A-Za-z0-9]", "", r.get("id", "")) or f"O{len(others) + 1}"
         if any(x["id"] == oid for x in others):
             oid = f"O{len(others) + 1}x"
-        kind = next((k for k in ("example", "remark", "question") if k in r.get("kind", "").lower()), "remark")
+        kind = next((k for k in OTHER_KINDS if k in r.get("kind", "").lower()), "remark")
         others.append({"id": oid, "kind": kind, "text": r["text"].strip(), "page": (page_list(r.get("page", "")) or [0])[0],
                        "relates": re.findall(r"\b[A-Za-z]\d+\b", r.get("relates", ""))})
     src = re.sub(r"[\[\]\s]", "", extract_tag(text, "source"))
@@ -216,7 +224,7 @@ def dossier_text(d: dict, limit: int = 12000) -> str:
             + "".join(f"\n    (a step inside its proof, not a result of its own: {c['statement']})" for c in x.get("contains", []))
             for x in d["results"]))
     if d.get("others"):
-        L.append("EXAMPLES, REMARKS AND QUESTIONS\n" + "\n".join(
+        L.append("EXAMPLES, REMARKS, QUESTIONS, CONSTRUCTIONS, METHODS AND ALGORITHMS\n" + "\n".join(
             f"- {x['id']} ({x['kind']}, page {x['page']}" + (f", about {', '.join(x['relates'])}" if x.get("relates") else "")
             + f"): {x['text']}" for x in d["others"]))
     if d.get("storyline"):
@@ -238,14 +246,32 @@ def dossier_text(d: dict, limit: int = 12000) -> str:
     return fit("\n\n".join(L), limit, "head")
 
 
+def _basis(pages: list[dict], conf: dict) -> dict:
+    """What the dossier is made from, page by page, and the confirmed notation: kept with it, so that after a change
+    only the pages that changed are read again."""
+    return {"pages": {str(pg["n"]): pg["text"] for pg in pages}, "notation": notation_text(conf, 100000)}
+
+
 def stage_understand(run: Run) -> None:
     """Everything is read together once, before any writing: the notes, the confirmed notation, the context
-    brief and the notes on each paper read. The result (the dossier) travels with every later request."""
+    brief and the notes on each paper read. The result (the dossier) travels with every later request. When the
+    paper is brought up to date after a change of the notes, the dossier is not made again: it is brought up to date
+    from the pages that changed (update_dossier), so that everything they do not touch stays exactly as it was."""
     p = run.p
     pages, _ = writing_pages(p)
     if not pages:
         raise ValueError("The transcript is empty.")
     conf = p.load("confirmed", {})
+    old = p.load("dossier") or {}
+    basis = _basis(pages, conf)
+    if old.get("results") is not None and reuse_ok(p.state):
+        before = old.get("basis") or _legacy_basis(p, conf)
+        if before == basis:
+            run.log("Your notes are unchanged since they were understood: the understanding is kept.")
+            return
+        if before and before.get("notation") == basis["notation"]:
+            if update_dossier(run, old, before, basis, pages):
+                return
     brief = (p.load("brief") or {}).get("text", "")
     system = prompts.UNDERSTAND.format(field=run.field)
     out = 7000
@@ -277,11 +303,136 @@ def stage_understand(run: Run) -> None:
     if d["source"] and d["source"] not in keys:
         near = difflib.get_close_matches(d["source"], list(keys), n=1, cutoff=0.82)
         d["source"] = near[0] if near else ""
+    if old.get("results") and reuse_ok(p.state):
+        keep_ids(old, d)                       # read again as a whole: what is the same keeps its id
+        was = {x["id"]: _norm(x.get("statement")) for x in old.get("results") or []}
+        d["changed"] = [x["id"] for x in d.get("results") or [] if was.get(x["id"]) != _norm(x.get("statement"))]
+    d["basis"] = basis
     p.save("dossier", d)
     main = [x for x in d["results"] if x["role"] == "main"]
     run.progress(1, 1, "understood")
     run.log(f"Understood: {len(d['definitions'])} definitions and {len(d['results'])} results, {len(main)} of them main."
             + (f" {len(d['concerns'])} point(s) noted for your attention." if d["concerns"] else ""))
+
+
+def _legacy_basis(p: Project, conf: dict) -> dict | None:
+    """A dossier made by an earlier version, without what it was made from: the pages approved before the latest
+    approval stand in for it (step 9 keeps them when the transcript is approved again)."""
+    before = (p.load("approved") or {}).get("before")
+    if not before:
+        return None
+    pages, _ = writing_pages(p, source=before)
+    return {"pages": {str(pg["n"]): pg["text"] for pg in pages}, "notation": notation_text(conf.get("before") or conf, 100000)}
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", "", s or "")
+
+
+def keep_ids(old: dict, new: dict) -> None:
+    """After the notes were read again as a whole: an item that says the same as one read before takes its id, so
+    that what was built on it (the author's decisions, the statements, the proofs) is kept."""
+    for group, field in (("results", "statement"), ("definitions", "text"), ("others", "text")):
+        was = {_norm(x.get(field)): x["id"] for x in old.get(group) or []}
+        used = set()
+        rename = {}
+        for x in new.get(group) or []:
+            hit = was.get(_norm(x.get(field)))
+            if hit and hit not in used:
+                used.add(hit)
+                rename[x["id"]] = hit
+        taken = set(rename.values())
+        prefix = {"results": "R", "definitions": "D", "others": "O"}[group]
+        nxt = max([int(m.group(1)) for x in (old.get(group) or []) + (new.get(group) or [])
+                   for m in [re.match(prefix + r"(\d+)", x["id"])] if m] or [0]) + 1
+        for x in new.get(group) or []:
+            if x["id"] in rename:
+                continue
+            if x["id"] in taken or any(y["id"] == x["id"] for y in old.get(group) or []):
+                rename[x["id"]] = f"{prefix}{nxt}"
+                nxt += 1
+        for x in new.get(group) or []:
+            x["id"] = rename.get(x["id"], x["id"])
+        for x in new.get("results") or []:
+            x["depends"] = [rename.get(i, i) for i in x.get("depends") or []]
+
+
+def update_dossier(run: Run, old: dict, before: dict, basis: dict, pages: list[dict]) -> bool:
+    """The dossier brought up to date from the pages of the notes that changed, instead of being made again: one
+    reading gets the dossier as it stands, each changed page as it was and as it is, and the whole notes, and answers
+    only with what must change. Everything else stays word for word, with its id. False when no usable answer came
+    (the notes are then read again as a whole)."""
+    p = run.p
+    was, now = before.get("pages") or {}, basis["pages"]
+    changed = sorted({n for n in set(was) | set(now) if was.get(n) != now.get(n)}, key=int)
+    if not changed:
+        return False
+    system = prompts.UNDERSTAND_UPDATE.format(field=run.field)
+    out = 6000
+    room = _room("reason", system, out)
+    diff = "\n\n".join(f"%%% page {n}\nAS IT WAS:\n{was.get(n) or '(the page did not exist)'}\n\nAS IT IS NOW:\n"
+                         f"{now.get(n) or '(the page is gone)'}" for n in changed)
+    dos = dossier_text(old, max(3000, room // 3))
+    view = _view(pages, max(1500, room - len(dos) - len(diff) - 800))
+    user = (f"THE DOSSIER AS IT STANDS\n{dos}\n\nTHE PAGES OF THE NOTES THAT CHANGED\n{diff}\n\n"
+            f"THE NOTES AS THEY ARE NOW\n\n{view}")
+    run.progress(0, 1, f"bringing the understanding up to date with page{'s' if len(changed) > 1 else ''} {', '.join(changed)}")
+    res = run.ask("reason", system, user, max_out=out, effort="high", label="Bring the understanding up to date")
+    text = res.text or ""
+    if re.search(r"<unchanged\s*/?>", text) and not re.search(r"<(?:result|definition|other)\b", text):
+        old["basis"] = basis
+        p.save("dossier", old)
+        run.log(f"The change{'s' if len(changed) > 1 else ''} on page{'s' if len(changed) > 1 else ''} {', '.join(changed)} "
+                "do not change what the notes establish: the understanding is kept.")
+        return True
+    patch = parse_dossier(text)
+    removed = set(re.findall(r"\b[A-Za-z]\d+\w*\b", extract_tag(text, "removed")))
+    if not (patch["results"] or patch["definitions"] or patch["others"] or removed or extract_tag(text, "concerns").strip()
+            or any(patch.get(k) for k in ("problem", "setting", "storyline", "contribution", "notation_choice"))):
+        return False
+    d = {k: v for k, v in old.items()}
+    touched: list[str] = []
+    for group in ("results", "definitions", "others"):
+        cur = [dict(x) for x in old.get(group) or [] if x["id"] not in removed]
+        ids = {x["id"]: i for i, x in enumerate(cur)}
+        for x in patch[group]:
+            if x["id"] in ids:
+                if cur[ids[x["id"]]] != x:
+                    cur[ids[x["id"]]] = {**cur[ids[x["id"]]], **x}
+                    touched.append(x["id"])
+            else:
+                pages_of = x.get("pages") or ([x["page"]] if x.get("page") else [])
+                at = len(cur)
+                for i, y in enumerate(cur):               # after the last item from a page before its own
+                    yp = y.get("pages") or ([y["page"]] if y.get("page") else [])
+                    if yp and pages_of and min(yp) <= min(pages_of):
+                        at = i + 1
+                cur.insert(at, x)
+                ids = {y["id"]: i for i, y in enumerate(cur)}
+                touched.append(x["id"])
+        d[group] = cur
+    for k in ("problem", "setting", "storyline", "contribution", "notation_choice"):
+        if patch.get(k):
+            d[k] = patch[k]
+    if extract_tag(text, "concerns").strip():
+        d["concerns"] = patch["concerns"]
+    gone = [i for i in removed if any(x["id"] == i for g in ("results", "definitions", "others") for x in old.get(g) or [])]
+    for x in d.get("results") or []:
+        x["depends"] = [i for i in x.get("depends") or [] if i not in removed]
+    new_results = [x for x in d["results"] if x["id"] in touched]
+    if new_results and len(d["results"]) > 1:
+        before_checked = list(old.get("checked") or [])
+        check_results(run, d, pages, only={x["id"] for x in new_results})
+        d["checked"] = before_checked + [x for x in d.get("checked") or [] if x not in before_checked]
+    d["basis"] = basis
+    d["model"] = res.model
+    d["changed"] = [i for i in touched if any(x["id"] == i for x in d.get("results") or [])]
+    p.save("dossier", d)
+    run.progress(1, 1, "understanding brought up to date")
+    run.log(f"Understanding brought up to date from page{'s' if len(changed) > 1 else ''} {', '.join(changed)}: "
+            + (f"{', '.join(touched)} new or changed" if touched else "nothing new or changed")
+            + (f"; {', '.join(gone)} no longer in the notes" if gone else "") + ". Everything else is kept as it was.")
+    return True
 
 
 def _formulas_in_notes(statement: str, pages: list[dict], old: str = "") -> bool:
@@ -360,10 +511,11 @@ def check_rows(text: str) -> list[list[str]]:
             if re.match(r"\s*[A-Za-z]\d+\w*\s*\|\|", line)]
 
 
-def check_results(run: Run, d: dict, pages: list[dict]) -> None:
+def check_results(run: Run, d: dict, pages: list[dict], only: set[str] | None = None) -> None:
     """A second, independent reading of one question only: is each listed result really a result of the notes, or a
     step of an argument that the first reading cut out and made into a lemma? A step lifted out of its proof loses
-    the assumptions it depends on and becomes false; this is where that is prevented."""
+    the assumptions it depends on and becomes false; this is where that is prevented. only: the results new or
+    changed since the notes were understood (the others were checked then and are not touched)."""
     if len(d.get("results") or []) < 2:
         return
     system = prompts.UNDERSTAND_CHECK
@@ -373,7 +525,8 @@ def check_results(run: Run, d: dict, pages: list[dict]) -> None:
     user = f"RESULTS AS LISTED\n{listing}\n\nTRANSCRIPT OF THE NOTES\n\n{_view(pages, max(1500, room - len(listing) - 300))}"
     run.progress(0, 1, "checking that every result is one of yours, not a step of a proof")
     res = run.ask("reason", system, user, max_out=1500, effort="high", label="Check the results against the notes")
-    done = apply_result_check(d, check_rows(res.text), pages)
+    rows = [r for r in check_rows(res.text) if only is None or re.sub(r"[^A-Za-z0-9]", "", r[0]) in only]
+    done = apply_result_check(d, rows, pages)
     for line in done:
         run.log(line + ".")
 
@@ -526,19 +679,60 @@ def novelty_text(nv: dict, library: list[dict], room: int) -> str:
                "only, not read in full: a match here is a lead to weigh, not proof that the result is known)\n" + "\n".join(lines), room, "head")
 
 
+def _read_sig(p: Project) -> str:
+    """The papers read, as the assessment knows them: when one is added or read again, what is known may change."""
+    lib = p.load("library", []) or []
+    return hashlib.sha1(json.dumps(sorted((x.get("key", ""), x.get("verdict", ""),
+                                           json.dumps(x.get("notes"), sort_keys=True, default=str, ensure_ascii=False)[:4000])
+                                          for x in lib if x.get("read")), default=str).encode("utf-8")).hexdigest()[:16]
+
+
+def assess_keys(p: Project, d: dict, pages: list[dict]) -> dict[str, str]:
+    """For each result, a fingerprint of what its assessment is made from: its statement, the pages it comes from and
+    the papers read. A result whose fingerprint is unchanged keeps its assessment when the paper is brought up to date."""
+    text = {pg["n"]: pg["text"] for pg in pages}
+    src = _read_sig(p)
+    return {x["id"]: hashlib.sha1(json.dumps([x.get("statement"), x.get("kind"), x.get("role"),
+                                              [text.get(n, "") for n in x.get("pages") or []], src],
+                                             default=str).encode("utf-8")).hexdigest()[:16]
+            for x in d.get("results", [])}
+
+
 def stage_assess(run: Run) -> None:
     """Before anything is written: how much of a paper the notes actually support. A research article is the usual
     case, but notes can also repeat known results, leave proofs unfinished, or stop before the main claim. The
-    author is told which, with the evidence, and decides what kind of paper to write."""
+    author is told which, with the evidence, and decides what kind of paper to write. When the paper is brought up to
+    date after a change, only the results whose statement, pages or literature changed are assessed again."""
     p = run.p
     d = p.load("dossier") or {}
     pages, _ = writing_pages(p)
+    fresh = assess_keys(p, d, pages)
+    old = p.load("assessment") or {}
+    todo = list(fresh)
+    if old.get("results") and reuse_ok(p.state):
+        if old.get("keys"):
+            todo = [rid for rid, k in fresh.items() if old["keys"].get(rid) != k or rid not in old["results"]]
+        else:                                      # made by an earlier version: what the dossier marks as changed
+            todo = [rid for rid in fresh if rid not in old["results"] or rid in (d.get("changed") or [])]
+        if not todo:
+            if set(old["results"]) != set(fresh) or old.get("keys") != fresh:
+                old["results"] = {rid: v for rid, v in old["results"].items() if rid in fresh}
+                old["keys"] = fresh
+                p.save("assessment", old)
+            run.log("No result changed in a way that bears on the assessment: it is kept as it was.")
+            return
+    partial = len(todo) < len(fresh) and bool(old.get("results")) and reuse_ok(p.state)
     system = prompts.ASSESS.format(field=run.field)
-    out = min(8000, 900 + 260 * len(d.get("results", [])))
+    out = min(8000, 900 + 260 * (len(todo) if partial else len(d.get("results", []))))
     room = _room("reason", system, out)
     dos = dossier_text(d, max(1500, room // 4))
     try:
-        nv = novelty_search(run, d, pages)
+        nv = novelty_search(run, {**d, "results": [x for x in d.get("results", []) if x["id"] in todo]} if partial else d, pages)
+        if partial:
+            was = p.load("novelty") or {}
+            nv = {**was, **nv, "closest": {**{k: v for k, v in (was.get("closest") or {}).items() if k in fresh},
+                                           **(nv.get("closest") or {})}}
+            p.save("novelty", nv)
     except LLMError:
         raise
     except Exception as e:  # noqa: BLE001 - the extra search is a help; the assessment runs without it
@@ -546,17 +740,30 @@ def stage_assess(run: Run) -> None:
         nv = {}
     sources = fit(sources_text(p), max(800, room // 4), "head")
     extra = novelty_text(nv, p.load("library", []), max(600, room // 6))
-    user = (f"DOSSIER\n{dos}\n\nREADING NOTES ON THE RELATED PAPERS (with citation KEYs)\n{sources or '(none were read)'}\n\n"
+    only = ""
+    if partial:
+        stands = "\n".join(f"- {rid}: proof {v.get('proof')}; " + ("new" if v.get("known") == "new" else f"{v.get('known')} [{v.get('key')}]")
+                           for rid, v in old["results"].items() if rid in fresh and rid not in todo)
+        only = (f"ASSESS ONLY THESE RESULTS: {', '.join(todo)}. They are new or changed since the notes were assessed. "
+                f"The others were assessed then and their assessment stands:\n{stands}\nStill judge the notes as a whole "
+                "(main, unfinished, recommend) with all the results in view.\n\n")
+    user = (only + f"DOSSIER\n{dos}\n\nREADING NOTES ON THE RELATED PAPERS (with citation KEYs)\n{sources or '(none were read)'}\n\n"
             + (extra + "\n\n" if extra else "") +
-            f"TRANSCRIPT OF THE NOTES\n\n{_view(pages, max(1500, room - len(dos) - len(sources) - len(extra) - 500))}")
-    run.progress(0, 1, "assessing what the notes prove and what is already known")
+            f"TRANSCRIPT OF THE NOTES\n\n{_view(pages, max(1500, room - len(dos) - len(sources) - len(extra) - len(only) - 500))}")
+    run.progress(0, 1, "assessing what the notes prove and what is already known"
+                 + (f" (only {', '.join(todo)}: the rest is kept)" if partial else ""))
     keys = {x["key"] for x in p.load("library", [])}
     for attempt in range(2):
         res = run.ask("reason", system, user, max_out=out, effort="high", label="Assess the notes" + (" (retry)" if attempt else ""))
-        a = parse_assessment(res.text, d, keys)
+        a = parse_assessment(res.text, {**d, "results": [x for x in d.get("results", []) if x["id"] in todo]} if partial else d, keys)
         if a["recommend"] and a["main"] != "unknown" and not any(r["proof"] == "unknown" for r in a["results"].values()):
             break                                  # a complete answer; otherwise ask once more, then show what came back
+    if partial:
+        merged = {rid: (a["results"][rid] if rid in todo else old["results"][rid]) for rid in fresh}
+        a = {**old, **{k: v for k, v in a.items() if v not in ("", None, "unknown", [])}, "results": merged}
+        a["changed"] = todo
     a["model"] = res.model
+    a["keys"] = fresh
     p.save("assessment", a)
     run.progress(1, 1, "assessed")
     bad = [rid for rid, r in a["results"].items() if r["proof"] != "complete"]
@@ -703,7 +910,7 @@ def _from_statements(d: dict, S: dict) -> dict:
     d["definitions"] = [{"id": x["id"], "name": x.get("name") or x.get("words", ""), "text": x["statement"],
                          "page": (x.get("pages") or [0])[0]} for x in kept if x["kind"] == "definition"]
     d["others"] = [{"id": x["id"], "kind": x["kind"], "text": x["statement"], "page": (x.get("pages") or [0])[0],
-                    "relates": x.get("depends", [])} for x in kept if x["kind"] in ("example", "remark", "question")]
+                    "relates": x.get("depends", [])} for x in kept if x["kind"] in OTHER_KINDS]
     res = []
     for x in kept:
         if x["kind"] not in RESULT_KINDS + ("conjecture",):

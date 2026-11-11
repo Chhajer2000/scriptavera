@@ -35,9 +35,11 @@ STAGES: list[dict] = [
      "desc": "Refined search; the most relevant papers read one by one"},
     {"id": "transcribe", "phase": "read", "name": "Final transcription",
      "desc": "Every page re-read with confirmed notation and context"},
-    {"id": "figures", "phase": "read", "name": "Figures", "desc": "Each drawing is judged: a figure for the paper is redrawn; one that only explains your argument is not printed"},
+    {"id": "figures", "phase": "read", "name": "Figures",
+     "desc": "Every drawing in your notes copied as you drew it: found on its page and drawn again line for line. "
+             "Which ones the paper prints is decided later, with the whole paper in view"},
     {"id": "review", "phase": "read", "name": "Your review",
-     "desc": "You check the transcript and say whether each figure is what you meant", "gate": True},
+     "desc": "You check the transcript, and that each drawing was copied as you drew it", "gate": True},
     {"id": "understand", "phase": "write", "name": "Understanding the paper",
      "desc": "The whole of your notes read together: problem, results, how they depend on each other"},
     {"id": "assess", "phase": "write", "name": "Assessment of the notes",
@@ -46,14 +48,18 @@ STAGES: list[dict] = [
      "desc": "Every definition, lemma, proposition and theorem written as a statement for the paper; you check each one, "
              "answer the questions about unclear ones, and decide what kind of paper to write", "gate": True},
     {"id": "outline", "phase": "write", "name": "Your structure",
-     "desc": "The skeleton of the paper: sections, and every statement in the order it is presented, each before it is "
-             "used; the proofs are written at the next step", "gate": True},
+     "desc": "The skeleton of the paper: sections, every statement in the order it is presented (each before it is "
+             "used), and each of your drawings: printed as a figure where it belongs, or kept only to explain an argument",
+     "gate": True},
+    {"id": "figdesign", "phase": "write", "name": "Figures for the paper",
+     "desc": "Each figure the paper prints drawn again the way a research paper draws it, with the whole paper in view: "
+             "what it shows stays as you drew it, except a mistake the text proves, which is named for you to confirm"},
     {"id": "proofs", "phase": "write", "name": "Proofs",
      "desc": "Each proof written on its own from your argument, with the statements it uses, and checked against your "
              "argument; a proof that fails the check is written again"},
     {"id": "proofcheck", "phase": "write", "name": "Your review of the proofs",
-     "desc": "The paper with its proofs: you read what was added to your arguments and decide where a statement may be false",
-     "gate": True},
+     "desc": "The paper with its proofs: you read what was added to your arguments, decide where a statement may be false, "
+             "and confirm each figure drawn again for the paper", "gate": True},
     {"id": "draft", "phase": "write", "name": "First draft",
      "desc": "The text that joins the results, then the introduction and the abstract, written from the finished paper"},
     {"id": "draftcheck", "phase": "write", "name": "Your first draft",
@@ -72,7 +78,7 @@ STAGES: list[dict] = [
      "desc": "You choose the title from the suggestions, approve the introduction and choose the papers it cites", "gate": True},
 ]
 STAGE_IDS = [s["id"] for s in STAGES]
-LAYOUT = 8                      # bumped whenever the list of stages, or what a stage makes, changes
+LAYOUT = 9                      # bumped whenever the list of stages, or what a stage makes, changes
 
 # What each stage writes. Redoing a stage removes its own files and those of every later stage.
 ARTIFACTS: dict[str, list[str]] = {
@@ -88,7 +94,8 @@ ARTIFACTS: dict[str, list[str]] = {
     "understand": ["dossier"],
     "assess": ["assessment", "novelty"],
     "scope": ["scope", "statements"],
-    "outline": ["outline"],
+    "outline": ["outline", "figure_plan"],
+    "figdesign": ["figures_pro"],
     "proofs": ["proofs"],
     "proofcheck": ["proofs_ok"],
     "draft": ["plan", "body", "audit", "intro", "abstract_draft", "structure_partial", "connect_partial"],
@@ -146,6 +153,22 @@ def source_plan(state: dict, folder: Path) -> dict:
     kind = source_kind(state, folder)
     return {"kind": kind, "label": SOURCE_LABELS[kind], "hidden": hidden_stages(state, folder),
             "names": {"review": "Your figures"} if kind == "text_pdf" else {}}
+
+
+def reuse_ok(state: dict) -> bool:
+    """Whether a step may keep what it made before from exactly the same inputs: when the paper is being brought up
+    to date after a change (or pages were added). A step the author asked to redo is done anew: while it runs,
+    nothing of it is kept; the steps after it are brought up to date from what it made."""
+    cu = state.get("catchup") or {}
+    anew = cu.get("anew")
+    if anew and ((state.get("stages") or {}).get(anew) or {}).get("status") == "running":
+        return False
+    return bool(cu or state.get("incremental"))
+
+
+def is_stale(s: dict) -> bool:
+    """A step being brought up to date: marked so, or stopped (by the author or a failure) while it was."""
+    return s.get("status") == "stale" or (bool(s.get("was")) and s.get("status") not in ("done", "waiting"))
 
 
 _locks: dict[str, threading.RLock] = {}
@@ -239,6 +262,60 @@ class Project:
 
     # ---------------------------------------------------- invalidation
 
+    def update_from(self, stage: str, why: str = "") -> None:
+        """A change made at this step, or before it, after the paper went further: this step and every later one are
+        brought up to date instead of being done again. Nothing is deleted. Each step redoes only the parts whose
+        inputs changed (every part keeps a fingerprint of what it was made from) and keeps the rest with the author's
+        decisions on them; a stop the author had already passed is passed again by itself unless something there
+        needs them anew, and then it shows only what changed. A step not reached yet stays as it was."""
+        idx = STAGE_IDS.index(stage)
+        now = time.time()
+
+        def f(st):
+            stages = st.setdefault("stages", {})
+            reached = next((sid for sid in STAGE_IDS if stages.get(sid, {}).get("status") != "done"), None)
+            for sid in STAGE_IDS[idx:]:
+                s = stages.setdefault(sid, {"status": "pending"})
+                status = s.get("status")
+                if status in (None, "pending") and not s.get("was"):
+                    continue
+                was = (s.get("was") or "done") if is_stale(s) else ("waiting" if status == "waiting" else
+                                                                    "done" if status == "done" else "pending")
+                stages[sid] = {"status": "stale", "was": was, "since": now}
+            cu = st.get("catchup") or {}
+            first = min([i for i in (STAGE_IDS.index(cu["from"]) if cu.get("from") in STAGE_IDS else None, idx)
+                         if i is not None])
+            st["catchup"] = {"from": STAGE_IDS[first], "reached": cu.get("reached") or reached,
+                             "why": ((cu.get("why") or []) + ([why] if why else []))[-8:], "at": now}
+            st["error"] = None
+        self.update_state(f)
+
+    def redo_from(self, stage: str, why: str = "") -> None:
+        """The author asked for this step to be done again: it is done anew, with nothing of its earlier result kept,
+        and every later step is brought up to date from the new result (update_from): only what the new result
+        changes is done again; the rest stays, with the author's decisions on it."""
+        idx = STAGE_IDS.index(stage)
+        if not any((self.state["stages"].get(sid) or {}).get("status") not in (None, "pending")
+                   for sid in STAGE_IDS[idx + 1:]):
+            self.reset_from(stage)                 # nothing after it was started: there is nothing to bring up to date
+            return
+        self.remove(*ARTIFACTS.get(stage, []))
+        self.update_from(stage, why or "you asked for the step to be done again")
+
+        gate = bool(STAGES[idx].get("gate"))
+
+        def f(st):
+            st["catchup"]["anew"] = stage
+            # a stop done again is shown to the author again; a step done again runs as new
+            st["stages"][stage] = {"status": "pending", "reset": time.time(), **({"was": "waiting"} if gate else {})}
+        self.update_state(f)
+        if stage == "reading":
+            lib = self.load("library")
+            if lib:
+                for p in lib:
+                    p["read"], p["notes"], p["fulltext"], p["verdict"] = False, None, "", ""
+                self.save("library", lib)
+
     def reset_from(self, stage: str) -> None:
         """Forget this stage and everything after it."""
         idx = STAGE_IDS.index(stage)
@@ -252,6 +329,8 @@ class Project:
                 st["stages"][sid] = {"status": "pending", "reset": now}     # the calls of the earlier run stay in the log
             st["error"] = None
             st.pop("paper_title", None)
+            st.pop("catchup", None)               # done again from here: nothing is brought up to date, all is new
+            st.pop("incremental", None)
         self.update_state(f)
         if idx <= STAGE_IDS.index("reading"):
             lib = self.load("library")
@@ -329,8 +408,15 @@ def migrate(p: Project) -> None:
                     s["stages"][sid] = {"status": "done", "finished": time.time(), "migrated": True}
             s["layout"] = LAYOUT
         st = p.update_state(f)
+        if before < 9:
+            _figures_v9(p)
         first = next((i for i, sid in enumerate(STAGE_IDS) if st["stages"][sid].get("status") != "done"), None)
-        if first is not None and first + 1 < len(STAGE_IDS) \
+        if first is not None and before < 9 and STAGE_IDS[first] == "figdesign" \
+                and st["stages"]["figdesign"].get("status") == "pending":
+            # the one new step, after the structure: everything made is kept, the figures for print are drawn, and
+            # the steps after it are brought up to date (nothing in them changes unless a figure does)
+            p.update_from("figdesign", "a new step: the figures the paper prints are drawn for print")
+        elif first is not None and first + 1 < len(STAGE_IDS) \
                 and any(st["stages"][sid].get("status") not in (None, "pending") for sid in STAGE_IDS[first + 1:]):
             out = p.dir / "out"
             if out.exists() and any(out.iterdir()):       # the paper built by the earlier version is kept aside
@@ -341,16 +427,48 @@ def migrate(p: Project) -> None:
                 except OSError:
                     pass
             p.reset_from(STAGE_IDS[first + 1])
-        st = p.state
-        if before < 6 and st["stages"].get("review", {}).get("status") != "done" \
-                and any(not f.get("judged") for f in (p.load("figures") or {}).get("items") or []):
-            # figures made before each drawing was judged (for the paper, or only an explanation): while the transcript
-            # is not yet approved, the Figures step is done again from the start, and its old drawings are discarded
-            p.reset_from("figures")
-            shutil.rmtree(p.dir / "figures", ignore_errors=True)
+        # (before version 6 every drawing was copied, as it is again now: nothing of those is done again)
         if before < 7:
             _wake_waits(p)
             _repair_readings(p)
+
+
+def _figures_v9(p: Project) -> None:
+    """Figures saved before version 9 mixed two answers in one: whether the copy of a drawing was right, and whether
+    the paper prints it. They are now two: the copy is checked in step 9, and what the paper prints is decided at
+    the structure. A drawing the author kept out of the paper as an explanation keeps that decision; one the author
+    chose to print keeps it too; nothing is redrawn."""
+    data = p.load("figures") or {}
+    items = data.get("items") or []
+    if not items:
+        return
+    plan = p.load("figure_plan") or {"items": {}}
+    for f in items:
+        choice = f.get("choice") or ""
+        judged = f.get("judged") or {}
+        if choice == "explain":
+            f["choice"] = ("tikz" if f.get("tikz_ok") else "orig") if f.get("drawn") else ""
+            plan["items"].setdefault(f["id"], {"use": "explanation", "sure": True, "why": judged.get("why", ""),
+                                               "illustrates": judged.get("illustrates", ""), "needed": "", "with": "",
+                                               "in_proof": False, "caption": f.get("caption", ""), "auto": bool(f.get("auto")),
+                                               "by": judged.get("by", ""), "legacy": True})
+        elif choice in ("tikz", "orig"):
+            plan["items"].setdefault(f["id"], {"use": "paper", "sure": True, "why": judged.get("why", ""), "illustrates": "",
+                                               "needed": judged.get("needed", ""), "with": "", "in_proof": False,
+                                               "caption": f.get("caption", ""), "auto": False, "by": "", "legacy": True})
+    p.save("figures", data)
+    stages = p.state.get("stages", {})
+    if plan["items"] and stages.get("outline", {}).get("status") in ("done", "waiting"):
+        p.save("figure_plan", plan)
+    if stages.get("review", {}).get("status") != "done" and stages.get("figures", {}).get("status") == "done" \
+            and any(not f.get("drawn") and f.get("choice") != "none" and not f.get("dup_of") for f in items):
+        # the transcript is not approved yet: the drawings that were not copied (judged then to need no copy) are
+        # copied now, so that step 9 can show every drawing as it was drawn
+        def reopen(st):
+            st["stages"]["figures"] = {"status": "pending", "reset": time.time()}
+            if st["stages"].get("review", {}).get("status") == "waiting":
+                st["stages"]["review"] = {"status": "pending", "reset": time.time()}
+        p.update_state(reopen)
 
 
 def _wake_waits(p: Project) -> None:

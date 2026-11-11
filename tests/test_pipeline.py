@@ -65,7 +65,7 @@ assert drawn == bool(paperlib.find_engine()) and pipeline.figure_file(p, "f1", "
 try:
     pipeline.submit_review(p, {}); raise SystemExit("the gate must ask about the figure")
 except ValueError as e:
-    assert "each figure" in str(e)
+    assert "each drawing" in str(e), e
 rec = pipeline.redraw_figure(p, "f1", "The rectangles should start at 1.")
 assert rec["redrawn"] == 1 and rec["choice"] == ""
 pipeline.set_figure(p, "f1", caption="Rectangles under the graph of a decreasing function.")
@@ -289,7 +289,7 @@ before = len(p.calls(100000))
 new = ingest.ingest(page_images(1), p.dir / "pages", start=max(pg["n"] for pg in p.state["pages"]))
 assert pipeline.add_pages(p, new)["pages"] == [7] and p.state["incremental"]["rounds"][-1]["pages"] == [7]
 st = p.state["stages"]
-assert st["review"]["status"] == "pending" and st["transcribe"]["status"] == "pending" and st["assemble"]["status"] == "pending"
+assert st["review"]["status"] == "stale" and st["transcribe"]["status"] == "pending" and st["assemble"]["status"] == "stale", st
 assert p.load("proof_cache") and p.load("statements_memory") and p.load("verify_cache") and "1" in (p.load("transcript") or {}).get("pages", {})
 pipeline.start(p); wait(p, "review")
 read = [c.get("label") or "" for c in p.calls(100000)[before:] if c.get("stage") in ("survey", "transcribe")]
@@ -299,7 +299,8 @@ pipeline.start(p); wait(p, "scope")
 if p.state["stages"]["scope"]["status"] == "waiting":
     writing.submit_scope(p, {"kind": "article", "results": {"R4": "keep", "R2": "credit"}})
 pipeline.start(p); wait(p, "decide")
-kept = [c for c in p.calls(100000)[before:] if c.get("stage") == "proofs"]
+kept = [c for c in p.calls(100000)[before:] if c.get("stage") == "proofs"
+        and not (c.get("label") or "").startswith("Find the papers your notes cite")]      # the new page may cite more
 assert not kept, "unchanged statements keep their proofs: no proof is written again"
 assert {x["id"]: x["treatment"] for x in p.load("statements")["items"]}["R2"] == "credit", "the author's decisions are kept"
 log = (p.dir / "calls.jsonl").read_text(encoding="utf-8")

@@ -26,19 +26,23 @@ import threading
 import time
 
 from . import audit as fidelity
-from . import paper as paperlib, prompts
+from . import config, literature, paper as paperlib, prompts
 from .llm import LLMError
-from .pipeline import (Run, _room, _side_by_side, emit, find_figures, notation_text, passing, strip_explanations,
+from .pipeline import (Run, _room, _side_by_side, emit, find_figures, notation_for, notation_text, passing, strip_explanations,
                        writing_pages)
-from .store import Project
+from .store import Project, reuse_ok
 from .texutil import check_balance, clean_fragment, leaks
-from .util import extract_tag, fit, parse_lines
+from .util import ascii_fold, extract_tag, fit, parse_lines
 from .writing import (KINDS, KIND_TEXT, default_kind, _none, _view, citable, cited_keys, dossier_text, drop_unsourced, fields,
                       fix_keys, organisation, page_list, sources_text)
 
-ITEM_KINDS = ("definition", "lemma", "proposition", "theorem", "corollary", "conjecture", "example", "remark", "question")
+ITEM_KINDS = ("definition", "lemma", "proposition", "theorem", "corollary", "conjecture", "example", "remark", "question",
+              "construction", "method", "algorithm")
 PROVED = ("lemma", "proposition", "theorem", "corollary")          # a proof is written for these
-EXPLAINED = ("example", "remark")                                   # a short text is written after these
+NOT_RESULTS = ("definition", "example", "remark", "question", "construction", "method", "algorithm")
+STAGES_AFTER_STRUCTURE = ("figdesign", "proofs", "proofcheck", "draft", "draftcheck", "simplify", "verify", "referee", "decide",
+                          "assemble", "finish")
+EXPLAINED = ("example", "remark", "construction", "method", "algorithm")   # a text is written after these
 TREATMENTS = ("keep", "credit", "conjecture", "omit")
 _lock = threading.Lock()
 
@@ -52,7 +56,7 @@ def label_of(x: dict) -> str:
 
 
 def kind_name(kind: str) -> str:
-    return paperlib.THEOREM_ENVS.get(kind, kind.capitalize())
+    return paperlib.THEOREM_ENVS.get("algorithmthm" if kind == "algorithm" else kind, kind.capitalize())
 
 
 # ------------------------------------------------------------------ 1. statements
@@ -168,36 +172,68 @@ def prepare_statements(run: Run) -> None:
     if not items:
         raise ValueError("No definition or result was found in your notes, so there is nothing to state.")
     pages, _ = writing_pages(p)
-    system = prompts.STATEMENTS.format(field=run.field)
-    out = min(12000, 900 + 380 * len(items))
-    room = _room("reason", system, out)
-    dos = dossier_text(d, max(2500, int(room * 0.35)))
-    assess = "\n".join(f"- {x['id']}: the notes' proof is {x.get('proof', 'complete')}"
-                       + (f" ({x['where']})" if x.get("where") else "")
-                       + (f"; already known from [{x['key']}]" if x.get("known", "new") != "new" else "; not found in the papers read")
-                       for x in items if x["kind"] not in ("definition", "example", "remark", "question"))
-    notation = notation_text(p.load("confirmed", {}), max(800, int(room * 0.1)))
-    user = (f"DOSSIER\n{dos}\n\nASSESSMENT OF THE RESULTS\n{assess or '(none)'}\n\nCONFIRMED NOTATION\n{notation}\n\n"
-            f"THE NOTES\n\n{_view(pages, max(2000, room - len(dos) - len(assess) - len(notation) - 600))}")
-    run.progress(0, 1, "writing every statement as it will stand in the paper")
+    update = bool(S.get("items")) and reuse_ok(p.state)
+    mem = p.load("statements_memory", {}) or {}
+    # brought up to date after a change: a statement whose source in the notes is unchanged keeps what was written
+    # and decided for it (recall); only the new and changed ones are written
+    todo = [x for x in items if not update or _sig(x["id"], x["original"]) not in mem]
     got: dict[str, dict] = {}
-    model = ""
-    for attempt in range(2):
-        res = run.ask("reason", system, user, max_out=out, effort="high",
-                      label="Write the statements" + (" (retry)" if attempt else ""))
-        got, model = parse_items(res.text), res.model
-        if len([x for x in items if x["id"] in got]) >= max(1, len(items) // 2):
-            break
+    model = S.get("model", "") if update else ""
+    if todo:
+        system = prompts.STATEMENTS.format(field=run.field)
+        out = min(12000, 900 + 380 * len(todo))
+        room = _room("reason", system, out)
+        dos = dossier_text(d, max(2500, int(room * 0.35)))
+        assess = "\n".join(f"- {x['id']}: the notes' proof is {x.get('proof', 'complete')}"
+                           + (f" ({x['where']})" if x.get("where") else "")
+                           + (f"; already known from [{x['key']}]" if x.get("known", "new") != "new" else "; not found in the papers read")
+                           for x in todo if x["kind"] not in NOT_RESULTS)
+        notation = notation_text(p.load("confirmed", {}), max(800, int(room * 0.1)))
+        only = ""
+        if update and len(todo) < len(items):
+            have = {y["id"]: y for y in S.get("items", [])}
+            done = "\n".join(f"- {x['id']} ({have[x['id']]['kind']}): {fit(have[x['id']]['statement'], 400, 'head')}"
+                             for x in items if x not in todo and x["id"] in have)
+            only = (f"WRITE ONLY THESE ITEMS: {', '.join(x['id'] for x in todo)}. They are new or changed in the notes. "
+                    "The others are written already, and the author confirmed them; for consistency of notation and "
+                    f"wording they are:\n{done}\n\n")
+        user = (only + f"DOSSIER\n{dos}\n\nASSESSMENT OF THE RESULTS\n{assess or '(none)'}\n\nCONFIRMED NOTATION\n{notation}\n\n"
+                f"THE NOTES\n\n{_view(pages, max(2000, room - len(dos) - len(assess) - len(notation) - len(only) - 600))}")
+        run.progress(0, 1, "writing every statement as it will stand in the paper" if not only else
+                     f"writing the statements of {', '.join(x['id'] for x in todo)} (the others are kept)")
+        for attempt in range(2):
+            res = run.ask("reason", system, user, max_out=out, effort="high",
+                          label="Write the statements" + (" (retry)" if attempt else ""))
+            got, model = parse_items(res.text), res.model
+            if len([x for x in todo if x["id"] in got]) >= max(1, len(todo) // 2):
+                break
     merged = [_merge_statement(x, got.get(x["id"])) for x in items]
     kept = recall(p, merged)
-    if kept:
+    if kept and not update:
         run.log(f"{kept} statement{'s' if kept != 1 else ''} unchanged in your notes keep{'' if kept != 1 else 's'} what you decided before.")
-    missing = [x["id"] for x in items if x["id"] not in got]
+    missing = [x["id"] for x in todo if x["id"] not in got]
     if missing:
         run.log(f"No statement came back for {', '.join(missing)}: the wording of the notes is shown for "
                 f"{'it' if len(missing) == 1 else 'them'}; check and edit it.", "warn")
+    before = {y["id"]: y for y in S.get("items", [])} if update else {}
+    removed = []
+    if update:
+        new_ids = {x["id"] for x in todo}
+        for x in merged:
+            was = before.get(x["id"]) or {}
+            if x["id"] in new_ids:
+                x["fresh"] = "new" if not was else True
+            elif was.get("fresh"):
+                x["fresh"] = was["fresh"]                       # not confirmed yet since an earlier change
+            elif was and any(was.get(k) != x.get(k) for k in ("proof", "known", "key")):
+                x["fresh"] = "assessed"                         # the same statement, judged again (the literature changed)
+        removed = sorted(set(S.get("removed") or []) | ({i for i in before} - {x["id"] for x in merged}))
+        run.log(("Statements brought up to date: " + ", ".join(x["id"] for x in todo) + " written"
+                 if todo else "Statements brought up to date: nothing in them changed") +
+                (f"; {', '.join(removed)} no longer in your notes" if removed else "") + ". The others are kept as you confirmed them.")
     S = {"sig": sig, "items": merged, "model": model, "unused": unused_pages(merged, pages),
-         "kind": default_kind(a, {x["id"] for x in merged if x.get("role") == "main"}), "note": ""}
+         "kind": S.get("kind") if update and S.get("kind") else default_kind(a, {x["id"] for x in merged if x.get("role") == "main"}),
+         "note": S.get("note", "") if update else "", **({"removed": removed} if removed else {})}
     p.save("statements", S)
     remember(p, S)
     asks = sum(1 for x in merged if not x["settled"])
@@ -273,6 +309,46 @@ def open_questions(p: Project) -> list[str]:
             if not x.get("settled") and x.get("treatment") != "omit"]
 
 
+# What changed at each of the author's stops when the paper was brought up to date after a change: every part a step
+# made anew (or changed) carries "fresh" until the author confirms that stop again. [] means nothing needs the author.
+
+def statements_changed(p: Project) -> list[str]:
+    S = p.load("statements") or {}
+    out = [f"{x['id']} " + {"new": "is new", "assessed": "was assessed again"}.get(x.get("fresh"), "changed")
+           for x in S.get("items", []) if x.get("fresh") and x.get("treatment") != "omit"]
+    out += [f"{iid} is no longer in your notes" for iid in S.get("removed", [])]
+    out += [f"a question about {iid}" for iid in open_questions(p) if not any(o.startswith(iid + " ") for o in out)]
+    return out
+
+
+def structure_changed(p: Project) -> list[str]:
+    O = p.load("outline") or {}
+    out = list(O.get("changes") or [])
+    plan = (p.load("figure_plan") or {}).get("items", {})
+    out += [f"the drawing {fid} {'is printed' if v.get('use') == 'paper' else 'only explains an argument'} (decided now)"
+            for fid, v in plan.items() if v.get("fresh")]
+    return out
+
+
+def proofs_changed(p: Project) -> list[str]:
+    kept = {x["id"] for x in kept_items(p)}
+    out = [f"the proof of {k} was written again" for k, v in ((p.load("proofs") or {}).get("items") or {}).items()
+           if v.get("fresh") and k in kept]
+    out += [f"the figure {fid} was drawn again for print" for fid, v in (p.load("figures_pro") or {}).items()
+            if isinstance(v, dict) and v.get("fresh")]
+    out += [f"{k} needs your decision" for k in open_proof_problems(p) if not any(o.endswith(f" {k} was written again") for o in out)]
+    return out
+
+
+def draft_changed(p: Project) -> list[str]:
+    out = []
+    if (p.load("intro") or {}).get("fresh"):
+        out.append("the introduction was brought up to date")
+    if (p.load("abstract_draft") or {}).get("fresh"):
+        out.append("the abstract was brought up to date")
+    return out
+
+
 def submit_statements(p: Project, data: dict) -> dict:
     """Gate: the author's statements and the kind of paper. 'not_ready' stops here on purpose."""
     S = p.load("statements") or {}
@@ -290,6 +366,10 @@ def submit_statements(p: Project, data: dict) -> dict:
             if x["id"] in kept and used and x["kind"] not in ("example", "remark", "question"):
                 raise ValueError(f"{x['id']} uses {', '.join(used)}. Leave {x['id']} out as well, or keep {', '.join(used)}.")
     S["kind"], S["note"] = kind, str(data.get("note") or "").strip()[:1500]
+    if kind != "not_ready":                      # confirmed: nothing here is new any more
+        for x in S["items"]:
+            x.pop("fresh", None)
+        S.pop("removed", None)
     p.save("statements", S)
     # the plan in the form the later steps read it
     scope = {"kind": kind, "note": S["note"], "at": time.time(),
@@ -318,48 +398,76 @@ def _clean_title(t: str) -> str:
     return "" if t.lower() in ("introduction", "conclusion", "conclusions", "references", "abstract") else t
 
 
-def order_items(raw: list[dict], items: list[dict]) -> list[dict]:
-    """The sections as planned, made safe: every statement in exactly one section, and every statement after all
-    the statements it uses (a statement needed earlier is brought forward, into the section that needs it)."""
+def _needs(x: dict, by_id: dict) -> list[str]:
+    """The statements x uses that must come before it (an example, a remark or a question it mentions need not)."""
+    return [d for d in x.get("depends", []) if d in by_id and by_id[d]["kind"] not in ("example", "remark", "question")]
+
+
+def check_plan(raw: list[dict], items: list[dict]) -> tuple[list[dict], list[str]]:
+    """The sections of a planned structure, and what is wrong with the plan. The plan is the model's: the program
+    adds nothing to it and moves nothing in it. A plan that leaves a statement out, names one twice or one that is
+    not in the paper, or puts a statement before one it uses, is not used: the model is asked again, with what is
+    wrong (see plan_structure)."""
     by_id = {x["id"]: x for x in items}
-    secs = []
-    seen: set[str] = set()
-    for r in raw:
-        title = _clean_title(r.get("title", ""))
+    secs, problems, seen = [], [], {}
+    for k, r in enumerate(raw, 1):
+        raw_title = (r.get("title") or "").strip()
+        title = _clean_title(raw_title)
+        ids = re.findall(r"\b[A-Za-z]+\d+[a-z]?\b", r.get("items", ""))
         if not title:
-            continue
-        ids = [i for i in re.findall(r"\b[A-Za-z]+\d+[a-z]?\b", r.get("items", "")) if i in by_id and i not in seen]
-        seen.update(ids)
-        secs.append({"title": title, "purpose": re.sub(r"\s+", " ", r.get("purpose", "")).strip(), "items": ids})
-    if not secs:
-        secs = [{"title": "Main results", "purpose": "", "items": []}]
-    for x in items:                                  # a statement the plan forgot
-        if x["id"] in seen:
-            continue
-        users = [s for s in secs if any(x["id"] in by_id[i].get("depends", []) for i in s["items"])]
-        target = secs[0] if x.get("placement") == "preliminaries" else (users[0] if users else secs[-1])
-        target["items"].append(x["id"])
-        seen.add(x["id"])
-    placed: list[tuple[int, str]] = []
-    done: set[str] = set()
+            problems.append(f"Section {k} has no title" + (f" (\"{raw_title}\" is not a section of this plan: the "
+                            "introduction is written separately, and there is no conclusion)" if raw_title else "") + ".")
+        unknown = [i for i in ids if i not in by_id]
+        if unknown:
+            problems.append(f"Section {k} lists {', '.join(unknown)}, which {'is' if len(unknown) == 1 else 'are'} not "
+                            "among the statements.")
+        ids = [i for i in ids if i in by_id]
+        for i in ids:
+            if i in seen:
+                problems.append(f"{i} is listed twice (in sections {seen[i]} and {k}).")
+            seen.setdefault(i, k)
+        if not ids:
+            problems.append(f"Section {k} lists no statement.")
+        secs.append({"title": title, "purpose": re.sub(r"\s+", " ", r.get("purpose", "")).strip(), "items": list(dict.fromkeys(ids))})
+    if not raw:
+        problems.append("The answer contains no <section> block.")
+    missing = [x["id"] for x in items if x["id"] not in seen]
+    if missing:
+        problems.append(f"These statements are in no section: {', '.join(missing)}. Every statement must be in exactly one section.")
+    order = [i for s in secs for i in s["items"]]
+    pos = {}
+    for n, i in enumerate(order):
+        pos.setdefault(i, n)
+    for i in order:
+        late = [d for d in _needs(by_id[i], by_id) if d in pos and pos[d] > pos[i]]
+        if late:
+            problems.append(f"{i} comes before {', '.join(late)}, which it uses.")
+    return secs, problems
 
-    def place(iid: str, si: int, visiting: set) -> None:
-        if iid in done or iid in visiting:
-            return
-        visiting.add(iid)
-        for dep in by_id[iid].get("depends", []):
-            if dep in by_id and by_id[dep]["kind"] not in ("example", "remark", "question"):
-                place(dep, si, visiting)
-        done.add(iid)
-        placed.append((si, iid))
 
-    for si, s in enumerate(secs):
-        for iid in s["items"]:
-            place(iid, si, set())
-    out = [{"title": s["title"], "purpose": s["purpose"], "items": []} for s in secs]
-    for si, iid in placed:
-        out[si]["items"].append(iid)
-    return [s for s in out if s["items"]]
+PLAN_TRIES = 3
+
+
+def plan_structure(run: Run, items: list[dict], extra: str = "", label: str = "Plan the structure") -> tuple[list[dict], list[dict], str]:
+    """The structure, as a model plans it: when its plan is incomplete or out of order, it is asked again with what is
+    wrong, up to PLAN_TRIES times. Returns (sections, statements suggested to be left out, model). Raises LLMError when
+    no plan is complete, so the step is tried again later; nothing is filled in by the program."""
+    request = f"FIELD\n{run.field}\n\n" + _outline_request(items, extra)
+    out = max(3000, 600 + 80 * len(items))
+    user, problems = request, []
+    for attempt in range(PLAN_TRIES):
+        res = run.ask("reason", prompts.OUTLINE, user, max_out=out, effort="high",
+                      label=label if not attempt else f"{label} (again: the plan was incomplete)")
+        secs, problems = check_plan(fields(res.text, "section", ("title", "items", "purpose")), items)
+        if not problems:
+            return secs, leave_out(res.text, items), res.model
+        run.log(f"The planned structure was not complete ({'; '.join(problems[:3])}{' …' if len(problems) > 3 else ''}); "
+                "asked again.", "warn")
+        user = (request + "\n\nYOUR PREVIOUS ANSWER\n" + fit(res.text, 6000, "head")
+                + "\n\nWHAT IS WRONG WITH IT (give the whole plan again, every section, with every statement in exactly one)\n"
+                + "\n".join(f"- {q}" for q in problems))
+    raise LLMError(f"The structure could not be planned: after {PLAN_TRIES} attempts the plan was still not complete "
+                   f"({'; '.join(problems[:4])}). It is tried again shortly.", kind="transient", retry_at=time.time() + 120)
 
 
 def numbers(sections: list[dict], items: list[dict]) -> dict[str, str]:
@@ -380,21 +488,102 @@ def _outline_request(items: list[dict], extra: str = "") -> str:
 
 
 def prepare_outline(run: Run) -> None:
+    """Before the author's structure step: the structure planned, and each drawing decided with it. When the paper is
+    brought up to date after a change, the structure the author confirmed is kept: a statement gone is taken out, a
+    new one is put after what it uses (update_structure), and only what changed is shown to the author."""
+    from . import drawings
     p = run.p
     items = kept_items(p)
     if not items:
         raise ValueError("Every statement was left out, so there is no paper to structure.")
     sig = _sig([(x["id"], x["kind"], x["statement"], x.get("depends"), x.get("placement"), x.get("treatment")) for x in items])
     O = p.load("outline") or {}
-    if O.get("sig") == sig and O.get("sections"):
-        return
-    run.progress(0, 1, "putting the statements in order")
-    res = run.ask("reason", prompts.OUTLINE, f"FIELD\n{run.field}\n\n" + _outline_request(items), max_out=1500, effort="high",
-                  label="Plan the structure")
-    secs = order_items(fields(res.text, "section", ("title", "items", "purpose")), items)
-    p.save("outline", {"sig": sig, "sections": secs, "model": res.model, "leave_out": leave_out(res.text, items)})
+    if not (O.get("sig") == sig and O.get("sections")):
+        if O.get("sections") and reuse_ok(p.state):
+            run.progress(0, 1, "keeping your structure, with the statements that changed")
+            secs, changes = update_structure(run, items, O["sections"])
+            O.update(sig=sig, sections=secs, changes=list(dict.fromkeys((O.get("changes") or []) + changes)))
+            O["leave_out"] = [o for o in O.get("leave_out") or [] if any(x["id"] == o["id"] for x in items)]
+            p.save("outline", O)
+            run.log("Your structure is kept" + (": " + "; ".join(changes) + "." if changes else ", unchanged."))
+        else:
+            run.progress(0, 1, "putting the statements in order")
+            secs, out, model = plan_structure(run, items)
+            p.save("outline", {"sig": sig, "sections": secs, "model": model, "leave_out": out})
+            run.log("Structure: " + "; ".join(f"{i}. {s['title']}" for i, s in enumerate(secs, 2)) + ".")
+    seq, secs, nums = ordered(p)
+    drawings.plan(run, seq, secs, nums)
     run.progress(1, 1, "structure planned")
-    run.log("Structure: " + "; ".join(f"{i}. {s['title']}" for i, s in enumerate(secs, 2)) + ".")
+
+
+def update_structure(run: Run, items: list[dict], sections: list[dict]) -> tuple[list[dict], list[str]]:
+    """The author's structure brought up to date with changed statements, without planning it again: a statement
+    that is gone is taken out (and a section left empty with it); a new statement is put right after the last
+    statement it uses, or, when it uses none, after the statement of the nearest page before its own; a statement
+    now used by one that comes before it is moved right before that one. Only when that cannot give an order in
+    which every statement comes after what it uses is the model asked to plan the structure again, with the
+    author's structure to keep. Returns (sections, what changed, in words)."""
+    by_id = {x["id"]: x for x in items}
+    secs = [{**s, "items": [i for i in s["items"] if i in by_id]} for s in sections]
+    changes = [f"{i} is no longer in the paper" for s in sections for i in s["items"] if i not in by_id]
+    gone = [s["title"] for s in secs if not s["items"]]
+    secs = [s for s in secs if s["items"]]
+    changes += [f"the section \"{t}\" had no statement left and was taken out" for t in gone]
+    order = lambda: [i for s in secs for i in s["items"]]
+
+    def put(iid: str, after: str | None, before: str | None = None) -> None:
+        for s in secs:
+            if after and after in s["items"]:
+                s["items"].insert(s["items"].index(after) + 1, iid)
+                return
+            if before and before in s["items"]:
+                s["items"].insert(s["items"].index(before), iid)
+                return
+        if not secs:
+            secs.append({"title": "Results", "purpose": "", "items": [iid]})
+            return
+        (secs[0] if by_id[iid]["kind"] == "definition" else secs[-1])["items"].append(iid)
+
+    placed = set(order())
+    for x in items:                              # in the order of the notes, so what a statement uses comes first
+        if x["id"] in placed:
+            continue
+        deps = [d for d in _needs(x, by_id) if d in placed]
+        cur = order()
+        users = [y for y in cur if x["id"] in _needs(by_id[y], by_id)]
+        after = max(deps, key=cur.index) if deps else None
+        if not after and not users:
+            page = min(x.get("pages") or [10 ** 6])
+            near = [y for y in cur if min(by_id[y].get("pages") or [10 ** 6]) <= page]
+            after = near[-1] if near else None
+        first_user = min(users, key=cur.index) if users else None
+        if first_user and (after is None or cur.index(after) < cur.index(first_user)):
+            put(x["id"], None, before=first_user)
+        else:
+            put(x["id"], after)
+        placed.add(x["id"])
+        where = next(si for si, s in enumerate(secs) if x["id"] in s["items"])
+        changes.append(f"{x['id']} is new, put in section {where + 2}")
+    for _ in range(len(items)):                  # a statement now used before it is stated moves up, right before its user
+        _, problems = check_plan([{"title": s["title"], "items": ", ".join(s["items"]), "purpose": s.get("purpose", "")} for s in secs], items)
+        late = [re.findall(r"\b[A-Za-z]+\d+[a-z]?\b", q) for q in problems if "comes before" in q]
+        if not late:
+            break
+        user, used = late[0][0], late[0][1]
+        for s in secs:
+            if used in s["items"]:
+                s["items"].remove(used)
+        put(used, None, before=user)
+        changes.append(f"{used} moved before {user}, which now uses it")
+    secs = [s for s in secs if s["items"]]
+    _, problems = check_plan([{"title": s["title"], "items": ", ".join(s["items"]), "purpose": s.get("purpose", "")} for s in secs], items)
+    if problems:                                 # no order works by moving single statements: the model plans it again
+        now = "\n".join(f"{i}. {s['title']}: {', '.join(s['items'])}" for i, s in enumerate(secs, 2))
+        secs, _, _ = plan_structure(run, items, f"\n\nTHE AUTHOR'S STRUCTURE (keep its sections, their titles and its order "
+                                    f"as far as you can; change only what the order of use requires)\n{now}",
+                                    label="Plan the structure with your structure kept")
+        changes.append("the order had to be planned again, keeping your sections as far as possible")
+    return secs, changes
 
 
 def leave_out(text: str, items: list[dict]) -> list[dict]:
@@ -444,11 +633,15 @@ def replan_outline(p: Project, instruction: str) -> dict:
     now = "\n".join(f"{i}. {s['title']}: {', '.join(s['items'])}" for i, s in enumerate(O.get("sections", []), 2))
     run = Run(p)
     run.stage = "outline"
-    res = run.ask("reason", prompts.OUTLINE, f"FIELD\n{run.field}\n\n" + _outline_request(
-        items, f"\n\nTHE CURRENT STRUCTURE\n{now}\n\nTHE AUTHOR'S INSTRUCTION (follow it)\n{instruction}"),
-        max_out=1500, effort="high", label="Plan the structure with your instruction")
-    secs = order_items(fields(res.text, "section", ("title", "items", "purpose")), items)
-    O.update(sections=secs, instruction=instruction, model=res.model, leave_out=leave_out(res.text, items))
+    try:
+        secs, out, model = plan_structure(run, items, f"\n\nTHE CURRENT STRUCTURE\n{now}\n\nTHE AUTHOR'S INSTRUCTION (follow it)\n"
+                                          f"{instruction}", label="Plan the structure with your instruction")
+    except LLMError as e:
+        if e.kind != "transient":
+            raise
+        raise ValueError("The structure was not changed: the model's new plan was still incomplete after "
+                         f"{PLAN_TRIES} attempts. Send your instruction again, or move the statements yourself.") from e
+    O.update(sections=secs, instruction=instruction, model=model, leave_out=out)
     p.save("outline", O)
     return O
 
@@ -461,6 +654,16 @@ def edit_outline(p: Project, data: dict) -> dict:
     by_id = {x["id"]: x for x in kept_items(p)}
     if data.get("drop"):
         return drop_from_outline(p, str(data["drop"]))
+    if isinstance(data.get("figure"), dict):     # the author's decision on one drawing: printed or not, where, caption
+        from . import drawings
+        fig = data["figure"]
+        with_id = fig.get("with") if isinstance(fig.get("with"), str) else None
+        if with_id is not None and with_id not in by_id:
+            raise ValueError("Unknown statement.")
+        drawings.set_plan(p, str(fig.get("id") or ""), use=fig.get("use") if fig.get("use") in ("paper", "explanation") else None,
+                          with_id=with_id, in_proof=fig.get("in_proof") if isinstance(fig.get("in_proof"), bool) else None,
+                          caption=fig.get("caption") if isinstance(fig.get("caption"), str) else None)
+        return O
     if not data:
         return O
     if "rename" in data:
@@ -606,7 +809,14 @@ def submit_outline(p: Project) -> dict:
     if not O.get("sections"):
         raise ValueError("The structure has not been planned yet.")
     O["approved"] = time.time()
+    O.pop("changes", None)
     p.save("outline", O)
+    plan = p.load("figure_plan")
+    if plan and plan.get("items"):
+        for v in plan["items"].values():
+            v.pop("fresh", None)
+            v["confirmed"] = True                # the author confirmed the structure with this decision on the drawing
+        p.save("figure_plan", plan)
     p.set_stage("outline", status="done", finished=time.time())
     emit(p.id, "log", stage="outline", level="done", message="Structure confirmed.")
     return O
@@ -646,12 +856,89 @@ def author_argument(x: dict, pages: list[dict], room: int) -> str:
     return lead + fit("\n\n".join(f"%%% page {pg['n']}\n{pg['text']}" for pg in near), room, "head")
 
 
+def _surnames(names: str) -> list[str]:
+    return [w for w in (re.sub(r"[^a-z]", "", ascii_fold(n).lower()) for n in re.split(r"[;,&]|\band\b|[-–]", names or "")) if len(w) > 1]
+
+
+def _year(x: dict) -> int:
+    for v in (x.get("year"), (x.get("date") or "")[:4], re.search(r"(\d{4})", x.get("key") or "")):
+        v = v.group(1) if hasattr(v, "group") else v
+        if str(v or "").isdigit():
+            return int(v)
+    return 0
+
+
+def _is_work(x: dict, names: list[str], year: int) -> bool:
+    """Library paper x is the work the notes cite as `names` (surnames) and `year` (0: not said). A preprint and its
+    publication can be years apart, so the year may differ by three."""
+    fams = {re.sub(r"[^a-z]", "", ascii_fold(a.get("family", "")).lower()) for a in x.get("authors", [])}
+    if not names or not all(n in fams for n in names):
+        return False
+    ys = {_year(x)} | {int(y) for y in re.findall(r"\b(?:19|20)\d{2}\b", str(x.get("date") or ""))}
+    return not year or any(y and abs(y - year) <= 3 for y in ys)
+
+
+def find_cited_papers(run: Run) -> list[dict]:
+    """The papers the author's own notes cite ("[Belk-Zaremsky, 2020]", "Thm (Li '22)", "Matui's spectral sequence")
+    become papers the proofs may cite: found in the library, or looked up and added to it (not in private mode,
+    which sends nothing to search engines). Done once for the notes as they are. Returns what the notes cite, each
+    with the key it was found under, or none."""
+    p = run.p
+    pages, _ = writing_pages(p)
+    text = "\n\n".join(f"%%% page {pg['n']}\n{pg['text']}" for pg in pages)
+    sig = _sig(text)
+    known = p.load("notes_refs") or {}
+    if known.get("sig") == sig:
+        return known.get("refs", [])
+    res = run.ask("fast", prompts.NOTES_REFS.format(field=run.field), fit(text, 60000, "middle"), max_out=1500,
+                  label="Find the papers your notes cite")
+    refs = []
+    for line in parse_lines(res.text):
+        names, _, rest = line.partition("||")
+        year, _, what = rest.partition("||")
+        sn = _surnames(names)
+        if sn and _none(line) and not any(r["names"] == sn for r in refs):
+            y = re.search(r"(\d{4})", year)
+            refs.append({"names": sn, "shown": names.strip(), "year": int(y.group(1)) if y else 0, "what": what.strip(), "key": ""})
+    library = p.load("library", [])
+    private = bool(run.settings.get("private"))
+    for r in refs:
+        hit = next((x for x in library if x.get("state") != "excluded" and _is_work(x, r["names"], r["year"])), None)
+        if not hit and not private and not config.mock_mode():
+            run.check()
+            try:
+                found, _ = literature.search([" ".join(r["names"]) + " " + r["what"]], run.meta.get("domains", []),
+                                             cancelled=run.cancelled)
+            except Exception:  # noqa: BLE001 - a search that fails leaves the work named in the proof
+                found = []
+            found = [x for x in found if _is_work(x, r["names"], r["year"])]
+            if found:
+                literature.add_papers(library, found[:1])
+                literature.assign_keys(library)
+                hit = next((x for x in library if _is_work(x, r["names"], r["year"])), None)
+        if hit:
+            hit["notes_cite"] = r["what"] or True
+            if hit.get("state") in (None, "", "candidate"):
+                hit["state"] = "selected"
+            r["key"] = hit.get("key", "")
+    p.save("library", library)
+    p.save("notes_refs", {"sig": sig, "refs": refs})
+    got = [f"{r['shown']} ({r['year'] or 'no year'}) as [{r['key']}]" for r in refs if r["key"]]
+    miss = [f"{r['shown']} ({r['year'] or 'no year'})" for r in refs if not r["key"]]
+    if refs:
+        run.log("Papers your notes cite: " + ("; ".join(got) + ". " if got else "")
+                + (f"Not found, so a proof names them by their authors: {'; '.join(miss)}. You can add them in the papers step."
+                   if miss else ""), "warn" if miss else "info")
+    return refs
+
+
 def proof_context(p: Project, run: Run) -> dict:
     seq, secs, nums = ordered(p)
-    pages, figs = writing_pages(p)
+    pages, figs = writing_pages(p, final=True)
     d = p.load("dossier") or {}
+    conf = p.load("confirmed", {})
     return {"seq": seq, "nums": nums, "pages": pages, "figs": figs, "library": {x["key"]: x for x in p.load("library", [])},
-            "sources": sources_text(p), "notation": notation_text(p.load("confirmed", {}), 1500),
+            "sources": sources_text(p), "notation": notation_text(conf, 1500), "conf": conf,
             "setting": "\n".join(x for x in (d.get("setting", ""), d.get("notation_choice", "")) if x)}
 
 
@@ -722,7 +1009,7 @@ def write_once(run: Run, ctx: dict, x: dict, previous: dict | None = None, feedb
     explained = x["kind"] in EXPLAINED
     system = (prompts.WRITE_EXAMPLE.format(field=run.field, kind=x["kind"]) if explained
               else prompts.WRITE_PROOF.format(field=run.field))
-    out = 1500 if explained else 5000
+    out = (3500 if x["kind"] in ("construction", "method", "algorithm") else 1500) if explained else 5000
     room = _room("reason", system, out)
     user = write_request({**ctx, "field": run.field}, x, room, previous, feedback, comment)
     num = ctx["nums"].get(x["id"], x["id"])
@@ -735,6 +1022,7 @@ def write_once(run: Run, ctx: dict, x: dict, previous: dict | None = None, feedb
         problems = [q for q in problems if "empty" not in q]
     return {"text": text, "added": [a for a in parse_lines(extract_tag(res.text, "added")) if _none(a)],
             "uses": re.findall(r"\b[A-Za-z]+\d+[a-z]?\b", extract_tag(res.text, "uses")),
+            "cites": [c for c in parse_lines(extract_tag(res.text, "cites")) if _none(c)],
             "doubt": _none(extract_tag(res.text, "doubt")), "problems": problems, "notes": log, "model": res.model}
 
 
@@ -756,26 +1044,106 @@ def parse_check(text: str) -> dict:
             "proof": proof, "statement": stmt, "verdict": verdict, "fix": _none(extract_tag(text, "fix"))}
 
 
+def _check_context(ctx: dict, x: dict, w: dict, room: int) -> str:
+    """What a referee of one proof is given: the paper's setting, notation and definitions, the statements before it,
+    the papers it may cite, the author's argument, and the proof with what its writer added and cites."""
+    deps = [y for y in _before(ctx, x)]
+    listing = fit("\n".join("- " + _statement_line(y, ctx["nums"].get(y["id"], "?")) for y in deps), max(1200, int(room * 0.2)), "head")
+    return (f"SETTING AND NOTATION OF THE PAPER\n{fit(ctx['setting'], 1500, 'head') or '(none)'}\n\n"
+            f"CONFIRMED NOTATION\n{ctx['notation']}\n\n"
+            f"THE STATEMENT\n{_statement_line(x, ctx['nums'].get(x['id'], '?'))}\n\n"
+            f"STATEMENTS PRESENTED BEFORE IT, WITH THE DEFINITIONS OF THE PAPER\n{listing or '(none)'}\n\n"
+            f"PAPERS THE PROOF MAY CITE\n{fit(ctx['sources'], max(800, int(room * 0.12)), 'head') or '(none)'}\n\n"
+            f"THE AUTHOR'S ARGUMENT, FROM THE NOTES\n{author_argument(x, ctx['pages'], max(2500, int(room * 0.3)))}\n\n"
+            f"THE WRITTEN PROOF\n{w['text']}\n\n"
+            f"WHAT THE WRITER SAYS IT ADDED\n" + ("\n".join(f"- {a}" for a in w.get("added", [])) or "nothing")
+            + ("\n\nPAPERS NOT IN THE LIST THAT THE WRITER CITES BY NAME\n" + "\n".join(f"- {c}" for c in w["cites"])
+               if w.get("cites") else "")
+            + (f"\n\nTHE WRITER'S DOUBT\n{w['doubt']}" if w.get("doubt") else ""))
+
+
+def _settle_verdict(c: dict) -> str:
+    """The verdict that what the referee found calls for, when it gave none or a second opinion changed a finding."""
+    wrong = c["proof"].lower().startswith("wrong") or any(not a["ok"] for a in c.get("added", []))
+    bad_stmt = c["statement"].lower().startswith(("false", "doubtful"))
+    if bad_stmt and wrong:
+        return "statement"
+    if wrong or (c.get("follows") == "no" and c.get("verdict") == "rewrite"):
+        return "rewrite"
+    unsure = c["proof"].lower().startswith("doubtful") or bad_stmt or c.get("dismissed")
+    return "review" if unsure or not c["author"].lower().startswith("complete") else "accept"
+
+
 def check_once(run: Run, ctx: dict, x: dict, w: dict) -> dict:
     system = prompts.CHECK_PROOF.format(field=run.field)
     room = _room("reason", system, 1800)
-    deps = [y for y in _before(ctx, x)]
-    listing = fit("\n".join("- " + _statement_line(y, ctx["nums"].get(y["id"], "?")) for y in deps), max(1200, int(room * 0.2)), "head")
-    user = (f"THE STATEMENT\n{_statement_line(x, ctx['nums'].get(x['id'], '?'))}\n\n"
-            f"STATEMENTS THE PROOF MAY USE\n{listing or '(none)'}\n\n"
-            f"THE AUTHOR'S ARGUMENT, FROM THE NOTES\n{author_argument(x, ctx['pages'], max(2500, int(room * 0.3)))}\n\n"
-            f"THE WRITTEN PROOF\n{w['text']}\n\n"
-            f"WHAT THE WRITER SAYS IT ADDED\n" + ("\n".join(f"- {a}" for a in w["added"]) or "nothing")
-            + (f"\n\nTHE WRITER'S DOUBT\n{w['doubt']}" if w.get("doubt") else ""))
+    user = _check_context(ctx, x, w, room)
     res = run.ask("reason", system, fit(user, room, "middle"), max_out=1800, effort="high", temperature=0.0,
                   label=f"Check the proof of {kind_name(x['kind'])} {ctx['nums'].get(x['id'], x['id'])} ({x['id']})")
     c = parse_check(res.text)
     c["model"] = res.model
     if not c["verdict"]:                    # an answer without a verdict: judged from what it says
-        wrong = c["proof"].lower().startswith("wrong")
-        bad_stmt = c["statement"].lower().startswith(("false", "doubtful"))
-        c["verdict"] = "statement" if bad_stmt and wrong else "rewrite" if wrong else \
-            "review" if not c["author"].lower().startswith("complete") else "accept"
+        c["verdict"] = _settle_verdict(c)
+    elif c["verdict"] == "accept" and c["proof"].lower().startswith("doubtful"):
+        c["verdict"] = "review"
+    if c["verdict"] in ("rewrite", "statement"):
+        c = second_opinion(run, ctx, x, w, c)
+    return c
+
+
+def second_opinion(run: Run, ctx: dict, x: dict, w: dict, c: dict) -> dict:
+    """A referee's objection that would have the proof written again, or stop the paper, is first put to a second
+    referee (another model of the class where there is one), who redoes each step it is about. Only the objections
+    it upholds are acted on. Every objection it dismisses is kept, with both opinions, for the author to see, and
+    the proof is then marked for the author to read."""
+    claims = []
+    if c["proof"].lower().startswith("wrong"):
+        claims.append(("proof", "The proof is wrong: " + c["proof"].split(":", 1)[-1].strip()))
+    for a in c.get("added", []):
+        if not a["ok"]:
+            claims.append((a, f"An added argument is wrong: {a['what']}: {a['note']}"))
+    if c["statement"].lower().startswith(("false", "doubtful")):
+        claims.append(("statement", "The statement is " + c["statement"]))
+    if not claims:                          # only a departure from the author's argument: not a question of correctness
+        return c
+    system = prompts.ADJUDICATE.format(field=run.field)
+    room = _room("reason", system, 1800)
+    listing = "\n\n".join(f"{n}. At: (the step the claim names)\n   Claim: {t}\n   Proposed correction: none"
+                           for n, (_, t) in enumerate(claims, 1))
+    try:
+        adj = run.ask("reason", system, fit(_check_context(ctx, x, w, room), room - 1500, "middle")
+                      + "\n\nCLAIMS OF THE FIRST READER\n" + listing, max_out=1800, effort="high", temperature=0.0,
+                      other_than=c.get("model", ""),
+                      label=f"Second opinion on the proof of {kind_name(x['kind'])} {ctx['nums'].get(x['id'], x['id'])} ({x['id']})")
+    except LLMError as e:
+        if passing(e):
+            raise
+        return c                            # no second opinion to be had: the first one stands
+    rulings = {}
+    for f in fields(adj.text, "ruling", ("n", "decision", "reason", "correction")):
+        m = re.search(r"\d+", f.get("n", ""))
+        if m:
+            rulings[int(m.group(0))] = f
+    dismissed = []
+    for n, (what, text) in enumerate(claims, 1):
+        r = rulings.get(n)
+        if not r or "dismiss" not in r.get("decision", "").lower():
+            continue                        # upheld, or not ruled on: the objection stands
+        why = re.sub(r"\s+", " ", r.get("reason", "")).strip()
+        dismissed.append({"claim": text, "why": why})
+        if what == "proof":
+            c["proof"] = "correct"
+        elif what == "statement":
+            c["statement"] = "holds"
+        else:
+            what.update(ok=True, note=f"a first referee judged it wrong; a second opinion found it correct: {why}")
+    if dismissed:
+        c["dismissed"] = dismissed
+        c["second_model"] = adj.model
+        c["verdict"] = _settle_verdict(c)
+        run.log(f"{kind_name(x['kind']).capitalize()} {ctx['nums'].get(x['id'], x['id'])}: a second opinion dismissed "
+                f"{len(dismissed)} of the referee's {len(claims)} objection{'s' if len(claims) != 1 else ''}; "
+                "they are shown with the proof for you to judge.", "warn")
     return c
 
 
@@ -794,11 +1162,11 @@ def feedback_of(c: dict, problems: list[str]) -> str:
 MAX_TRIES = 3
 
 
-def prove(run: Run, ctx: dict, x: dict, comment: str = "", previous: dict | None = None) -> dict:
+def prove(run: Run, ctx: dict, x: dict, comment: str = "", previous: dict | None = None, feedback: str = "") -> dict:
     """One proof written, checked, and written again with the referee's findings until it passes, at most
-    MAX_TRIES times. Returns the record kept for it."""
+    MAX_TRIES times. Returns the record kept for it. feedback: what a referee found in the previous proof."""
     tries: list[dict] = []
-    feedback, prev = "", previous
+    prev = previous
     rec: dict = {}
     for attempt in range(MAX_TRIES):
         w = write_once(run, ctx, x, prev, feedback, comment)
@@ -812,7 +1180,7 @@ def prove(run: Run, ctx: dict, x: dict, comment: str = "", previous: dict | None
             c = check_once(run, ctx, x, w)
         if w["problems"] and c["verdict"] in ("accept", "review"):
             c["verdict"] = "rewrite"         # the program's own checks come first
-        rec = {"text": w["text"], "added": w["added"], "uses": w["uses"], "doubt": w["doubt"], "check": c,
+        rec = {"text": w["text"], "added": w["added"], "uses": w["uses"], "cites": w.get("cites", []), "doubt": w["doubt"], "check": c,
                "problems": w["problems"], "model": w["model"], "notes": w["notes"]}
         tries.append({"verdict": c["verdict"], "feedback": feedback_of(c, w["problems"])})
         if c["verdict"] in ("accept", "review", "statement"):
@@ -822,37 +1190,153 @@ def prove(run: Run, ctx: dict, x: dict, comment: str = "", previous: dict | None
     return {**rec, "status": status, "tries": tries, "comment": comment, "at": time.time()}
 
 
-def proof_key(ctx: dict, x: dict) -> str:
-    """What a proof is written from: its statement, the statements before it, and the author's pages."""
+PROOF_KEY_V = 2
+
+
+def _used(x: dict, rec: dict | None) -> set[str]:
+    """The statements a proof rests on: those the notes say it uses, and those the written proof uses or refers to."""
+    used = set(x.get("depends") or [])
+    if rec:
+        used |= set(rec.get("uses") or [])
+        used |= set(re.findall(r"\\(?:ref|cref|Cref|eqref)\{(?:res|def):([A-Za-z0-9]+)\}", rec.get("text") or ""))
+    used.discard(x["id"])
+    return used
+
+
+def proof_inputs(ctx: dict, x: dict, rec: dict | None = None) -> tuple[str, str]:
+    """What a proof is written from, in two fingerprints. Its own: its statement, its name, the author's instruction,
+    the author's pages (with the drawings as the writers see them), the setting and the part of the confirmed
+    notation that occurs in them. Its dependencies: the statement of each statement it rests on, and whether that one
+    is still presented before it. A change elsewhere in the paper (another statement, another page, the order of
+    statements it does not use) changes neither, and the proof is kept."""
+    seq = ctx["seq"]
+    pos = {y["id"]: i for i, y in enumerate(seq)}
+    by_id = {y["id"]: y for y in seq}
+    pages = [pg["text"] for pg in ctx["pages"] if pg["n"] in (x.get("pages") or [])]
+    own = _sig(x["kind"], x["statement"], x.get("name"), x.get("instruction", ""), x.get("treatment"), pages,
+               ctx.get("setting", ""), notation_for(ctx.get("conf"), x["statement"] + "\n" + "\n".join(pages)))
+    me = pos.get(x["id"], len(seq))
+    deps = sorted([i, by_id[i]["kind"], by_id[i]["statement"], by_id[i].get("treatment") == "conjecture", pos[i] < me]
+                  if i in by_id else [i, "no longer in the paper"] for i in _used(x, rec))
+    return own, _sig(deps)
+
+
+def proof_key(ctx: dict, x: dict, rec: dict | None = None) -> str:
+    return _sig(PROOF_KEY_V, *proof_inputs(ctx, x, rec))
+
+
+def _legacy_key(ctx: dict, x: dict) -> str:
+    """The fingerprint an earlier version gave a proof (its statement, every statement before it, its pages)."""
     before = [(y["id"], y["kind"], y["statement"]) for y in _before(ctx, x)]
     pages = [pg["text"] for pg in ctx["pages"] if pg["n"] in (x.get("pages") or [])]
     return _sig(x["kind"], x["statement"], x.get("name"), x.get("instruction", ""), before, pages)
 
 
+def _own_text(ctx: dict, x: dict) -> str:
+    """Its own inputs with each drawing reduced to its id: unchanged when only what a figure shows was corrected or
+    described differently (then the proof is checked again against the figure, not written again)."""
+    pages = [re.sub(r"\[(FIGURE\s+f\d+|FIGURE|EXPLANATORY DRAWING)\s*:[^\]]*\]", r"[\1]", pg["text"])
+             for pg in ctx["pages"] if pg["n"] in (x.get("pages") or [])]
+    return _sig(x["kind"], x["statement"], x.get("name"), x.get("instruction", ""), x.get("treatment"), pages,
+                ctx.get("setting", ""))
+
+
+def _stamp(ctx: dict, x: dict, rec: dict) -> dict:
+    rec["own"], _ = proof_inputs(ctx, x, rec)
+    rec["own_text"] = _own_text(ctx, x)
+    rec["key"], rec["v"] = proof_key(ctx, x, rec), PROOF_KEY_V
+    return rec
+
+
+def proof_is_current(ctx: dict, x: dict, rec: dict | None) -> bool:
+    """Whether a proof written before is made from exactly what it would be made from now. A proof written by an
+    earlier version is taken over when it was made from the same inputs as that version counted them."""
+    if not rec or not (rec.get("text") or x["kind"] in EXPLAINED):
+        return False
+    if rec.get("v") == PROOF_KEY_V:
+        return rec.get("key") == proof_key(ctx, x, rec)
+    if rec.get("key") and rec["key"] == _legacy_key(ctx, x):
+        _stamp(ctx, x, rec)
+        return True
+    return False
+
+
+def recheck(run: Run, ctx: dict, x: dict, rec: dict) -> dict | None:
+    """A proof whose own statement and pages are unchanged, while a statement it rests on changed (or it was written
+    by an earlier version from inputs no longer known): it is not written again but checked again, as it stands,
+    against the paper as it is now. Kept when the check passes; otherwise it is written again from the referee's
+    findings, starting from it. Returns the record, or None when it must be written anew."""
+    log: list[str] = []
+    text, problems = screen_proof(rec.get("text") or "", x, ctx, log)
+    if not text:
+        return None
+    w = {"text": text, "added": rec.get("added") or [], "uses": rec.get("uses") or [], "cites": rec.get("cites") or [],
+         "doubt": rec.get("doubt") or "", "problems": problems, "model": rec.get("model", ""), "notes": log}
+    if x["kind"] in EXPLAINED:
+        return None if problems else {**rec, "text": text, "rechecked": time.time()}
+    c = {"verdict": "rewrite", "proof": "", "added": [], "fix": "", "follows": "yes", "departures": [], "author": "",
+         "statement": "holds"} if problems else check_once(run, ctx, x, w)
+    if c["verdict"] in ("accept", "review", "statement") and not problems:
+        out = {**rec, "text": text, "check": c, "status": c["verdict"], "rechecked": time.time()}
+        if c["verdict"] != (rec.get("check") or {}).get("verdict"):
+            out["fresh"] = "rechecked"
+        return out
+    new = prove(run, ctx, x, comment=x.get("instruction", ""), previous={"text": text}, feedback=feedback_of(c, problems))
+    new["fresh"] = True
+    return new
+
+
 def stage_proofs(run: Run) -> None:
     p = run.p
+    try:                                    # the works the author cites become papers the proofs may cite
+        find_cited_papers(run)
+    except LLMError as e:
+        if passing(e):
+            raise
+        run.log(f"The papers your notes cite could not be listed ({e}); the proofs name them by their authors.", "warn")
     ctx = proof_context(p, run)
     todo = [x for x in ctx["seq"] if needs_text(x)]
     P = p.load("proofs") or {"items": {}}
-    keys = {x["id"]: proof_key(ctx, x) for x in todo}
-    # pages added to notes that already have a paper: a proof written before from exactly the same statements and
-    # pages is kept. Otherwise (a step redone, the paper written again) every proof is written anew.
-    cache = (p.load("proof_cache", {}) or {}) if p.state.get("incremental") else {}
+    reuse = reuse_ok(p.state)
+    # brought up to date after a change (or pages added): a proof made from exactly the same inputs is kept, from this
+    # step's file or from the record of proofs written before; one whose own statement and pages are unchanged but
+    # rests on a statement that changed is checked again rather than written again (recheck). A step redone writes
+    # every proof anew.
+    cache = (p.load("proof_cache", {}) or {}) if reuse else {}
+    keep, check, write = [], [], []
     for x in todo:
-        hit = cache.get(keys[x["id"]])
-        if hit and (P["items"].get(x["id"]) or {}).get("key") != keys[x["id"]]:
+        rec = P["items"].get(x["id"])
+        if proof_is_current(ctx, x, rec):        # also a proof finished before the step was stopped: kept
+            keep.append(x)
+            continue
+        hit = cache.get(proof_key(ctx, x, rec)) if reuse else None
+        if hit and proof_is_current(ctx, x, hit):
             P["items"][x["id"]] = {**hit, "kept": True}
-    fresh = [x for x in todo if (P["items"].get(x["id"]) or {}).get("key") != keys[x["id"]]]
-    P["items"] = {k: v for k, v in P["items"].items() if k in keys}
-    if len(todo) > len(fresh):
-        run.log(f"{len(todo) - len(fresh)} proof{'s' if len(todo) - len(fresh) != 1 else ''} written before from the same "
-                "statements and pages kept.")
-    done = [len(todo) - len(fresh)]
+            keep.append(x)
+            continue
+        if reuse and rec and rec.get("text") and (rec.get("own") == proof_inputs(ctx, x, rec)[0] or rec.get("v") != PROOF_KEY_V
+                                                  or rec.get("own_text") == _own_text(ctx, x)):
+            check.append(x)
+        else:
+            write.append(x)
+    P["items"] = {k: v for k, v in P["items"].items() if k in {x["id"] for x in todo}}
+    if keep and (check or write):
+        run.log(f"{len(keep)} proof{'s' if len(keep) != 1 else ''} made from exactly the same statements and pages kept"
+                + (f"; {len(check)} checked again because a statement {'it rests' if len(check) == 1 else 'they rest'} on changed"
+                   if check else "") + (f"; {len(write)} written" if write else "") + ".")
+    elif keep:
+        run.log("Every proof is made from exactly the same statements and pages as before: all are kept.")
+    done = [len(keep)]
     run.progress(done[0], len(todo), "writing each proof on its own")
 
     def work(x: dict) -> None:
-        rec = prove(run, ctx, x, comment=x.get("instruction", ""))
-        rec["key"] = keys[x["id"]]
+        old = P["items"].get(x["id"])
+        rec = recheck(run, ctx, x, old) if x in check else None
+        if rec is None:
+            rec = prove(run, ctx, x, comment=x.get("instruction", ""))
+            if reuse:
+                rec["fresh"] = True
+        _stamp(ctx, x, rec)
         with _lock:
             cur = p.load("proofs") or {"items": {}}
             cur["items"][x["id"]] = rec
@@ -867,7 +1351,7 @@ def stage_proofs(run: Run) -> None:
                             "statement": "the statement may be false", "failed": "could not be written correctly"}[rec["status"]])
 
     p.save("proofs", P)
-    _side_by_side(run, "reason", False, fresh, work)
+    _side_by_side(run, "reason", False, check + write, work)
     P = p.load("proofs") or {"items": {}}
     counts = {s: sum(1 for v in P["items"].values() if v["status"] == s) for s in ("accept", "review", "statement", "failed")}
     run.log(f"Proofs: {counts['accept']} checked and accepted, {counts['review']} marked for you to read, "
@@ -902,7 +1386,7 @@ def rewrite_proof(p: Project, iid: str, comment: str = "", statement: str | None
     old = (p.load("proofs") or {"items": {}})["items"].get(iid)
     full = "\n".join(s for s in (x.get("instruction", ""), comment) if s)
     rec = prove(run, ctx, x, comment=full, previous=old if (comment and old) else None)
-    rec["key"] = proof_key(ctx, x)
+    _stamp(ctx, x, rec)
     rec["history"] = ((old or {}).get("history") or []) + ([{k: old.get(k) for k in ("text", "status", "comment")}] if old else [])
     with _lock:
         P = p.load("proofs") or {"items": {}}
@@ -942,11 +1426,21 @@ def decide_proof(p: Project, iid: str, action: str) -> dict:
     return rec
 
 
-def submit_proofs(p: Project) -> None:
+def submit_proofs(p: Project, assume: bool = True) -> None:
+    """Gate: the proofs approved, and every figure drawn for print confirmed (assume: a figure the author did not
+    answer is taken as drawn for print when its check passed, else as the author drew it)."""
     left = open_proof_problems(p)
     if left:
         raise ValueError(f"Decide first on {', '.join(left)}: the statement may be false, or its proof could not be "
                          "written correctly.")
+    with _lock:
+        P = p.load("proofs") or {"items": {}}
+        if any(v.get("fresh") for v in P["items"].values()):
+            for v in P["items"].values():
+                v.pop("fresh", None)
+            p.save("proofs", P)
+    from . import figpro
+    figpro.confirm_all(p, assume=assume)
     p.save("proofs_ok", {"at": time.time()})
     p.set_stage("proofcheck", status="done", finished=time.time())
     emit(p.id, "log", stage="proofcheck", level="done", message="Proofs approved.")
@@ -955,7 +1449,8 @@ def submit_proofs(p: Project) -> None:
 # ------------------------------------------------------------------ 4. the paper
 
 def item_latex(x: dict, num: str, proof: dict | None) -> str:
-    env = x["kind"] if x["kind"] in paperlib.THEOREM_ENVS else "remark"
+    kind = "algorithmthm" if x["kind"] == "algorithm" else x["kind"]
+    env = kind if kind in paperlib.THEOREM_ENVS else "remark"
     head = []
     if x.get("name"):
         head.append(x["name"])
@@ -1010,7 +1505,7 @@ def stage_draft(run: Run) -> None:
     if not seq:
         raise ValueError("There are no statements to put in the paper.")
     proofs = (p.load("proofs") or {"items": {}})["items"]
-    pages, figs = writing_pages(p)
+    pages, figs = writing_pages(p, final=True)
     library = {x["key"]: x for x in p.load("library", [])}
     parts = section_parts(secs, seq, nums, proofs)
     plan_lines = "\n".join(f"{i}. {s['title']}: " + ", ".join(f"{kind_name(next(x['kind'] for x in seq if x['id'] == j))} {nums.get(j, '')}"
@@ -1068,22 +1563,48 @@ def stage_draft(run: Run) -> None:
             + f"\n\nTHE PROBLEM\n{d.get('problem', '')}\n\nTHE STATEMENTS OF THE PAPER, IN ORDER\n{fit(stmts, int(room * 0.4), 'head')}\n\n"
             f"THE SECTIONS\n{openings}\n\nRESEARCH CONTEXT BRIEF\n{fit((p.load('brief') or {}).get('text', ''), int(room * 0.12), 'head') or '(none)'}\n\n"
             f"PAPERS YOU MAY CITE\n{fit(sources_text(p), int(room * 0.25), 'head') or '(none: write the introduction without citations)'}")
-    intro, notes = "", []
-    for attempt in range(2):
-        res = run.ask("writer", system, user, max_out=2400, effort="high", temperature=0.3,
-                      label="Write introduction" + (" (retry)" if attempt else ""))
-        notes = []
-        intro = clean_fragment(extract_tag(res.text, "intro") or res.text)
-        intro = re.sub(r"\\section\*?\{[^{}]*\}\s*", "", intro).strip()
-        intro = fix_keys(drop_unsourced(intro, library, notes), library, notes)
-        org = organisation(extract_tag(res.text, "organisation"), [{"title": s["title"]} for s in secs])
-        if len(intro) >= 500:
-            break
-    if len(intro) < 200:
-        raise LLMError("The introduction came back empty.", kind="transient", retry_at=time.time() + 60)
+    # what the introduction speaks of: when none of it changed, the introduction is kept as it stands (with the
+    # author's edits); when some of it changed, it is brought up to date rather than written again
+    ibasis = {"kind": kind, "note": S.get("note", ""), "problem": d.get("problem", ""),
+              "stmts": {x["id"]: _statement_line(x, nums.get(x["id"], "")) + (" (credited)" if x.get("treatment") == "credit" else "")
+                        + (" (main)" if x.get("role") == "main" and x["kind"] in PROVED else "") for x in seq},
+              "sections": [s["title"] for s in secs], "papers": sorted(library)}
+    ikey = _sig(ibasis)
+    old = p.load("intro") or {}
+    reuse = reuse_ok(p.state) and bool(old.get("text"))
+    intro, notes, org, fresh_intro, model = "", [], "", False, old.get("model", "")
+    # made by an earlier version, which kept no fingerprint: when the paper is brought up to date from a step after the
+    # structure, nothing the introduction speaks of can have changed, so it is taken over as it stands
+    late = (p.state.get("catchup") or {}).get("from") in STAGES_AFTER_STRUCTURE
+    if reuse and not old.get("key") and late:
+        old["key"] = ikey
+    if reuse and old.get("key") == ikey:
+        intro, notes = old["text"], list(old.get("notes") or [])
+        org = old.get("organisation") or organisation("", [{"title": s["title"]} for s in secs])
+        run.log("The introduction is kept as it stands: nothing it speaks of changed.")
+    elif reuse:
+        intro, org, notes, model = update_intro(run, old, ibasis, stmts, openings, secs, library, room)
+        fresh_intro = True
+    if not intro:
+        for attempt in range(2):
+            res = run.ask("writer", system, user, max_out=2400, effort="high", temperature=0.3,
+                          label="Write introduction" + (" (retry)" if attempt else ""))
+            notes = []
+            intro = clean_fragment(extract_tag(res.text, "intro") or res.text)
+            intro = re.sub(r"\\section\*?\{[^{}]*\}\s*", "", intro).strip()
+            intro = fix_keys(drop_unsourced(intro, library, notes), library, notes)
+            org = organisation(extract_tag(res.text, "organisation"), [{"title": s["title"]} for s in secs])
+            model = res.model
+            if len(intro) >= 500:
+                break
+        if len(intro) < 200:
+            raise LLMError("The introduction came back empty.", kind="transient", retry_at=time.time() + 60)
+        fresh_intro = reuse
     for n in notes + log:
         run.log(n, "warn")
-    p.save("intro", {"text": intro, "notes": notes, "model": res.model})
+    p.save("intro", {"text": intro, "notes": notes, "model": model, "key": ikey, "basis": ibasis, "organisation": org,
+                     **({"edited": True} if old.get("edited") and reuse else {}), **({"fresh": True} if fresh_intro else
+                                                                                   {"fresh": old["fresh"]} if old.get("fresh") else {})})
 
     blocks = paperlib.parse_body(paperlib.close_open(body))
     from .writing import ensure_labels
@@ -1104,23 +1625,83 @@ def stage_draft(run: Run) -> None:
                                      keywords=journals.keywords_phrase(prof))
     room = _room("writer", system, 900)
     from .writing import planned_dossier
-    user = (f"DOSSIER\n{dossier_text(planned_dossier(p), max(1200, int(room * 0.3)))}\n\nINTRODUCTION\n{fit(intro, int(room * 0.25), 'head')}\n\n"
-            f"BODY\n{fit(body, int(room * 0.4), 'middle')}")
-    res = run.ask("writer", system, user, max_out=900, effort="medium", label="Write abstract")
-    abstract = re.sub(r"\\cite[tp]?\s*(?:\[[^\]]*\])?\s*\{[^{}]*\}", "", clean_fragment(extract_tag(res.text, "abstract"))).strip()
-    if len(abstract) < 80:
-        raise LLMError("The abstract came back empty.", kind="transient", retry_at=time.time() + 60)
-    p.save("abstract_draft", {"abstract": abstract, "keywords": parse_lines(extract_tag(res.text, "keywords").replace(",", "\n"))[:12],
-                              "msc": [m for m in (re.sub(r"[^0-9A-Za-z\-]", "", y) for y in extract_tag(res.text, "msc").split(","))
-                                      if re.match(r"^\d{2}[A-Z\-]", m)][:4], "model": res.model})
+    # the abstract speaks of the main results and of what the introduction says: kept when neither changed
+    akey = _sig(kind, intro, prof.get("id") if isinstance(prof, dict) else str(prof),
+                [ibasis["stmts"][x["id"]] for x in seq if x.get("role") == "main" or x["kind"] == "theorem"])
+    olda = p.load("abstract_draft") or {}
+    if reuse_ok(p.state) and olda.get("abstract") and not olda.get("key") and late and not fresh_intro:
+        olda["key"] = akey                     # made by an earlier version: taken over (see the introduction above)
+        p.save("abstract_draft", olda)
+    if reuse_ok(p.state) and olda.get("abstract") and olda.get("key") == akey:
+        run.log("The abstract is kept as it stands: the main results and the introduction did not change.")
+    else:
+        user = (f"DOSSIER\n{dossier_text(planned_dossier(p), max(1200, int(room * 0.3)))}\n\nINTRODUCTION\n{fit(intro, int(room * 0.25), 'head')}\n\n"
+                f"BODY\n{fit(body, int(room * 0.4), 'middle')}")
+        if reuse_ok(p.state) and olda.get("abstract") and olda.get("edited"):
+            user += ("\n\nTHE ABSTRACT AS IT STANDS (the author edited it: keep their wording wherever it is still right, and "
+                     f"change only what the paper as it is now makes wrong)\n{olda['abstract']}")
+        res = run.ask("writer", system, user, max_out=900, effort="medium", label="Write abstract")
+        abstract = re.sub(r"\\cite[tp]?\s*(?:\[[^\]]*\])?\s*\{[^{}]*\}", "", clean_fragment(extract_tag(res.text, "abstract"))).strip()
+        if len(abstract) < 80:
+            raise LLMError("The abstract came back empty.", kind="transient", retry_at=time.time() + 60)
+        p.save("abstract_draft", {"abstract": abstract, "keywords": parse_lines(extract_tag(res.text, "keywords").replace(",", "\n"))[:12],
+                                  "msc": [m for m in (re.sub(r"[^0-9A-Za-z\-]", "", y) for y in extract_tag(res.text, "msc").split(","))
+                                          if re.match(r"^\d{2}[A-Z\-]", m)][:4], "model": res.model, "key": akey,
+                                  **({"fresh": True} if reuse_ok(p.state) and olda.get("abstract") else {})})
     run.progress(3, 3, "first draft ready")
     n_proofs = sum(1 for b in blocks if b["type"] == "proof")
     run.log(f"First draft: {len(secs)} sections, {len(seq)} statements, {n_proofs} proofs; introduction and abstract written.")
 
 
+def update_intro(run: Run, old: dict, basis: dict, stmts: str, openings: str, secs: list[dict], library: dict,
+                 room: int) -> tuple[str, str, list[str], str]:
+    """The introduction brought up to date after the paper changed: the sentences the changes make wrong or incomplete
+    are rewritten, and every other sentence (the author's edits too) stays word for word. Returns the introduction,
+    the organisation paragraph, notes for the log and the model; an empty introduction when no usable answer came
+    (it is then written anew)."""
+    was = old.get("basis") or {}
+    changes = []
+    if was:
+        a, b = was.get("stmts") or {}, basis["stmts"]
+        changes += [f"New: {b[i]}" for i in b if i not in a]
+        changes += [f"No longer in the paper: {a[i]}" for i in a if i not in b]
+        changes += [f"Changed: {b[i]} (it was: {a[i]})" for i in b if i in a and a[i] != b[i]]
+        if was.get("sections") != basis["sections"]:
+            changes.append("The sections are now: " + "; ".join(f"Section {i} {t}" for i, t in enumerate(basis["sections"], 2))
+                           + " (they were: " + "; ".join(f"Section {i} {t}" for i, t in enumerate(was.get("sections") or [], 2)) + ")")
+        for k, name in (("kind", "the kind of paper"), ("note", "the author's note"), ("problem", "the problem")):
+            if was.get(k) != basis[k]:
+                changes.append(f"{name.capitalize()} changed: now {basis[k] or '(none)'}")
+        added = sorted(set(basis["papers"]) - set(was.get("papers") or []))
+        gone = sorted(set(was.get("papers") or []) - set(basis["papers"]))
+        if added:
+            changes.append("Papers that may now be cited: " + ", ".join(added))
+        if gone:
+            changes.append("Papers that may no longer be cited (remove their citations): " + ", ".join(gone))
+    system = prompts.INTRO_UPDATE.format()
+    user = ("THE INTRODUCTION AS IT STANDS" + (" (the author edited it)" if old.get("edited") else "") + f"\n{old['text']}\n\n"
+            f"WHAT CHANGED IN THE PAPER\n" + ("\n".join(f"- {c}" for c in changes) if changes else
+                                             "(not recorded: compare the introduction with the paper as it is now)")
+            + f"\n\nTHE STATEMENTS OF THE PAPER, IN ORDER\n{fit(stmts, int(room * 0.35), 'head')}\n\nTHE SECTIONS\n{openings}\n\n"
+            f"PAPERS YOU MAY CITE\n{fit(sources_text(run.p), int(room * 0.2), 'head') or '(none)'}")
+    res = run.ask("writer", system, fit(user, room, "middle"), max_out=2600, effort="high", temperature=0.2,
+                  label="Bring the introduction up to date")
+    notes: list[str] = []
+    intro = clean_fragment(extract_tag(res.text, "intro"))
+    intro = re.sub(r"\\section\*?\{[^{}]*\}\s*", "", intro).strip()
+    if len(intro) < max(200, len(old["text"]) // 3):
+        return "", "", [], ""
+    intro = fix_keys(drop_unsourced(intro, library, notes), library, notes)
+    org = organisation(extract_tag(res.text, "organisation"), [{"title": s["title"]} for s in secs])
+    done = [c for c in parse_lines(extract_tag(res.text, "changed")) if _none(c)]
+    run.log("Introduction brought up to date" + (": " + "; ".join(done[:4]) if done else "") + ". The rest of it is kept as it was.")
+    return intro, org, notes, res.model
+
+
 def place_figures(body: str, seq: list[dict], figs: dict, secs: list[dict]) -> str:
-    """Every figure the author kept appears once: where a proof put it, or else after the statement whose pages it
-    is drawn on, or at the end of the first section."""
+    """Every figure the paper prints appears once: where a proof put it; or else where the structure placed it (inside
+    the proof of its statement, at its end, or right after the statement and its proof); or after the statement
+    whose pages it is drawn on; or at the end of the first section."""
     seen: set[str] = set()
 
     def keep(m: re.Match) -> str:
@@ -1134,11 +1715,16 @@ def place_figures(body: str, seq: list[dict], figs: dict, secs: list[dict]) -> s
     for fid, f in figs.items():
         if fid in seen:
             continue
-        owner = next((x for x in seq if f.get("page") in (x.get("pages") or [])), None)
+        owner = next((x for x in seq if x["id"] == f.get("with")), None) \
+            or next((x for x in seq if f.get("page") in (x.get("pages") or [])), None)
         end = None
         if owner:
             m = re.search(r"\\label\{" + re.escape(label_of(owner)) + r"\}", body)
-            if m:
+            if m and f.get("in_proof"):             # inside the proof of its statement, at its end
+                pm = re.match(r"(?s).*?\\end\{[a-z]+\}\s*\\begin\{proof\}.*?(?=\\end\{proof\})", body[m.end():])
+                if pm:
+                    end = m.end() + pm.end()
+            if m and end is None:
                 close = re.search(r"\\end\{proof\}|\\end\{[a-z]+\}", body[m.end():])
                 after = body[m.end() + close.end():] if close else ""
                 nxt_proof = re.match(r"\s*\\begin\{proof\}.*?\\end\{proof\}", after, flags=re.S)
@@ -1154,6 +1740,11 @@ def place_figures(body: str, seq: list[dict], figs: dict, secs: list[dict]) -> s
 def submit_draft(p: Project, data: dict) -> None:
     """Gate: the author has read the first draft; the introduction or the abstract may have been edited."""
     edit_draft(p, data)
+    for name in ("intro", "abstract_draft"):
+        cur = p.load(name)
+        if cur and cur.get("fresh"):
+            cur.pop("fresh", None)
+            p.save(name, cur)
     p.save("draft_ok", {"at": time.time()})
     p.set_stage("draftcheck", status="done", finished=time.time())
     emit(p.id, "log", stage="draftcheck", level="done", message="First draft approved.")
@@ -1198,7 +1789,8 @@ def view(p: Project) -> dict:
     nums = numbers(O.get("sections") or [], items) if O.get("sections") else {}
     P = (p.load("proofs") or {}).get("items", {})
     by_tab = {"definitions": ["definition"], "lemmas": ["lemma"], "propositions": ["proposition"], "theorems": ["theorem"],
-              "corollaries": ["corollary"], "other": ["conjecture", "example", "remark", "question"]}
+              "corollaries": ["corollary"], "other": ["conjecture", "example", "remark", "question", "construction", "method",
+                                                      "algorithm"]}
     proofs = {}
     for k, v in P.items():
         c = v.get("check") or {}
@@ -1206,12 +1798,27 @@ def view(p: Project) -> dict:
                      "checked_added": c.get("added", []), "departures": c.get("departures", []), "follows": c.get("follows"),
                      "author": c.get("author", ""), "statement": c.get("statement", ""), "proof": c.get("proof", ""),
                      "doubt": v.get("doubt", ""), "settled": v.get("settled"), "comment": v.get("comment", ""),
-                     "tries": len(v.get("tries") or []), "problems": v.get("problems", [])}
+                     "tries": len(v.get("tries") or []), "problems": v.get("problems", []),
+                     "dismissed": c.get("dismissed", []), "cites": v.get("cites", [])}
     kind = S.get("kind")
     if kind == "not_ready" and (p.load("scope") or {}).get("kind") != "not_ready":
         # proposed by an earlier version, never chosen by the author: stopping is only ever the author's choice
         kind = default_kind(p.load("assessment") or {}, {x["id"] for x in items if x.get("role") == "main"})
+    from . import drawings, figpro
+    figrecs = {f["id"]: f for f in (p.load("figures") or {}).get("items", [])}
+    pro = figpro.entries(p)
+    figures = []
+    for fid, e in drawings.plan_items(p).items():
+        f, pr = figrecs.get(fid) or {}, pro.get(fid) or {}
+        figures.append({"id": fid, "page": f.get("page"), "k": f.get("k", 0), "of": f.get("of", 1), "desc": f.get("desc", ""),
+                        "copy": f.get("choice"), "drawn": f.get("drawn"), "tikz_ok": f.get("tikz_ok"),
+                        **{k: e.get(k) for k in ("use", "sure", "why", "doubt", "illustrates", "needed", "with", "in_proof",
+                                                 "caption", "auto", "fresh", "confirmed")},
+                        "pro": {k: pr.get(k) for k in ("ok", "caption", "changes", "corrections", "check", "choice", "error",
+                                                        "fresh", "at", "instruction", "auto")} if pr else None})
     return {"items": items, "kind": kind, "note": S.get("note", ""), "unused": S.get("unused", []),
+            "figures": figures, "open_figures": figpro.unanswered(p),
+            "changed": {sid: p.state["stages"].get(sid, {}).get("changed") or [] for sid in ("scope", "outline", "proofcheck", "draftcheck")},
             "leave_out": O.get("leave_out") or [], "chat": O.get("chat") or [],
             "tabs": by_tab, "outline": O.get("sections") or [], "numbers": nums, "proofs": proofs,
             "abstract": (p.load("abstract_draft") or {}).get("abstract", ""),

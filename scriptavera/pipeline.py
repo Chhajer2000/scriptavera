@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import difflib
+import hashlib
 import json
 import re
 import threading
@@ -22,7 +23,7 @@ from . import audit as fidelity
 from . import config, domains, literature, paper as paperlib, placing, prompts, tenancy
 from .llm import ROLES, Cancelled, LLMError, RunHooks, clock, router
 from . import store as storelib
-from .store import STAGE_IDS, STAGES, Project
+from .store import STAGE_IDS, STAGES, Project, reuse_ok
 from .texutil import answer_transcript, clean_transcript, collapse_loops, drop_leaks, leaks, looping, unknown_commands
 from .util import (est_tokens, extract_tag, fit, loads_lenient, parse_lines, parse_list, parse_records, parse_rows,
                    to_float)
@@ -225,8 +226,8 @@ def _stage_func(sid: str):
     import this one, so they are looked up when needed rather than when this module loads."""
     if sid in STAGE_FUNCS:
         return STAGE_FUNCS[sid]
-    from . import drafting, final, revision, writing
-    return {"understand": writing.stage_understand, "assess": writing.stage_assess,
+    from . import drafting, figpro, final, revision, writing
+    return {"understand": writing.stage_understand, "assess": writing.stage_assess, "figdesign": figpro.stage_figdesign,
             "proofs": drafting.stage_proofs, "draft": drafting.stage_draft,
             "simplify": revision.stage_simplify, "verify": revision.stage_verify, "referee": revision.stage_referee,
             "assemble": final.stage_assemble}[sid]
@@ -242,7 +243,7 @@ def _review_not_needed(p: Project) -> str:
     if kind == "typed":
         return "Your notes are typed: their text is the transcript, so there was nothing to read from an image or to check."
     present = {(f["page"], f["k"]) for f in transcript_figures(p)}
-    if any((f["page"], f["k"]) in present and f.get("choice") not in ("tikz", "orig", "none", "explain")
+    if any((f["page"], f["k"]) in present and f.get("choice") not in ("tikz", "orig", "none")
            for f in (p.load("figures") or {}).get("items", [])):
         return ""
     return ("The words of your PDF were taken from the file, and no figure needed your decision, so the transcript "
@@ -278,6 +279,104 @@ def passing(e: BaseException) -> bool:
     return getattr(e, "kind", "") in ("limits", "network", "transient")
 
 
+def _gate_needs(p: Project, sid: str) -> list[str]:
+    """At a stop the author had passed, what needs them again after the paper was brought up to date: [] when nothing
+    they decided there changed. In the reading steps (up to the check of the transcript) the author always looks
+    again; after them only what changed is put to the author."""
+    from . import drafting, final, revision
+    if sid == "topiccheck":
+        return ["the papers were searched for again"]
+    if sid == "confirm":
+        return notation_changed(p)
+    if sid == "review":
+        return transcript_changed(p)
+    if sid == "scope":
+        return drafting.statements_changed(p)
+    if sid == "outline":
+        return drafting.structure_changed(p)
+    if sid == "proofcheck":
+        return drafting.proofs_changed(p)
+    if sid == "draftcheck":
+        return drafting.draft_changed(p)
+    if sid == "decide":
+        return revision.decisions_needed(p)
+    if sid == "finish":
+        return final.finish_needed(p)
+    return []
+
+
+def _pass_again(p: Project, sid: str) -> None:
+    """The author's earlier answer at this stop stands for what was brought up to date: it is recorded again."""
+    from . import drafting, final, revision
+    if sid == "review":
+        submit_review(p, {})
+    elif sid == "confirm":
+        pass                                   # the notation confirmed stands as it is
+    elif sid == "scope":
+        S = p.load("statements") or {}
+        drafting.submit_statements(p, {"kind": S.get("kind"), "note": S.get("note", "")})
+    elif sid == "outline":
+        drafting.submit_outline(p)
+    elif sid == "proofcheck":
+        drafting.submit_proofs(p)
+    elif sid == "draftcheck":
+        drafting.submit_draft(p, {})
+    elif sid == "decide":
+        revision.reconfirm_decisions(p)
+    elif sid == "finish":
+        paper = p.load("paper") or {}
+        own = paper.get("title") if paper.get("title_source") == "author" else ""     # a title the author wrote stays
+        final.finish(p, {"title": own or (p.load("finished") or {}).get("title") or paper.get("title", "")})
+
+
+def notation_changed(p: Project) -> list[str]:
+    """At the confirmation of the notation, after the notes were read again: the items that are new and need the
+    author (the others keep the author's answer)."""
+    conf = p.load("confirmed") or {}
+    known = {g["symbol"] for g in conf.get("glossary", [])}
+    ignored = [str(i) for i in conf.get("ignored", [])]
+    out = []
+    for e in (p.load("glossary") or {}).get("entries", []):
+        if e.get("status") in ("undefined", "ambiguous", "misread") and e["symbol"] not in known \
+                and not any(i == e["symbol"] or i.startswith(e["symbol"] + " (") for i in ignored):
+            out.append(f"{e['symbol']} is new in your notes")
+    return out
+
+
+def transcript_changed(p: Project) -> list[str]:
+    """At the check of the transcript, after the notes were read again: the pages read again, the copies of
+    drawings made again, and what still needs the author there."""
+    tr = (p.load("transcript") or {}).get("pages", {})
+    out = [f"page {n} " + ("is new" if v.get("fresh") == "new" else "was read again")
+           for n, v in sorted(tr.items(), key=lambda kv: int(kv[0])) if v.get("fresh")]
+    present = {(f["page"], f["k"]) for f in transcript_figures(p)}
+    for f in (p.load("figures") or {}).get("items", []):
+        if (f["page"], f["k"]) not in present:
+            continue
+        if f.get("fresh"):
+            out.append(f"the drawing on page {f['page']} was copied: is the copy what you drew?")
+        elif f.get("choice") not in ("tikz", "orig", "none"):
+            out.append(f"the drawing on page {f['page']} needs your answer")
+    out += [f"your comment on page {n} is not carried out yet" for n in pending_comments(p)]
+    return out
+
+
+def catchup_note(p: Project) -> str:
+    """Why the paper is being brought up to date, in a few words, for the log and the screens."""
+    why = [w for w in ((p.state.get("catchup") or {}).get("why") or []) if w]
+    return "; ".join(dict.fromkeys(why)) if why else "a change you made"
+
+
+def _end_catchup(p: Project) -> None:
+    """The paper is up to date again when no step is left to bring up to date (a step stopped by a failure while it
+    was being brought up to date still is: Continue resumes it the same way)."""
+    def f(st):
+        if not any(storelib.is_stale(s) for s in st.get("stages", {}).values()):
+            st.pop("catchup", None)
+            st.pop("incremental", None)          # pages added: read, and everything after them brought up to date
+    p.update_state(f)
+
+
 def _drive(run: Run) -> None:
     p = run.p
     tenancy.set_owner(tenancy.of_project(p.id))      # this thread uses its owner's keys and memory, no one else's
@@ -287,10 +386,33 @@ def _drive(run: Run) -> None:
     try:
         for stage in STAGES:
             sid = stage["id"]
-            status = p.state["stages"].get(sid, {}).get("status")
+            cur = p.state["stages"].get(sid, {})
+            status = cur.get("status")
             if status == "done":
                 continue
             run.stage = sid
+            stale = storelib.is_stale(cur)
+            if stale and stage.get("gate"):
+                # a stop met again while the paper is brought up to date after a change
+                prep = _gate_prepare(sid)
+                if prep and not _do_step(run, sid, stage, prep, gate=True):
+                    return
+                need = _gate_needs(p, sid)
+                if cur.get("was") == "done" and not need:
+                    try:
+                        _pass_again(p, sid)
+                    except ValueError as e:
+                        need = [str(e)]
+                    else:
+                        p.set_stage(sid, status="done", finished=time.time(), passed_again=True, was=None, changed=None)
+                        run.log(f"{stage['name']}: nothing you decided here changed, so your answer stands and the step "
+                                "is passed again.", "done")
+                        run.changed()
+                        continue
+                p.set_stage(sid, status="waiting", since=time.time(), was=None, changed=need)
+                run.log(f"Waiting for you: {stage['name'].lower()}"
+                        + (f" (only what changed: {'; '.join(need[:4])})" if need and cur.get("was") == "done" else "") + ".", "gate")
+                return
             if stage.get("gate"):
                 passed = _review_not_needed(p) if sid == "review" else ""
                 if passed:
@@ -310,10 +432,12 @@ def _drive(run: Run) -> None:
                 return
             if not _do_step(run, sid, stage, _stage_func(sid)):
                 return
-            p.set_stage(sid, status="done", finished=time.time(), auto_tries=0, resume_at=None, error=None, weaker="", reason=None)
-            run.log(f"{stage['name']} finished.", "done")
+            p.set_stage(sid, status="done", finished=time.time(), auto_tries=0, resume_at=None, error=None, weaker="", reason=None,
+                        was=None)
+            run.log(f"{stage['name']} {'brought up to date' if stale else 'finished'}.", "done")
             run.changed()
     finally:
+        _end_catchup(p)
         p.update_state(lambda st: st.update(running=False))
         run.changed()
 
@@ -329,7 +453,7 @@ def _do_step(run: Run, sid: str, stage: dict, func, gate: bool = False) -> bool:
     try:
         func(run)
     except Cancelled:
-        p.set_stage(sid, status="pending")
+        p.set_stage(sid, status="pending")      # a step being brought up to date stays so ("was" is kept)
         run.log("Stopped by you. Everything finished so far is saved; press Continue to carry on from here.", "warn")
         return False
     except Exception as e:  # noqa: BLE001
@@ -446,6 +570,27 @@ def notation_text(confirmed: dict | None, limit: int = 2400) -> str:
     if confirmed.get("instructions"):
         lines.append("Author's instructions: " + confirmed["instructions"])
     return fit("\n".join(lines) or "(none)", limit, "head")
+
+
+def _occurs(symbol: str, text: str) -> bool:
+    sym = re.sub(r"\s+", "", (symbol or "").strip().strip("$"))
+    return bool(sym) and sym in re.sub(r"\s+", "", text or "")
+
+
+def notation_for(confirmed: dict | None, text: str) -> list:
+    """The part of the confirmed notation that bears on one text (a page, a statement and its pages): the meaning of
+    each symbol occurring in it, the items said not to be notation that occur in it, and the author's answers and
+    instructions, which can bear on any text. A part of the paper is made again after a change of the notation only
+    when this part changed."""
+    if not confirmed:
+        return []
+    out: list = [(g["symbol"], g.get("meaning")) for g in confirmed.get("glossary", [])
+                 if g.get("meaning") and _occurs(g["symbol"], text)]
+    out += [("not notation", i) for i in confirmed.get("ignored", []) if _occurs(re.split(r"\s+\(", i)[0], text)]
+    out += [("answer", a.get("question", ""), a["answer"]) for a in confirmed.get("answers", []) if a.get("answer")]
+    if confirmed.get("instructions"):
+        out.append(("instructions", confirmed["instructions"]))
+    return out
 
 
 def _topic_text(p: Project) -> tuple[str, list[str]]:
@@ -930,6 +1075,10 @@ def stage_survey(run: Run) -> None:
     run.check()
     if errors:
         raise LLMError("Some pages could not be read (" + "; ".join(errors[:3]) + "). Press Resume to retry them.")
+    if not todo and reuse_ok(p.state) and p.load("glossary"):
+        run.log("No page needed surveying again: the notation found stays as it was.")
+        run.progress(total, total, "notation kept")
+        return
     if p.state["stages"].get("confirm", {}).get("status") == "done" and p.load("glossary"):
         # a page added after the author confirmed the notation: that confirmation stands, nothing is asked again
         run.log(f"{plural_pages(len(todo))} read and added to the notes.", "done")
@@ -1056,7 +1205,8 @@ def include_page(p: Project, n: int, force: bool = False) -> str:
             del survey[str(n)]
             p.save("survey", survey)
     if started("review") and stages["review"].get("status") == "done":
-        p.reset_from("review")
+        # the new page is read and checked; the paper is then brought up to date, keeping every part it does not touch
+        p.update_from("review", f"page {n} added to your notes")
     opened = False
     confirmed = stages.get("confirm", {}).get("status") == "done"
     for sid in ("survey", "transcribe", "figures"):
@@ -1311,8 +1461,13 @@ def stage_reading(run: Run) -> None:
     system = prompts.BRIEF.format()
     user = (f"Declared field: {run.field}\n\nCONFIRMED TOPIC\n{problem}\n\nCONFIRMED NOTATION\n{notation}\n\n"
             f"READING NOTES\n" + fit("\n\n".join(notes) or "(no papers could be read)", _room("reason", system, 1300) - 3000, "head"))
-    res = run.ask("reason", system, user, max_out=1300, label="Write context brief")
-    p.save("brief", {"text": res.text.strip(), "model": res.model})
+    bkey = hashlib.sha1(json.dumps([run.field, problem, notation, notes], ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+    old = p.load("brief") or {}
+    if reuse_ok(p.state) and old.get("text") and old.get("key") == bkey:
+        run.log("No paper was added or read again, so the research brief is kept.")
+    else:
+        res = run.ask("reason", system, user, max_out=1300, label="Write context brief")
+        p.save("brief", {"text": res.text.strip(), "model": res.model, "key": bkey})
     run.progress(len(reading), len(reading), "research brief written")
 
 
@@ -1971,11 +2126,33 @@ def stage_transcribe(run: Run) -> None:
     scout = p.load("scout") or {}
     from . import memory
     hand = "" if p.state.get("meta", {}).get("test") else memory.quirks()
+    reuse = reuse_ok(p.state)
+    before = conf.get("before")                # the notation as it was confirmed before the latest confirmation
+
+    def tkey(n: int, notation: dict | None) -> str:
+        """What the reading of a page is made from: its draft, its typed source or text layer, and the part of the
+        confirmed notation that occurs on it. A page is read again after a change only when this changed."""
+        draft = (survey.get(str(n)) or {}).get("text", "")
+        src = typed_src.get(str(n)) or ""
+        return hashlib.sha1(json.dumps([draft, src, layers.get(str(n), ""), notation_for(notation, draft + "\n" + src)],
+                                       default=str, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+    stamps: dict[str, str] = {}
     for i, pg in enumerate(pages, 1):
         n = pg["n"]
-        if str(n) in tr["pages"]:
-            prev_tail = tr["pages"][str(n)]["text"][-350:]
-            continue
+        rec = tr["pages"].get(str(n))
+        if rec:
+            now = tkey(n, conf)
+            was = rec.get("key") or (tkey(n, before) if before else now)   # an earlier version kept no key
+            mine = rec.get("edited") or rec.get("corrections")
+            if not reuse or was == now or mine:
+                if was != now and mine:
+                    run.log(f"Page {n}: the notation that bears on it changed, but you corrected the page yourself, so "
+                            "your text is kept. Check that it still says what you mean.", "warn")
+                if rec.get("key") != now and (reuse or not rec.get("key")):
+                    stamps[str(n)] = now if (was == now or mine) else was
+                prev_tail = rec["text"][-350:]
+                continue
+            run.log(f"Page {n} is read again: the notation that bears on it changed.")
         run.check()
         if str(n) in typed_src:                # typed notes are their own transcript: nothing to misread
             with p._lock:
@@ -2029,7 +2206,8 @@ def stage_transcribe(run: Run) -> None:
         for d in number_doubts(text, others, changes) + command_doubts(p, text):
             if not any(d["snippet"] in u.get("snippet", "") for u in uncertain):
                 uncertain.append(d)
-        rec = {"text": text, "uncertain": uncertain, "changes": changes, "model": res.model, "edited": False}
+        rec = {"text": text, "uncertain": uncertain, "changes": changes, "model": res.model, "edited": False,
+               "key": tkey(n, conf), **({"fresh": True if str(n) in tr["pages"] else "new"} if reuse else {})}
         with p._lock:                          # the author may be editing earlier pages meanwhile: merge, never overwrite
             tr = p.load("transcript", {"pages": {}})
             tr["pages"][str(n)] = rec
@@ -2037,6 +2215,13 @@ def stage_transcribe(run: Run) -> None:
         prev_tail = text[-350:]
         fresh.append(n)
         run.progress(i, total, f"page {n} transcribed", more=1)    # the check for misreadings comes after the pages
+    if stamps:
+        with p._lock:
+            cur = p.load("transcript", {"pages": {}})
+            for k, key in stamps.items():
+                if k in cur["pages"]:
+                    cur["pages"][k]["key"] = key
+            p.save("transcript", cur)
     if old_flags is not None and not fresh:
         run.progress(total, total, "transcript ready")
         return                                 # nothing new since the check
@@ -2080,8 +2265,7 @@ def stage_transcribe(run: Run) -> None:
         for f in flags:
             if not f["page"] and only:
                 f["page"] = only                    # only one page was shown: an unnumbered flag is about it
-        known = {(f.get("page"), f.get("snippet")) for f in old_flags}
-        flags = old_flags + [f for f in flags if f["page"] in to_check and (f["page"], f["snippet"]) not in known]
+        flags = [f for f in old_flags if f.get("page") not in to_check] + [f for f in flags if f["page"] in to_check]
     p.save("flags", flags)
     run.progress(total, total, "transcript checked")
     tr = p.load("transcript", {"pages": {}})
@@ -2205,7 +2389,7 @@ def _tikz_only(text: str) -> str:
 
 
 def figure_file(p: Project, fid: str, kind: str):
-    name = {"tikz": f"{fid}_tikz.png", "check": f"{fid}_check.png"}.get(kind, f"{fid}_orig.jpg")
+    name = {"tikz": f"{fid}_tikz.png", "check": f"{fid}_check.png", "pro": f"{fid}_pro.png"}.get(kind, f"{fid}_orig.jpg")
     return p.dir / "figures" / name
 
 
@@ -2240,6 +2424,20 @@ def _draw_figure(p: Project, rec: dict, ask, conf: dict, instruction: str = "") 
         rec["caption"] = re.sub(r"\s+", " ", rec.get("desc", "")).strip()
 
 
+def same_drawing(a: str, b: str) -> bool:
+    """Two descriptions of the drawing in one place of a page that say the same (the author reworded it, or the page
+    was read again): the copy already made stands."""
+    return difflib.SequenceMatcher(None, re.sub(r"\s+", " ", a or "").lower(), re.sub(r"\s+", " ", b or "").lower()).ratio() >= 0.6
+
+
+def figures_to_copy(p: Project) -> list[dict]:
+    """Drawings marked in the transcript that have no copy yet: the author added one to a page in step 9, or a page
+    read again shows a drawing that was not there before. Approving the transcript again then copies them first."""
+    old = {(f["page"], f["k"]): f for f in (p.load("figures") or {}).get("items", [])}
+    return [w for w in transcript_figures(p) if not (old.get((w["page"], w["k"])) and
+            (old[(w["page"], w["k"])].get("desc") == w["desc"] or same_drawing(old[(w["page"], w["k"])].get("desc", ""), w["desc"])))]
+
+
 def transcript_figures(p: Project) -> list[dict]:
     tr = p.load("transcript", {"pages": {}})
     out = []
@@ -2251,9 +2449,10 @@ def transcript_figures(p: Project) -> list[dict]:
 
 
 def stage_figures(run: Run) -> None:
-    """What each drawing is for (drawings.py), then a redrawing of every drawing that may be printed. A drawing that
-    only explains an argument is settled without being redrawn; the author sees it and can still print it."""
-    from . import drawings
+    """Every drawing of the notes copied as the author drew it: found on its page, cut out, and drawn again line for
+    line (figflow.py). Nothing is decided here about the paper: up to the check of the transcript the notes are
+    copied as they are, and which drawings the paper prints is decided with the structure, when the whole paper is
+    known (drawings.py), and those are then drawn again for print (figpro.py)."""
     p = run.p
     conf = p.load("confirmed", {})
     wanted = transcript_figures(p)
@@ -2269,23 +2468,21 @@ def stage_figures(run: Run) -> None:
         if prev and prev.get("desc") == w["desc"]:
             items.append({**prev, "of": w["of"]})
             continue
+        if prev and prev.get("drawn") and same_drawing(prev.get("desc", ""), w["desc"]):
+            items.append({**prev, "desc": w["desc"], "of": w["of"]})       # its description reworded: the copy stands
+            continue
         fid = prev["id"] if prev else next(f"f{n}" for n in range(1, 10000) if f"f{n}" not in taken)
         taken.add(fid)
-        items.append({"id": fid, **w, "caption": "", "box": None, "tikz": "", "tikz_ok": False, "error": "", "choice": ""})
-    fresh = [f for f in items if not f.get("judged")]
-    if fresh:
-        run.progress(0, len(items), "deciding which drawings are for the paper and which only explain an argument")
-        tr = p.load("transcript", {"pages": {}})
-        drawings.judge(run, fresh, {int(n): v.get("text", "") for n, v in tr["pages"].items()})
-        _save_figures(p, items)
-    todo = [f for f in items if drawings.wanted_drawn(f) and not f.get("drawn")]
+        items.append({"id": fid, **w, "caption": "", "box": None, "tikz": "", "tikz_ok": False, "error": "", "choice": "",
+                      **({"fresh": True} if reuse_ok(p.state) else {})})
+    todo = [f for f in items if f.get("choice") != "none" and not f.get("drawn")]
     _locate_figures(run, items, todo)
     for rec in todo:
         if rec.get("dup_of") and not rec.get("answered"):
             first = next((f for f in items if f["id"] == rec["dup_of"]), None)
-            rec.update(choice="none", auto=True, dup=True)
-            rec.setdefault("judged", {})["why"] = (f"The same drawing as the one on page {first['page'] if first else rec['page']}"
-                                                   " (the transcription marked it twice), so it is printed once.")
+            rec.update(choice="none", auto=True, dup=True,
+                       note=f"The same drawing as the one on page {first['page'] if first else rec['page']} (the "
+                            "transcription marked it twice), so it is copied once.")
     _save_figures(p, items)
     todo = [f for f in todo if not f.get("dup")]
     lock, drawn = threading.Lock(), [0]
@@ -2303,12 +2500,10 @@ def stage_figures(run: Run) -> None:
     _side_by_side(run, "vision_best", True, todo, draw)
     _save_figures(p, items)
     run.progress(len(todo), len(todo), "figures ready")
-    explained = [f for f in items if f.get("choice") == "explain" and f.get("auto")]
-    asked = [f for f in items if f.get("choice") not in ("tikz", "orig", "none", "explain")]
     good = sum(1 for f in todo if f.get("tikz_ok"))
-    run.log(f"{plural(len(items), 'drawing')} in the notes: {len(explained)} only explain an argument and are not printed "
-            f"(you can still print any of them); {plural(len(todo), 'drawing')} redrawn ({good} successfully). "
-            + (f"You will be asked about {plural(len(asked), 'drawing')}." if asked else "Nothing needs your answer."))
+    run.log(f"{plural(len(items), 'drawing')} in the notes; {plural(len(todo), 'drawing')} copied ({good} drawn again line "
+            "for line, the others cut from the page). You check each copy in the next step; which ones the paper prints "
+            "is decided with the structure.")
     if todo and all(f.get("tikz_ok") is None for f in todo):
         run.log("No LaTeX program is installed on this computer, so the redrawn figures cannot be shown. "
                 "Your own drawings, cut from the pages, are offered instead.", "warn")
@@ -2574,14 +2769,17 @@ def set_figure(p: Project, fid: str, choice: str | None = None, caption: str | N
         if not rec:
             raise ValueError("Unknown figure.")
         if choice is not None:
-            if choice not in ("tikz", "orig", "none", "explain", ""):
+            if choice == "explain":
+                raise ValueError("Whether the paper prints a drawing is decided with the structure, where you can change "
+                                 "it. Here, say only whether the copy is what you drew.")
+            if choice not in ("tikz", "orig", "none", ""):
                 raise ValueError("Unknown choice.")
             if choice == "tikz" and not rec.get("tikz_ok"):
                 raise ValueError("The redrawn version of this figure could not be produced; use your own drawing or leave it out.")
             if choice == "orig" and not rec.get("drawn"):
                 raise ValueError("This drawing has not been cut from the page yet. Choose to print it first, so that it is drawn.")
             rec["choice"], rec["auto"] = choice, False
-            if choice in ("explain", "none"):
+            if choice == "none":
                 rec.pop("asked_print", None)
         if caption is not None:
             rec["caption"], rec["caption_edited"] = re.sub(r"\s+", " ", caption).strip(), True
@@ -2598,29 +2796,45 @@ def approved_pages(p: Project) -> list[dict]:
     return [{"n": int(n), "text": v["text"]} for n, v in sorted(tr["pages"].items(), key=lambda kv: int(kv[0])) if v["text"].strip()]
 
 
-def writing_pages(p: Project) -> tuple[list[dict], dict]:
-    """The approved transcript with each figure marker carrying its id, and the figures the author kept. A drawing
-    that only explains the argument stays in the notes as [EXPLANATORY DRAWING: ...]: the writers read it, and it is
-    never printed."""
+def writing_pages(p: Project, final: bool = False, source: list[dict] | None = None) -> tuple[list[dict], dict]:
+    """The approved transcript with each drawing marked for the writers, and the figures the paper prints.
+
+    The steps that read the notes as notes (the understanding, the assessment, the statements, the structure) see
+    every drawing the author's copy keeps as [FIGURE fN: description]: up to the structure nothing is decided about
+    printing it. With final=True (the proofs and the paper), the decision of the structure step is applied: a drawing
+    the paper prints stays [FIGURE fN: ...] (with the corrections of its figure for print, when that one is printed),
+    and one that only explains an argument becomes [EXPLANATORY DRAWING: ...]: the writers read it, and it is never
+    printed. A drawing left out in step 9 is removed. The figures map gives what is printed, for each id."""
+    from . import figpro
     recs = {(f["page"], f["k"]): f for f in (p.load("figures") or {}).get("items", [])}
+    plan = (p.load("figure_plan") or {}).get("items") or {} if final else {}
+    pro = figpro.entries(p) if final else {}
     figs: dict = {}
     pages = []
-    for pg in approved_pages(p):
+    for pg in (approved_pages(p) if source is None else source):
         text = pg["text"]
         for k, (a, b, desc, _) in reversed(list(enumerate(find_figures(text)))):
             rec = recs.get((pg["n"], k))
-            if rec and rec.get("choice") in ("tikz", "orig"):
-                figs[rec["id"]] = {"mode": rec["choice"], "tikz": rec.get("tikz", ""), "caption": rec.get("caption", ""),
-                                   "page": pg["n"]}
-                text = text[:a] + f"[FIGURE {rec['id']}: {desc}]" + text[b:]
-            elif rec and rec.get("choice") == "none":
+            copied = rec and rec.get("choice") in ("tikz", "orig")
+            if rec and rec.get("choice") == "none":
                 text = text[:a] + text[b:]
-            elif rec and rec.get("choice") == "explain":
-                text = text[:a] + f"[EXPLANATORY DRAWING: {desc}]" + text[b:]
+            elif rec and final and rec["id"] in plan:
+                e = plan[rec["id"]]
+                shown = figpro.printed(p, rec, e, pro.get(rec["id"])) if copied else None
+                if shown:
+                    figs[rec["id"]] = {**shown, "with": e.get("with", ""), "in_proof": bool(e.get("in_proof"))}
+                    text = text[:a] + f"[FIGURE {rec['id']}: {figpro.writers_desc(rec, pro.get(rec['id']))}]" + text[b:]
+                else:                              # it only explains an argument (or has no copy to print)
+                    text = text[:a] + f"[EXPLANATORY DRAWING: {desc}]" + text[b:]
+            elif copied:
+                if final:                          # not decided at the structure (a paper made before it decided):
+                    figs[rec["id"]] = {"mode": rec["choice"], "tikz": rec.get("tikz", ""),      # printed as copied
+                                       "caption": rec.get("caption", ""), "page": pg["n"], "version": "copy"}
+                text = text[:a] + f"[FIGURE {rec['id']}: {desc}]" + text[b:]
             else:
                 text = text[:a] + f"[FIGURE: {desc}]" + text[b:]
         pages.append({"n": pg["n"], "text": text})
-    return pages, dict(sorted(figs.items(), key=lambda kv: int(kv[0][1:])))
+    return pages, dict(sorted(figs.items(), key=lambda kv: int(re.sub(r"\D", "", kv[0]) or 0)))
 
 
 # ------------------------------------------------------------------ gates
@@ -2662,8 +2876,11 @@ def submit_confirm(p: Project, data: dict) -> None:
              "keywords": [k.strip() for k in (topic_in.get("keywords") or old.get("keywords", [])) if str(k).strip()]}
     answers = [{"question": a.get("question", ""), "answer": (a.get("answer") or "").strip()}
                for a in data.get("answers", []) if (a.get("answer") or "").strip()]
+    prev = p.load("confirmed") or {}
     p.save("confirmed", {"topic": topic, "glossary": confirmed, "answers": answers, "ignored": ignored,
-                         "instructions": (data.get("instructions") or "").strip(), "at": time.time()})
+                         "instructions": (data.get("instructions") or "").strip(), "at": time.time(),
+                         # what the pages were read with before: after a change only the pages it bears on are read again
+                         **({"before": {k: v for k, v in prev.items() if k != "before"}} if prev.get("glossary") is not None else {})})
     from . import memory
     memory.learn_notation(p.state.get("meta", {}), confirmed)        # the next paper proposes these meanings
     p.set_stage("confirm", status="done", finished=time.time())
@@ -2751,8 +2968,17 @@ def submit_topic(p: Project, data: dict) -> str:
         else:
             topic["pending_refresh"] = True
         p.save("topic", topic)
-        p.reset_from("topiccheck")                 # what was built on the old topic goes; the papers found stay
-        p.set_stage("search1", status="pending")
+        later = any((p.state["stages"].get(sid) or {}).get("status") not in (None, "pending")
+                    for sid in STAGE_IDS[STAGE_IDS.index("topiccheck") + 1:])
+        if later:
+            # the paper went further: the search is done again and every later step is brought up to date from it
+            # (only what the new papers change is done again: the notes are not read again)
+            p.update_from("search1", "your comment on the topic")
+            p.update_state(lambda st: st["stages"].update(search1={"status": "pending", "was": "done"},
+                                                          topiccheck={"status": "stale", "was": "waiting"}))
+        else:
+            p.reset_from("topiccheck")             # what was built on the old topic goes; the papers found stay
+            p.set_stage("search1", status="pending")
         emit(p.id, "log", stage="topiccheck", level="info", message="Searching again with your comment.")
         return "refine"
     if comment:
@@ -2765,13 +2991,11 @@ def submit_topic(p: Project, data: dict) -> str:
 
 
 def assumed_choice(f: dict) -> str:
-    """The most likely answer for a figure the author did not answer: as it was judged (drawings.py), the redrawn
-    figure when it was drawn, else the author's own drawing; a drawing judged to explain the argument (or to be a
-    note on a formula) is not printed, and the writers still read it."""
-    use = (f.get("judged") or {}).get("use")
-    if use in ("explanation", "annotation"):
-        return "explain"
-    return "tikz" if f.get("tikz_ok") else "orig"
+    """The most likely answer for a drawing the author did not answer in step 9: the copy drawn again when it was
+    drawn and its check found no difference from the drawing, else the author's own drawing, cut from the page."""
+    if f.get("tikz_ok") and (f.get("check") or {}).get("same") is not False:
+        return "tikz"
+    return "orig"
 
 
 def _assume_reading(text: str) -> str:
@@ -2795,7 +3019,7 @@ def submit_review(p: Project, data: dict) -> None:
         with p._lock:
             figs = p.load("figures") or {"items": []}
             for f in figs["items"]:
-                if (f["page"], f["k"]) in present and f.get("choice") not in ("tikz", "orig", "none", "explain"):
+                if (f["page"], f["k"]) in present and f.get("choice") not in ("tikz", "orig", "none"):
                     f["choice"], f["auto"] = assumed_choice(f), True
             p.save("figures", figs)
             tr = p.load("transcript", {"pages": {}})
@@ -2814,13 +3038,27 @@ def submit_review(p: Project, data: dict) -> None:
                          + ("" if len(waiting) == 1 else "s") + " from your comments first.")
     present = {(f["page"], f["k"]) for f in transcript_figures(p)}
     open_figs = [f for f in (p.load("figures") or {}).get("items", [])
-                 if (f["page"], f["k"]) in present and f.get("choice") not in ("tikz", "orig", "none", "explain")]
+                 if (f["page"], f["k"]) in present and f.get("choice") not in ("tikz", "orig", "none")]
     if open_figs:
-        raise ValueError("Please say for each figure whether it is the one you meant (still open: page "
+        raise ValueError("Please say for each drawing whether the copy is what you drew (still open: page "
                          + ", ".join(str(f["page"]) for f in open_figs[:8]) + ").")
     corrections = {int(n): [{k: c[k] for k in ("comment", "changes", "reply")} for c in v.get("corrections", [])]
                    for n, v in tr["pages"].items() if v.get("corrections")}
-    p.save("approved", {"pages": pages, "corrections": corrections, "at": time.time()})
+    prev = p.load("approved") or {}
+    # what the understanding of the notes was made from, for a dossier made by an earlier version (which did not keep
+    # it): the pages approved before, so that only the pages changed since are read again
+    before = prev.get("before") if prev.get("before") and not (p.load("dossier") or {}).get("basis") else prev.get("pages")
+    p.save("approved", {"pages": pages, "corrections": corrections, "at": time.time(), **({"before": before} if before else {})})
+    with p._lock:
+        if any(v.get("fresh") for v in tr["pages"].values()):
+            for v in tr["pages"].values():
+                v.pop("fresh", None)
+            p.save("transcript", tr)
+        figs = p.load("figures") or {"items": []}
+        if any(f.get("fresh") for f in figs.get("items", [])):
+            for f in figs["items"]:
+                f.pop("fresh", None)
+            p.save("figures", figs)
     p.set_stage("review", status="done", finished=time.time())
     edited = sum(1 for v in tr["pages"].values() if v.get("edited"))
     emit(p.id, "log", stage="review", level="done", message=f"Transcript approved ({edited} page(s) edited by you).")
