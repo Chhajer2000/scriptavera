@@ -650,25 +650,57 @@ def _names(p: Project, items: list[dict]) -> dict:
 
 
 def raise_disputes(p: Project, pairs: list[tuple[dict, dict]], at: str, then: str = "") -> None:
-    """Each such pair is put to the author as a conversation (kept with the statements), and the action is refused
-    until every one of them is settled: by the author's argument, or by keeping the one or leaving out the other."""
+    """Each kept statement that uses left-out statements is put to the author as a conversation (kept with the
+    statements). If a statement uses multiple left-out statements, it asks for all of them in one question with
+    parts, and the author answers all parts in one reply. The action is refused until every dependence is settled."""
     with _lock:
         S = p.load("statements") or {}
         nums = _names(p, S.get("items", []))
         D = S.setdefault("disputes", [])
         first = ""
+        # Group pairs by a["id"]
+        by_a: dict[str, tuple[dict, list[dict]]] = {}
         for a, b in pairs:
-            d = next((d for d in D if d.get("open") and d["a"] == a["id"] and d["b"] == b["id"]), None)
+            if a["id"] not in by_a:
+                by_a[a["id"]] = (a, [])
+            if not any(x["id"] == b["id"] for x in by_a[a["id"]][1]):
+                by_a[a["id"]][1].append(b)
+
+        for a_id, (a, bs) in by_a.items():
+            d = next((d for d in D if d.get("open") and d["a"] == a["id"]), None)
             where = f" (page {', '.join(map(str, a['pages']))} of your notes)" if a.get("pages") else ""
-            text = (f"{_named(a, nums)} uses {_named(b, nums)} in its argument{where}, and you are leaving {_named(b, nums)} out. "
-                    f"A paper cannot use a result it does not contain. If {_named(a, nums)} does not really need it, or if you have "
-                    f"another argument for that step, say so here: if it holds, {_named(b, nums)} is left out and the proof of "
-                    f"{_named(a, nums)} is written without it. Otherwise keep {_named(b, nums)}, or leave {_named(a, nums)} out as well.")
-            if d is None:
-                D.append({"id": f"{a['id']}-{b['id']}-{int(time.time() * 1000) % 100000}", "a": a["id"], "b": b["id"], "at": at, "then": then,
-                          "open": True, "chat": [{"who": "app", "text": text, "at": time.time()}]})
+            b_ids = [b["id"] for b in bs]
+            if len(bs) == 1:
+                b = bs[0]
+                text = (f"{_named(a, nums)} uses {_named(b, nums)} in its argument{where}, and you are leaving {_named(b, nums)} out. "
+                        f"A paper cannot use a result it does not contain. If {_named(a, nums)} does not really need it, or if you have "
+                        f"another argument for that step, say so here: if it holds, {_named(b, nums)} is left out and the proof of "
+                        f"{_named(a, nums)} is written without it. Otherwise keep {_named(b, nums)}, or leave {_named(a, nums)} out as well.")
+                if d is None:
+                    d = {"id": f"{a['id']}-{b['id']}-{int(time.time() * 1000) % 100000}", "a": a["id"], "b": b["id"],
+                         "bs": [b["id"]], "pending": [b["id"]], "at": at, "then": then,
+                         "open": True, "chat": [{"who": "app", "text": text, "at": time.time()}]}
+                    D.append(d)
+                else:
+                    d.update(at=at, then=then, bs=[b["id"]], pending=[b["id"]])
             else:
-                d.update(at=at, then=then)
+                names_list = [_named(b, nums) for b in bs]
+                parts_text = "\n\n".join(f"Part {i+1} ({names_list[i]}):\n{bs[i]['statement']}" for i in range(len(bs)))
+                text = (f"{_named(a, nums)} uses {', '.join(names_list)} in its argument{where}, and you are leaving them out. "
+                        f"A paper cannot use results it does not contain. If {_named(a, nums)} does not really need them, or if you have "
+                        f"another argument for those steps, answer here for all the statements in one reply:\n\n"
+                        f"{parts_text}\n\n"
+                        f"For each part, explain why it is not needed, or give another argument for that step. "
+                        f"If your explanation holds for a part, that statement is left out and the proof of {_named(a, nums)} is written without it. "
+                        f"Any parts that are missing or have doubts will be asked again together. "
+                        f"Otherwise keep them in the paper, or leave {_named(a, nums)} out as well.")
+                if d is None:
+                    d = {"id": f"{a['id']}-multi-{int(time.time() * 1000) % 100000}", "a": a["id"], "b": bs[0]["id"],
+                         "bs": b_ids, "pending": b_ids, "at": at, "then": then,
+                         "open": True, "chat": [{"who": "app", "text": text, "at": time.time()}]}
+                    D.append(d)
+                else:
+                    d.update(at=at, then=then, bs=b_ids, pending=b_ids)
             first = first or text
         S["disputes"] = D[-40:]
         p.save("statements", S)
@@ -677,15 +709,64 @@ def raise_disputes(p: Project, pairs: list[tuple[dict, dict]], at: str, then: st
 
 def open_disputes(p: Project, S: dict | None = None) -> list[dict]:
     """The conversations that still stand in the way: the kept statement still lists the other as used, and the other
-    is left out (or is the one the author asked to leave out at the structure step)."""
+    is left out (or is the one the author asked to leave out at the structure step). When a statement has multiple
+    open disputes, they are consolidated into one multi-part conversation."""
     S = S or p.load("statements") or {}
-    by = {x["id"]: x for x in S.get("items", [])}
-    out = []
+    items = S.get("items", [])
+    by = {x["id"]: x for x in items}
+    nums = _names(p, items)
+
+    by_a: dict[str, list[dict]] = {}
     for d in S.get("disputes") or []:
-        a, b = by.get(d["a"]), by.get(d["b"])
-        if d.get("open") and a and b and a.get("treatment") != "omit" and d["b"] in (a.get("depends") or []) \
-                and (b.get("treatment") == "omit" or d.get("then") == "drop"):
-            out.append(d)
+        if not d.get("open"):
+            continue
+        a = by.get(d.get("a"))
+        if not a or a.get("treatment") == "omit":
+            continue
+        bs = d.get("bs") or ([d["b"]] if "b" in d else [])
+        pending = [b for b in bs if b in (a.get("depends") or []) and (by.get(b, {}).get("treatment") == "omit" or d.get("then") == "drop")]
+        if not pending:
+            d["open"] = False
+            continue
+        d["pending"] = pending
+        d["bs"] = bs
+        by_a.setdefault(d["a"], []).append(d)
+
+    out = []
+    for a_id, d_list in by_a.items():
+        if len(d_list) == 1:
+            out.append(d_list[0])
+        else:
+            first_d = d_list[0]
+            all_bs: list[str] = []
+            all_pending: list[str] = []
+            for d in d_list:
+                for b in d.get("bs", [d.get("b")]):
+                    if b and b not in all_bs:
+                        all_bs.append(b)
+                for b in d.get("pending", []):
+                    if b and b not in all_pending:
+                        all_pending.append(b)
+                if d != first_d:
+                    d["open"] = False
+            first_d["bs"] = all_bs
+            first_d["pending"] = all_pending
+            if len(first_d.get("chat", [])) <= 1 and len(all_pending) > 1:
+                a = by[a_id]
+                bs_items = [by[bid] for bid in all_pending if bid in by]
+                names_list = [_named(b, nums) for b in bs_items]
+                where = f" (page {', '.join(map(str, a['pages']))} of your notes)" if a.get("pages") else ""
+                parts_text = "\n\n".join(f"Part {i+1} ({names_list[i]}):\n{bs_items[i]['statement']}" for i in range(len(bs_items)))
+                text = (f"{_named(a, nums)} uses {', '.join(names_list)} in its argument{where}, and you are leaving them out. "
+                        f"A paper cannot use results it does not contain. If {_named(a, nums)} does not really need them, or if you have "
+                        f"another argument for those steps, answer here for all the statements in one reply:\n\n"
+                        f"{parts_text}\n\n"
+                        f"For each part, explain why it is not needed, or give another argument for that step. "
+                        f"If your explanation holds for a part, that statement is left out and the proof of {_named(a, nums)} is written without it. "
+                        f"Any parts that are missing or have doubts will be asked again together. "
+                        f"Otherwise keep them in the paper, or leave {_named(a, nums)} out as well.")
+                first_d["chat"] = [{"who": "app", "text": text, "at": time.time()}]
+            out.append(first_d)
     return out
 
 
@@ -695,11 +776,26 @@ def disputes_view(p: Project, S: dict) -> list[dict]:
     by = {x["id"]: x for x in items}
     kept = {x["id"] for x in items if x.get("treatment") != "omit"}
     side = lambda x: {"id": x["id"], "name": _named(x, nums), "statement": x["statement"]}      # noqa: E731
-    return [{"id": d["id"], "a": side(by[d["a"]]), "b": side(by[d["b"]]), "at": d["at"], "then": d.get("then", ""), "chat": d["chat"],
-             # leaving the kept one out as well is offered when nothing kept uses it and it is not a main result
-             "can_omit_a": by[d["a"]].get("role") != "main" and not any(d["a"] in (y.get("depends") or []) for y in items if y["id"] in kept
-                                                                        and y["kind"] not in ("example", "remark", "question"))}
-            for d in open_disputes(p, S)]
+    out = []
+    for d in open_disputes(p, S):
+        a = by[d["a"]]
+        bs = [by[bid] for bid in d.get("bs", [d["b"]]) if bid in by]
+        pending_ids = d.get("pending") or [b["id"] for b in bs]
+        pending_items = [by[bid] for bid in pending_ids if bid in by]
+        b0 = pending_items[0] if pending_items else (bs[0] if bs else a)
+        out.append({
+            "id": d["id"],
+            "a": side(a),
+            "b": side(b0),
+            "bs": [side(x) for x in bs],
+            "pending": [side(x) for x in pending_items],
+            "at": d["at"],
+            "then": d.get("then", ""),
+            "chat": d["chat"],
+            "can_omit_a": a.get("role") != "main" and not any(d["a"] in (y.get("depends") or []) for y in items if y["id"] in kept
+                                                               and y["kind"] not in ("example", "remark", "question")),
+        })
+    return out
 
 
 def _close_dispute(p: Project, did: str, how: str, say: str = "") -> None:
@@ -724,10 +820,10 @@ def _after_dispute(p: Project, d: dict) -> None:
 
 
 def talk_dispute(p: Project, did: str, text: str) -> dict:
-    """The author's reply in the conversation about a statement that is left out although a kept one uses it. The
-    reply is judged: when the kept statement does not need the other, or the author's other argument for that step
-    holds, the dependence goes, the argument is kept for the writer of that proof, and the statement is left out.
-    Otherwise the reason is given, and the author may answer again."""
+    """The author's reply in the conversation about statements left out that a kept one uses. The reply is judged:
+    when the kept statement does not need the other, or the author's other argument for that step holds, the
+    dependence goes. If multiple statements are left out, the author answers all parts in one reply; any parts with
+    doubts or missing arguments are returned together in one follow-up. When all hold, the statements are confirmed."""
     text = (text or "").strip()[:4000]
     if not text:
         raise ValueError("Write your reason or your argument first.")
@@ -736,40 +832,133 @@ def talk_dispute(p: Project, did: str, text: str) -> dict:
     if not d:
         raise ValueError("This question is settled already. Reload the page.")
     by = {x["id"]: x for x in S["items"]}
-    a, b = by[d["a"]], by[d["b"]]
+    a = by[d["a"]]
     nums = _names(p, S["items"])
     pages, _ = writing_pages(p)
     run = Run(p)
     run.stage = d["at"]
-    user = (f"STATEMENT A (kept), {_named(a, nums)}\n{a['statement']}\n\nSTATEMENT B (left out), {_named(b, nums)}\n{b['statement']}\n\n"
+
+    pending_ids = list(d.get("pending") or d.get("bs") or [d["b"]])
+    pending = [by[bid] for bid in pending_ids if bid in by]
+
+    if len(pending) <= 1:
+        b = pending[0] if pending else by[d["b"]]
+        user = (f"STATEMENT A (kept), {_named(a, nums)}\n{a['statement']}\n\nSTATEMENT B (left out), {_named(b, nums)}\n{b['statement']}\n\n"
+                f"THE AUTHOR'S ARGUMENT FOR A, FROM THE NOTES\n{author_argument(a, pages, 6000)}\n\n"
+                + "THE EXCHANGE SO FAR\n" + "\n".join(f"{m['who']}: {m['text']}" for m in d["chat"]) + "\n\n"
+                + f"THE AUTHOR'S REPLY\n{text}")
+        res = run.ask("reason", prompts.ARGUE_OMIT.format(field=run.field), user, max_out=1200, effort="high",
+                      label=f"Judge your reason for leaving out {b['id']}, which {a['id']} uses")
+        verdict = (extract_tag(res.text, "verdict") or "needed").strip().lower()
+        reply = re.sub(r"\s+", " ", extract_tag(res.text, "reply") or "").strip() or "No clear answer came back; try again."
+        instruction = _none(extract_tag(res.text, "instruction"))
+        settled = verdict.startswith(("not_used", "avoided"))
+        with _lock:
+            S = p.load("statements") or {}
+            cur = next((x for x in S.get("disputes") or [] if x["id"] == did), None)
+            if cur is None:
+                raise ValueError("This question is settled already. Reload the page.")
+            cur["chat"] += [{"who": "you", "text": text, "at": time.time()},
+                            {"who": "ai", "text": reply, "at": time.time(), "verdict": "needed" if not settled else verdict.split()[0]}]
+            if settled:
+                cur["open"], cur["settled"] = False, verdict.split()[0]
+                cur["pending"] = []
+                y = next(x for x in S["items"] if x["id"] == a["id"])
+                y["depends"] = [i for i in y.get("depends", []) if i != b["id"]]
+                if verdict.startswith("avoided"):
+                    y["instruction"] = (y.get("instruction", "") + "\n" + (instruction or text)).strip()
+            p.save("statements", S)
+            if settled:
+                remember(p, S)
+        if settled:
+            _after_dispute(p, d)
+        return {"settled": settled, "verdict": "needed" if not settled else verdict.split()[0], "reply": reply}
+
+    # Multi-statement dispute
+    parts_desc = "\n\n".join(f"PART {i+1}: {_named(pending[i], nums)} (ID: {pending[i]['id']})\n{pending[i]['statement']}" for i in range(len(pending)))
+    user = (f"STATEMENT A (kept), {_named(a, nums)}\n{a['statement']}\n\n"
+            f"LEFT OUT STATEMENTS TO ADDRESS:\n{parts_desc}\n\n"
             f"THE AUTHOR'S ARGUMENT FOR A, FROM THE NOTES\n{author_argument(a, pages, 6000)}\n\n"
             + "THE EXCHANGE SO FAR\n" + "\n".join(f"{m['who']}: {m['text']}" for m in d["chat"]) + "\n\n"
-            + f"THE AUTHOR'S REPLY\n{text}")
-    res = run.ask("reason", prompts.ARGUE_OMIT.format(field=run.field), user, max_out=1200, effort="high",
-                  label=f"Judge your reason for leaving out {b['id']}, which {a['id']} uses")
-    verdict = (extract_tag(res.text, "verdict") or "needed").strip().lower()
-    reply = re.sub(r"\s+", " ", extract_tag(res.text, "reply") or "").strip() or "No clear answer came back; try again."
-    instruction = _none(extract_tag(res.text, "instruction"))
-    settled = verdict.startswith(("not_used", "avoided"))
+            + f"THE AUTHOR'S REPLY (addressing all parts)\n{text}")
+
+    b_ids_label = ", ".join(b["id"] for b in pending)
+    res = run.ask("reason", prompts.ARGUE_OMIT_MULTI.format(field=run.field), user, max_out=1800, effort="high",
+                  label=f"Judge your reasons for leaving out {b_ids_label}, which {a['id']} uses")
+
+    import re as py_re
+    part_verdicts: dict[str, str] = {}
+    part_reasons: dict[str, str] = {}
+    part_instructions: dict[str, str] = {}
+    for m in py_re.finditer(r'<part\s+id=["\']([^"\']+)["\']>(.*?)</part>', res.text, py_re.DOTALL):
+        pid = m.group(1).strip()
+        body = m.group(2)
+        v = (extract_tag(body, "verdict") or "needed").strip().lower()
+        r = (extract_tag(body, "reply") or extract_tag(body, "reason") or "").strip()
+        ins = _none(extract_tag(body, "instruction"))
+        part_verdicts[pid] = v
+        part_reasons[pid] = r
+        part_instructions[pid] = ins
+
+    held_ids: list[str] = []
+    rem_ids: list[str] = []
+    doubts: list[str] = []
+    missing: list[str] = []
+
+    for b in pending:
+        v = part_verdicts.get(b["id"], "needed")
+        if v.startswith(("not_used", "avoided")):
+            held_ids.append(b["id"])
+        elif "missing" in v:
+            rem_ids.append(b["id"])
+            missing.append(_named(b, nums))
+        else:
+            rem_ids.append(b["id"])
+            reason_str = part_reasons.get(b["id"]) or "argument does not fully replace this step"
+            doubts.append(f"{_named(b, nums)}: {reason_str}")
+
+    settled = len(rem_ids) == 0
+    reply = re.sub(r"\s+", " ", extract_tag(res.text, "reply") or "").strip()
+
+    if not reply or not settled:
+        msg_parts = []
+        if held_ids:
+            held_names = [_named(by[i], nums) for i in held_ids if i in by]
+            msg_parts.append(f"Arguments hold for: {', '.join(held_names)} (dependencies removed).")
+        if doubts:
+            msg_parts.append("Doubts or arguments needed:\n" + "\n".join(f"- {d_str}" for d_str in doubts))
+        if missing:
+            msg_parts.append(f"Not addressed yet: {', '.join(missing)}.")
+        if rem_ids:
+            msg_parts.append("Please provide your argument for the remaining parts above in one reply.")
+        synthesized = "\n\n".join(msg_parts)
+        if not reply or len(rem_ids) > 0:
+            reply = synthesized
+
     with _lock:
         S = p.load("statements") or {}
         cur = next((x for x in S.get("disputes") or [] if x["id"] == did), None)
         if cur is None:
             raise ValueError("This question is settled already. Reload the page.")
         cur["chat"] += [{"who": "you", "text": text, "at": time.time()},
-                        {"who": "ai", "text": reply, "at": time.time(), "verdict": "needed" if not settled else verdict.split()[0]}]
+                        {"who": "ai", "text": reply, "at": time.time(), "verdict": "avoided" if settled else "needed"}]
+        cur["pending"] = rem_ids
+        cur["open"] = not settled
         if settled:
-            cur["open"], cur["settled"] = False, verdict.split()[0]
-            y = next(x for x in S["items"] if x["id"] == a["id"])
-            y["depends"] = [i for i in y.get("depends", []) if i != b["id"]]
-            if verdict.startswith("avoided"):
-                y["instruction"] = (y.get("instruction", "") + "\n" + (instruction or text)).strip()
+            cur["settled"] = "avoided"
+
+        y = next(x for x in S["items"] if x["id"] == a["id"])
+        for hid in held_ids:
+            y["depends"] = [i for i in y.get("depends", []) if i != hid]
+            if part_verdicts.get(hid, "").startswith("avoided") and part_instructions.get(hid):
+                y["instruction"] = (y.get("instruction", "") + "\n" + part_instructions[hid]).strip()
+
         p.save("statements", S)
         if settled:
             remember(p, S)
     if settled:
         _after_dispute(p, d)
-    return {"settled": settled, "verdict": "needed" if not settled else verdict.split()[0], "reply": reply}
+    return {"settled": settled, "verdict": "avoided" if settled else "needed", "reply": reply}
 
 
 def settle_dispute(p: Project, did: str, how: str) -> dict:
@@ -782,8 +971,9 @@ def settle_dispute(p: Project, did: str, how: str) -> dict:
         return {"settled": True}
     by = {x["id"]: x for x in S["items"]}
     if how == "keep":
-        if by[d["b"]].get("treatment") == "omit":
-            _save_item(p, d["b"], lambda y, S_: y.update(treatment=y.pop("before_omit", None) or "keep"))
+        for bid in d.get("bs", [d["b"]]):
+            if by.get(bid, {}).get("treatment") == "omit":
+                _save_item(p, bid, lambda y, S_: y.update(treatment=y.pop("before_omit", None) or "keep"))
         _close_dispute(p, did, "kept")
     elif how == "omit":
         a = by[d["a"]]
@@ -799,10 +989,8 @@ def settle_dispute(p: Project, did: str, how: str) -> dict:
         if d.get("then") == "drop":
             _close_dispute(p, did, "not left out")
     else:
-        raise ValueError("Unknown action.")
+        raise ValueError("Unknown choice.")
     return {"settled": how != "close" or d.get("then") == "drop"}
-
-
 def replan_outline(p: Project, instruction: str) -> dict:
     """The structure planned again with the author's instruction."""
     instruction = (instruction or "").strip()[:2000]

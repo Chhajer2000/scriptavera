@@ -2718,17 +2718,32 @@ function disputeDialog() {
   if (!d) return "";
   const dp = S.dp || (S.dp = {}), more = (W().disputes || []).length - 1, busy = S.busy === "dptalk";
   const a = esc(d.a.name), b = esc(d.b.name);
+  const parts = d.pending && d.pending.length ? d.pending : [d.b];
+  const isMulti = parts.length > 1;
+  const title = isMulti ? `${a} uses ${parts.length} statements which you are leaving out` : `${a} uses ${b}, which you are leaving out`;
+  const rightCol = isMulti
+    ? `<div><div class="dlabel">Left out statements (${parts.length} parts)</div>` +
+      parts.map((p, idx) => `<div style="margin-bottom:12px"><div class="small" style="font-weight:600;margin-bottom:3px">Part ${idx + 1}: Left out ${esc(p.name)}</div><div class="tex-block">${latexLite(p.statement)}</div></div>`).join("") + `</div>`
+    : `<div><div class="dlabel">Left out: ${b}</div><div class="tex-block">${latexLite(d.b.statement)}</div></div>`;
+  const ph = isMulti
+    ? `Answer all parts: why ${a} does not need these statements, or your other arguments for those steps`
+    : `Why ${a} does not need ${b}, or your other argument for that step`;
+  const keepText = isMulti ? "Keep these statements in the paper" : `Keep ${b} in the paper`;
+  const explText = isMulti
+    ? `Your reply goes to the model that reasons about the mathematics. Answer all parts in one reply. Any parts with doubts or missing arguments will be asked again together.${more > 0 ? ` ${plural(more, "more question")} of this kind follow.` : ""}`
+    : `Your reply goes to the model that reasons about the mathematics. If your reason holds, ${b} is left out and the proof of ${a} is written without it${d.at === "scope" && dp.from === "confirm" ? ", and the statements are confirmed" : ""}. If it does not, you get the reason and can answer again.${more > 0 ? ` ${plural(more, "more question")} of this kind follow${more === 1 ? "s" : ""}.` : ""}`;
+
   return `<div class="dialog wide" id="dpdialog" role="dialog" aria-modal="true" aria-labelledby="dph">
-    <div class="dlg-h"><h2 id="dph">${a} uses ${b}, which you are leaving out</h2><button class="btn small quiet" data-act="dpclose">Close</button></div>
+    <div class="dlg-h"><h2 id="dph">${title}</h2><button class="btn small quiet" data-act="dpclose">Close</button></div>
     <div class="dlg-b">
       <div class="twocol"><div><div class="dlabel">Kept: ${a}</div><div class="tex-block">${latexLite(d.a.statement)}</div></div>
-        <div><div class="dlabel">Left out: ${b}</div><div class="tex-block">${latexLite(d.b.statement)}</div></div></div>
+        ${rightCol}</div>
       <div class="chat" id="dpchat">${d.chat.map((m) => `<div class="msg ${m.who}"><div class="msg-who">${m.who === "you" ? "You" : m.who === "app" ? "Scriptavera" : m.verdict && m.verdict !== "needed" ? "Reply: your argument holds" : "Reply"}</div>
         <div>${inner(lite(numRefs(m.text)))}</div></div>`).join("")}${busy ? `<div class="msg ai"><div class="msg-who">Reply</div><div><span class="spinner"></span> Checking your argument…</div></div>` : ""}</div>
-      <textarea rows="4" data-dptext placeholder="Why ${a} does not need ${b}, or your other argument for that step" ${busy ? "disabled" : ""}>${esc(dp.text || "")}</textarea>
-      <p class="muted small" style="margin-top:6px">Your reply goes to the model that reasons about the mathematics. If your reason holds, ${b} is left out and the proof of ${a} is written without it${d.at === "scope" && dp.from === "confirm" ? ", and the statements are confirmed" : ""}. If it does not, you get the reason and can answer again.${more > 0 ? ` ${plural(more, "more question")} of this kind follow${more === 1 ? "s" : ""}.` : ""}</p>
+      <textarea rows="4" data-dptext placeholder="${ph}" ${busy ? "disabled" : ""}>${esc(dp.text || "")}</textarea>
+      <p class="muted small" style="margin-top:6px">${explText}</p>
     </div>
-    <div class="dlg-f"><button class="btn" data-act="dpkeep" ${S.busy ? "disabled" : ""}>Keep ${b} in the paper</button>
+    <div class="dlg-f"><button class="btn" data-act="dpkeep" ${S.busy ? "disabled" : ""}>${keepText}</button>
       ${d.can_omit_a ? `<button class="btn" data-act="dpomit" ${S.busy ? "disabled" : ""}>Leave ${a} out as well</button>` : ""}
       <span class="tb-space"></span><button class="btn primary" data-act="dptalk" ${S.busy ? "disabled" : ""}>${busy ? "Checking…" : "Send"}</button></div></div>`;
 }

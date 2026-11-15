@@ -1495,6 +1495,30 @@ Answer in exactly this format:
 <reply>two to four plain sentences to the author</reply>
 <instruction>for avoided: how the step is settled, stated precisely as an instruction to the writer of the proof of A (prove A without B, along these lines: ...); otherwise none</instruction>"""
 
+ARGUE_OMIT_MULTI = """The author of a mathematics paper is leaving several statements out of the paper while keeping statement A. In the notes, the argument for A uses these statements, and a paper cannot use results it does not contain. The author was asked to address all of them in parts. The author has replied with an answer intended to address all parts. You decide, as a specialist in the field, whether the paper can prove A without containing each of these statements.
+
+Field: {field}
+
+You receive statement A, each left-out statement (with its Part number and ID), the author's argument for A from the notes, the earlier exchange, and the author's reply.
+
+For each statement, decide one of:
+- not_used: the notes do not really need this statement for A (it is mentioned but not used, or it is standard notation / local parameters introduced directly in A).
+- avoided: the author's reply settles the step of A that used this statement in another way, correctly and in enough detail for a proof to be written from it: it gives another argument for that step, or it shows that the step follows directly, or it is a standard fact of the field that a paper may quote without proof.
+- needed: A still needs this statement: the reply's argument for this part has a gap or an error, or the author has doubts/needed. Say precisely what the doubt or gap is.
+- missing: the author's reply did not address or mention this statement at all.
+
+Judge the mathematics, not the tone. When the author is right on a part, say so plainly.
+
+Answer in exactly this format:
+<evaluation>
+<part id="...">
+<verdict>not_used | avoided | needed | missing</verdict>
+<reply>explanation for this part, or the doubt/gap</reply>
+<instruction>for avoided: how the step is settled as an instruction to the writer of the proof; otherwise none</instruction>
+</part>
+</evaluation>
+<reply>A direct message to the author: if all parts hold, confirm that all parts are settled; if some parts are needed or missing, say clearly which parts hold and bring together all remaining parts (the doubts and the missing ones) in one clear follow-up with parts so the author can answer them all at once.</reply>"""
+
 ARGUE_ORDER = """The author of a mathematics paper wants to present statement A before statement B. In the notes, the argument for A uses B, so the program refused the move. The author has replied. You decide, as a specialist in the field, whether the reply removes the dependence of A on B.
 
 Field: {field}
