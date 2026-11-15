@@ -175,7 +175,7 @@ def parse_dossier(text: str) -> dict:
         defs.append({"id": did, "name": r.get("name", "").strip(), "text": r.get("text", "").strip(),
                      "page": (page_list(r.get("page", "")) or [0])[0]})
     others = []
-    for r in fields(text, "other", ("id", "kind", "text", "page", "relates")):
+    for r in fields(text, "other", ("id", "kind", "text", "page", "relates", "needs_before")):
         if not r.get("text", "").strip():
             continue
         oid = re.sub(r"[^A-Za-z0-9]", "", r.get("id", "")) or f"O{len(others) + 1}"
@@ -183,7 +183,9 @@ def parse_dossier(text: str) -> dict:
             oid = f"O{len(others) + 1}x"
         kind = next((k for k in OTHER_KINDS if k in r.get("kind", "").lower()), "remark")
         others.append({"id": oid, "kind": kind, "text": r["text"].strip(), "page": (page_list(r.get("page", "")) or [0])[0],
-                       "relates": re.findall(r"\b[A-Za-z]\d+\b", r.get("relates", ""))})
+                       "relates": re.findall(r"\b[A-Za-z]\d+\b", r.get("relates", "")),
+                       # what it is built from and must come after: asked apart from "relates", which is two-way
+                       "uses": [i for i in re.findall(r"\b[A-Za-z]\d+\b", r.get("needs_before", "")) if i != oid]})
     src = re.sub(r"[\[\]\s]", "", extract_tag(text, "source"))
     return {
         "problem": extract_tag(text, "problem").strip(), "source": _none(src), "setting": extract_tag(text, "setting").strip(),
@@ -226,7 +228,7 @@ def dossier_text(d: dict, limit: int = 12000) -> str:
     if d.get("others"):
         L.append("EXAMPLES, REMARKS, QUESTIONS, CONSTRUCTIONS, METHODS AND ALGORITHMS\n" + "\n".join(
             f"- {x['id']} ({x['kind']}, page {x['page']}" + (f", about {', '.join(x['relates'])}" if x.get("relates") else "")
-            + f"): {x['text']}" for x in d["others"]))
+            + (f", uses {', '.join(x['uses'])}" if x.get("uses") else "") + f"): {x['text']}" for x in d["others"]))
     if d.get("storyline"):
         L.append(f"HOW THE ARGUMENT GOES\n{d['storyline']}")
     if d.get("contribution"):
@@ -355,6 +357,10 @@ def keep_ids(old: dict, new: dict) -> None:
             x["id"] = rename.get(x["id"], x["id"])
         for x in new.get("results") or []:
             x["depends"] = [rename.get(i, i) for i in x.get("depends") or []]
+        for x in new.get("others") or []:
+            for k in ("relates", "uses"):
+                if k in x:
+                    x[k] = [rename.get(i, i) for i in x[k] or []]
 
 
 def update_dossier(run: Run, old: dict, before: dict, basis: dict, pages: list[dict]) -> bool:
@@ -419,6 +425,10 @@ def update_dossier(run: Run, old: dict, before: dict, basis: dict, pages: list[d
     gone = [i for i in removed if any(x["id"] == i for g in ("results", "definitions", "others") for x in old.get(g) or [])]
     for x in d.get("results") or []:
         x["depends"] = [i for i in x.get("depends") or [] if i not in removed]
+    for x in d.get("others") or []:
+        for k in ("relates", "uses"):
+            if k in x:
+                x[k] = [i for i in x[k] or [] if i not in removed]
     new_results = [x for x in d["results"] if x["id"] in touched]
     if new_results and len(d["results"]) > 1:
         before_checked = list(old.get("checked") or [])

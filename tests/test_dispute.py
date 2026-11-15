@@ -100,4 +100,28 @@ P = p.load("proofs")["items"]
 assert "R4" not in P and P["R5"]["comment"].startswith("Prove it without the lemma"), P["R5"].get("comment")
 print("4. at the structure step the same: nothing is dropped until the question is settled; then the statement is left out and "
       "the proof of the one that used it is written with the author's argument")
+
+# ------------------------------------------------- 5. an argument the author won is not fought again after a change
+r5 = item("R5")
+assert sorted(r5["waived"]) == ["R2", "R4"] and "without the lemma" in r5["instruction"], r5
+p.remove("statements")                                   # the notes changed: every statement is written again
+run = pipeline.Run(p); run.stage = "scope"
+drafting.prepare_statements(run)
+r5 = item("R5")
+assert "R2" not in r5["depends"] and "R4" not in r5["depends"], r5["depends"]      # the dossier says it uses them; the author argued it does not
+assert "without the lemma" in r5["instruction"], "the argument the author gave in their place is still given to the writer"
+assert confirm() == "", "the author is not asked to win the same argument twice"
+mem = list(p.load("statements_memory").values())
+assert any("R2" in (m.get("waived") or []) for m in mem), mem
+# a statement whose own notes changed is written again, and what was decided about it goes with it
+d = p.load("dossier")
+for x in d["results"]:
+    if x["id"] == "R5":
+        x["statement"] += " Moreover the bound is attained only for $n = 1$."      # the author rewrote that page
+p.save("dossier", d)
+p.remove("statements")
+drafting.prepare_statements(run)
+assert "R4" in item("R5")["depends"] and not item("R5").get("waived"), "the argument was about the statement as it stood"
+print("5. a dependence the author argued away does not come back when the statements are written again after a change, "
+      "and neither is the author's own argument lost; a statement whose notes changed is asked about afresh")
 print("dispute ok")

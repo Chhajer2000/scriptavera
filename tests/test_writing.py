@@ -69,9 +69,86 @@ class _Bad:
 bad = _Bad()
 try:
     drafting.plan_structure(bad, its); raise SystemExit("an incomplete plan is never used")
+except drafting.LLMError as e:               # the very fault it was told of, given again: not asked a third time, and not "tried again shortly"
+    assert e.kind == "plan" and "same fault twice" in str(e) and not e.retry_at and not pipeline.passing(e), e
+assert len(bad.asked) == 2 and "in no section: D1, R1, R2" in bad.asked[1][1] and "YOUR PREVIOUS ANSWER" in bad.asked[1][1]
+
+
+class _Varying(_Bad):                        # a different fault each time: this may pass, so it is tried again later
+    asked = []
+
+    def ask(self, role, system, user, **kw):
+        self.asked.append((kw["label"], user))
+        return type("R", (), {"text": f"<section>\ntitle: Part\nitems: {['O1', 'D1', 'R1'][len(self.asked) - 1]}\n</section>", "model": "m"})()
+
+
+vary = _Varying()
+try:
+    drafting.plan_structure(vary, its); raise SystemExit("an incomplete plan is never used")
 except drafting.LLMError as e:
-    assert e.kind == "transient" and "could not be planned" in str(e), e
-assert len(bad.asked) == drafting.PLAN_TRIES and "in no section: D1, R1, R2" in bad.asked[1][1] and "YOUR PREVIOUS ANSWER" in bad.asked[1][1]
+    assert e.kind == "transient" and "could not be planned" in str(e) and e.retry_at, e
+assert len(vary.asked) == drafting.PLAN_TRIES
+
+# what uses what: "relates" is not "uses", and a circle is found and taken out before any plan is asked for
+dos = writing.parse_dossier("<other>\nid: O1\nkind: construction\ntext: the scheme\npage: 1\nrelates: D1, O2, O3\nneeds_before: D1\n</other>\n"
+                            "<other>\nid: O2\nkind: method\ntext: the substitution\npage: 1\nrelates: O1, O3\nneeds_before: none\n</other>\n"
+                            "<other>\nid: O3\nkind: example\ntext: an example\npage: 2\nrelates: O1\n</other>")
+got = {x["id"]: x["depends"] for x in drafting._items_from_dossier(dos, {})}
+assert got == {"O1": ["D1"], "O2": [], "O3": ["O1"]}, got      # a construction comes after what it is built from, not after all it relates to
+old = {"others": [{"id": "O1", "kind": "method", "text": "t", "page": 1, "relates": ["O2"]}]}       # a dossier made before "uses" was asked for
+assert drafting._items_from_dossier(old, {})[0]["depends"] == ["O2"]
+assert "needs_before:" in prompts.UNDERSTAND and "is used by" in prompts.UNDERSTAND
+
+
+def circle():
+    return [dict(x, statement=x["id"] + " says", pages=[1]) for x in [
+        {"id": "D3", "kind": "definition", "depends": []}, {"id": "O1", "kind": "construction", "depends": ["D3", "O2", "O3"]},
+        {"id": "O2", "kind": "method", "depends": ["D3", "O1", "O3"]}, {"id": "O3", "kind": "proposition", "depends": ["D3", "O1", "O2"]},
+        {"id": "O4", "kind": "remark", "depends": ["O3"]}, {"id": "R1", "kind": "theorem", "depends": ["O3", "O4"]}]]
+
+
+assert drafting.loops(its) == [] and drafting.loops(circle()) == [["O1", "O2", "O3"]]
+assert drafting.loops([{"id": "A", "kind": "lemma", "depends": ["B"]}, {"id": "B", "kind": "example", "depends": ["A"]}]) == [], \
+    "what an example mentions need not come before it: no circle"
+silent = _Bad(); silent.asked = []
+try:
+    drafting.plan_structure(silent, circle()); raise SystemExit("no order exists: no plan can be right")
+except drafting.LLMError as e:
+    assert e.kind == "order" and "O1, O2 and O3" in str(e) and not e.retry_at and not pipeline.passing(e), e
+assert not silent.asked, "a model is never asked for an order that cannot exist"
+
+
+class _Says:
+    field = "analysis"
+
+    def __init__(self, text):
+        self.text, self.asked = text, []
+
+    def ask(self, role, system, user, **kw):
+        self.asked.append((kw["label"], user))
+        return type("R", (), {"text": self.text, "model": "m"})()
+
+    def log(self, *a):
+        pass
+
+
+its2 = circle()
+m = _Says("O3: O1, O2\n- O1: none\n**O2**: none")
+told = drafting.settle_loops(m, its2)
+deps = {x["id"]: x["depends"] for x in its2}
+assert deps["O1"] == ["D3"] and deps["O2"] == ["D3"] and deps["O3"] == ["D3", "O1", "O2"] and deps["R1"] == ["O3", "O4"], deps
+assert len(m.asked) == 1 and "CIRCLE 1" in m.asked[0][1] and "recorded as using O2, O3" in m.asked[0][1] and "R1" not in m.asked[0][1]
+assert len(told) == 1 and "O3 uses O1 and O2" in told[0] and "read again" in told[0], told
+assert not drafting.loops(its2) and drafting.settle_loops(m, its2) == [] and len(m.asked) == 1
+secs, probs = drafting.check_plan([{"title": "The scheme", "items": "D3, O1, O2, O3, O4, R1"}], its2)
+assert not probs, probs
+for answer in ("O1: O2\nO2: O3\nO3: O1", "no idea", "O1: none"):          # an answer with a circle, or none, or half of one
+    its3 = circle()
+    m = _Says(answer)
+    told = drafting.settle_loops(m, its3)
+    deps = {x["id"]: x["depends"] for x in its3}
+    assert deps["O1"] == ["D3"] and deps["O2"] == ["D3", "O1"] and deps["O3"] == ["D3", "O1", "O2"] and not drafting.loops(its3), (answer, deps)
+    assert "order of your notes" in told[0], told
 assert "One to six" not in prompts.OUTLINE and "As many sections as this paper" in prompts.OUTLINE
 try:
     drafting.edit_outline(p, {"move": "R5", "to": "up"}); raise SystemExit("R5 uses R4: it cannot come first")
@@ -87,7 +164,32 @@ O = p.load("outline")
 r5 = next(y for y in p.load("statements")["items"] if y["id"] == "R5")
 assert "R4" not in r5["depends"] and "without the lemma" in r5["instruction"], r5
 assert order().index("R5") < order().index("R4") and O["chat"][-1]["text"].startswith("The order was changed"), O["chat"][-2:]
+# the saved statements: a circle is taken out once, remembered, and the step that plans the structure never meets it
+S = p.load("statements")
+was = {y["id"]: list(y.get("depends") or []) for y in S["items"]}
+for y in S["items"]:
+    if y["id"] == "R4":
+        y["depends"] = list(y.get("depends") or []) + ["R5"]          # R5 uses R4 (unless argued away above), and now R4 "uses" R5
+    if y["id"] == "R5" and "R4" not in y["depends"]:
+        y["depends"].append("R4")
+p.save("statements", S)
+assert drafting.loops(p.load("statements")["items"]) == [["R4", "R5"]]
+run = pipeline.Run(p); run.stage = "outline"
+n_calls = len(p.calls(100000))
+drafting.settle_statements(run)
+now = {y["id"]: y["depends"] for y in p.load("statements")["items"]}
+assert not drafting.loops(p.load("statements")["items"]) and ("R5" in now["R4"]) != ("R4" in now["R5"]), now
+assert [c["label"] for c in p.calls(100000)[n_calls:]] == ["Settle which statement uses which"] and p.load("uses_memory")
+assert any("were each recorded as using the other" in (e.get("message") or "") for e in pipeline.events_after(p.id, 0)), "the author is told"
+drafting.settle_statements(run)
+assert len(p.calls(100000)) == n_calls + 1, "nothing is asked when the record is sound"
+S = p.load("statements")
+for y in S["items"]:
+    y["depends"] = was[y["id"]]
+p.save("statements", S)
 print("3. the plan is the model's own: an incomplete one is asked for again, never filled in; a move against a dependence refused and explained; a reply that does not hold changes nothing; another argument that holds moves it")
+print("3b. a related item is not a used one; statements recorded as using each other in a circle are found, settled once and remembered; "
+      "no model is asked for an order that cannot exist, and a plan with the same fault twice is not asked for a third time")
 
 # 4. the proofs: the author's argument goes to the writer; the paper is put together
 drafting.submit_outline(p)

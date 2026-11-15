@@ -78,8 +78,20 @@ def _items_from_dossier(d: dict, a: dict) -> list[dict]:
                     "known": info.get("known", "new"), "key": info.get("key", ""), "evidence": _none(info.get("evidence", ""))})
     for x in d.get("others", []):
         out.append({"id": x["id"], "kind": x["kind"], "original": x["text"], "words": "",
-                    "pages": [x["page"]] if x.get("page") else [], "depends": x.get("relates", []), "role": "auxiliary"})
+                    "pages": [x["page"]] if x.get("page") else [], "depends": _other_uses(x), "role": "auxiliary"})
     return out
+
+
+def _other_uses(x: dict) -> list[str]:
+    """What an item that is neither a result nor a definition must come after. An example, a remark or a question
+    comes after what it is about ("relates"). A construction, a method or an algorithm comes after what it is built
+    from ("uses"), which the notes are asked for on its own: "relates" also names what uses IT, and what it merely
+    stands beside, so taking it for "uses" turned two related items into two that each had to come before the other.
+    A dossier made before "uses" was asked for has only "relates": it is taken as before, and settle_loops takes out
+    of it what cannot hold."""
+    if x.get("kind") in ("example", "remark", "question") or "uses" not in x:
+        return list(x.get("relates") or [])
+    return list(x.get("uses") or [])
 
 
 def changed_formulas(original: str, statement: str) -> list[str]:
@@ -128,12 +140,24 @@ def _merge_statement(x: dict, r: dict | None) -> dict:
             "changed": changed_formulas(x["original"], statement), "edited": False}
 
 
-_KEPT_FIELDS = ("statement", "kind", "name", "placement", "treatment", "settled", "question", "asked", "answer", "edited", "cut")
+_KEPT_FIELDS = ("statement", "kind", "name", "placement", "treatment", "settled", "question", "asked", "answer", "edited", "cut",
+                "waived", "instruction")
+
+
+def _waive(y: dict, iid: str) -> None:
+    """The author argued that y does not need iid, and the argument held: the dependence goes, and is kept as waived,
+    so that it does not come back when the statements are made again (see recall) and the author is not asked to win
+    the same argument twice. The waiver is the author's, about these two statements as they stand: if the notes for y
+    change, the statement is written again and the waiver goes with the rest of what was decided about it."""
+    y["depends"] = [d for d in y.get("depends") or [] if d != iid]
+    y["waived"] = list(dict.fromkeys((y.get("waived") or []) + [iid]))
 
 
 def remember(p: Project, S: dict) -> None:
     """What the author decided about each statement, kept apart from the step's own files: when the notes are read
-    again (pages added, a step redone), a statement whose source is unchanged keeps the author's decisions."""
+    again (pages added, a step redone), a statement whose source is unchanged keeps the author's decisions. Among
+    them are the arguments the author won: a dependence argued away (waived) and the argument given for it in its
+    place (instruction), which the writer of the proof is given."""
     mem = p.load("statements_memory", {}) or {}
     for x in S.get("items", []):
         mem[_sig(x["id"], x["original"])] = {k: x.get(k) for k in _KEPT_FIELDS}
@@ -149,6 +173,8 @@ def recall(p: Project, items: list[dict]) -> int:
             if old.get("treatment") == "credit" and not x.get("key"):
                 old = {k: v for k, v in old.items() if k != "treatment"}     # no paper to credit any more
             x.update({k: v for k, v in old.items() if v is not None})
+            if x.get("waived"):                  # the dossier says it uses them; the author argued it does not
+                x["depends"] = [d for d in x.get("depends") or [] if d not in x["waived"]]
             x["changed"] = changed_formulas(x["original"], x["statement"])
             n += 1
     return n
@@ -168,6 +194,7 @@ def prepare_statements(run: Run) -> None:
     sig = _sig(d, a)
     S = p.load("statements") or {}
     if S.get("sig") == sig and S.get("items"):
+        settle_statements(run)
         return
     items = _items_from_dossier(d, a)
     if not items:
@@ -237,6 +264,7 @@ def prepare_statements(run: Run) -> None:
          "note": S.get("note", "") if update else "", **({"removed": removed} if removed else {})}
     p.save("statements", S)
     remember(p, S)
+    settle_statements(run)                       # what uses what, without a circle, before the author or the structure sees it
     asks = sum(1 for x in merged if not x["settled"])
     run.progress(1, 1, "statements written")
     run.log(f"Statements written: {len(merged)}" + (f"; {asks} question{'s' if asks != 1 else ''} for you about unclear ones." if asks else "."))
@@ -404,6 +432,143 @@ def _needs(x: dict, by_id: dict) -> list[str]:
     return [d for d in x.get("depends", []) if d in by_id and by_id[d]["kind"] not in ("example", "remark", "question")]
 
 
+def loops(items: list[dict]) -> list[list[str]]:
+    """The circles in what the statements are recorded as using: each a group of statements of which every one uses
+    another of the group and is, directly or through others, used by it. No order puts every statement of such a
+    group after what it uses, so a plan can never pass check_plan while one stands. [] when the record is sound."""
+    by_id = {x["id"]: x for x in items}
+    need = {x["id"]: [d for d in _needs(x, by_id) if d != x["id"]] for x in items}
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    stack: list[str] = []
+    on: set[str] = set()
+    out: list[list[str]] = []
+    for root in need:                            # strongly connected components, without recursion
+        if root in index:
+            continue
+        index[root] = low[root] = len(index)
+        stack.append(root)
+        on.add(root)
+        work = [(root, iter(need[root]))]
+        while work:
+            v, it = work[-1]
+            for w in it:
+                if w not in index:
+                    index[w] = low[w] = len(index)
+                    stack.append(w)
+                    on.add(w)
+                    work.append((w, iter(need[w])))
+                    break
+                if w in on:
+                    low[v] = min(low[v], index[w])
+            else:
+                work.pop()
+                if work:
+                    low[work[-1][0]] = min(low[work[-1][0]], low[v])
+                if low[v] == index[v]:
+                    group = []
+                    while True:
+                        w = stack.pop()
+                        on.discard(w)
+                        group.append(w)
+                        if w == v:
+                            break
+                    if len(group) > 1:
+                        out.append(group)
+    pos = {x["id"]: n for n, x in enumerate(items)}
+    return sorted((sorted(g, key=pos.get) for g in out), key=lambda g: pos[g[0]])
+
+
+def _and(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _loop_text(groups: list[list[str]]) -> str:
+    return "; ".join(f"{_and(g)} are each recorded as using {'the other' if len(g) == 2 else 'another of them'}" for g in groups)
+
+
+def settle_loops(run: Run, items: list[dict]) -> list[str]:
+    """The circles in what the statements use, taken out (the items' "depends" are changed in place). A circle is a
+    mistake of the record, never of the mathematics: a model reads the statements of each circle once and says which
+    really uses which; only records inside a circle can go, and none is added. When its answer still contains a
+    circle, or leaves a statement out, the order of the notes decides: a statement keeps only what stands before it
+    there. What was decided is remembered, so the same circle is not asked about twice. Returns what was done, in
+    words, for the author; [] when there was no circle."""
+    groups = loops(items)
+    if not groups:
+        return []
+    by_id = {x["id"]: x for x in items}
+    pos = {x["id"]: n for n, x in enumerate(items)}
+    inside = {i: [d for d in _needs(by_id[i], by_id) if d in g and d != i] for g in groups for i in g}
+    key = lambda g: _sig([(i, by_id[i]["kind"], by_id[i].get("statement") or by_id[i].get("original", ""), inside[i]) for i in g])  # noqa: E731
+    p = getattr(run, "p", None)
+    mem = (p.load("uses_memory", {}) or {}) if p else {}
+    keep: dict[str, list[str]] = {}
+    how: dict[str, str] = {}
+    ask = [g for g in groups if key(g) not in mem]
+    for g in groups:
+        if key(g) in mem:
+            keep.update({i: [d for d in inside[i] if d in mem[key(g)].get(i, [])] for i in g})
+            how[g[0]] = mem[key(g)].get("how", "")
+    if ask:
+        user = "\n\n".join(
+            f"CIRCLE {n}\n" + "\n".join(
+                f"- {i} [{by_id[i]['kind']}" + (f", page {', '.join(map(str, by_id[i]['pages']))}" if by_id[i].get("pages") else "")
+                + f"], recorded as using {', '.join(inside[i]) or 'none of the others'}: "
+                + fit(by_id[i].get("statement") or by_id[i].get("original", ""), 1200, "head") for i in g)
+            for n, g in enumerate(ask, 1))
+        res = run.ask("reason", prompts.USES.format(field=run.field), user, max_out=max(800, 80 * sum(map(len, ask))), effort="high",
+                      label="Settle which statement uses which")
+        said = {m.group(1): re.findall(r"\b[A-Za-z]+\d+[a-z]?\b", m.group(2))
+                for m in re.finditer(r"^\s*(?:[-*•]\s*)?\**([A-Za-z]+\d+[a-z]?)\**\s*:(.*)$", res.text or "", flags=re.M)}
+        for g in ask:
+            mine = {i: [d for d in inside[i] if d in said.get(i, [])] for i in g}
+            trial = [{**by_id[i], "depends": mine[i]} for i in g]
+            if all(i in said for i in g) and not loops(trial):
+                how[g[0]] = "read"
+            else:                                # no usable answer: the order of the notes (first page, then as listed)
+                rank = {i: (min(by_id[i].get("pages") or [10 ** 6]), pos[i]) for i in g}
+                mine = {i: [d for d in inside[i] if rank[d] < rank[i]] for i in g}
+                how[g[0]] = "notes"
+            keep.update(mine)
+            mem[key(g)] = {**mine, "how": how[g[0]]}
+        if p:
+            p.save("uses_memory", dict(list(mem.items())[-200:]))
+    out = []
+    for g in groups:
+        for i in g:
+            gone = [d for d in inside[i] if d not in keep[i]]
+            if gone:
+                by_id[i]["depends"] = [d for d in by_id[i].get("depends") or [] if d not in gone]
+        stay = [f"{i} uses {_and(keep[i])}" for i in g if keep[i]]
+        out.append(f"{_and(g)} were each recorded as using {'the other' if len(g) == 2 else 'another of them'}, which no order "
+                   "of a paper can satisfy: the record of what uses what was wrong, not the mathematics. "
+                   + ("The statements were read again to see which really uses which" if how[g[0]] != "notes" else
+                      "The order of your notes was taken to decide which uses which")
+                   + ": " + ("; ".join(stay) if stay else "none of them uses another") + ".")
+    return out
+
+
+def settle_statements(run: Run) -> None:
+    """The saved statements without a circle in what they use (see settle_loops). Called where the statements are
+    made and again before every planning of the structure, because a circle can also come later: when the kind of a
+    statement changes (what an example mentions need not come before it; what a lemma uses must)."""
+    p = run.p
+    work = [dict(x, depends=list(x.get("depends") or [])) for x in (p.load("statements") or {}).get("items", [])]
+    if not loops(work):
+        return
+    said = settle_loops(run, work)               # the model is asked outside the lock
+    now = {x["id"]: x["depends"] for x in work}
+    with _lock:
+        S = p.load("statements") or {}
+        for y in S.get("items", []):
+            if y["id"] in now:
+                y["depends"] = [d for d in y.get("depends") or [] if d in now[y["id"]]]
+        p.save("statements", S)
+    for line in said:
+        run.log(line, "warn")
+
+
 def check_plan(raw: list[dict], items: list[dict]) -> tuple[list[dict], list[str]]:
     """The sections of a planned structure, and what is wrong with the plan. The plan is the model's: the program
     adds nothing to it and moves nothing in it. A plan that leaves a statement out, names one twice or one that is
@@ -452,16 +617,28 @@ PLAN_TRIES = 3
 def plan_structure(run: Run, items: list[dict], extra: str = "", label: str = "Plan the structure") -> tuple[list[dict], list[dict], str]:
     """The structure, as a model plans it: when its plan is incomplete or out of order, it is asked again with what is
     wrong, up to PLAN_TRIES times. Returns (sections, statements suggested to be left out, model). Raises LLMError when
-    no plan is complete, so the step is tried again later; nothing is filled in by the program."""
+    no plan is complete; nothing is filled in by the program. Only a failure that another try can mend is tried again
+    later by itself (kind "transient": the plans differed each time). When the statements use each other in a circle
+    no plan can be right (kind "order", and no model is asked); when a plan comes back with the very fault it was just
+    told of, the same request has failed twice (kind "plan"). Both stop the step with the reason."""
+    stuck = loops(items)
+    if stuck:                                    # no plan can pass: the model is not asked for what cannot be done
+        raise LLMError(f"The structure cannot be planned as the statements stand: {_loop_text(stuck)}, so no order puts every "
+                       "statement after what it uses. This is a mistake in the record of what uses what, not in a plan. "
+                       "Nothing was asked of a model.", kind="order")
     request = f"FIELD\n{run.field}\n\n" + _outline_request(items, extra)
     out = max(3000, 600 + 80 * len(items))
-    user, problems = request, []
+    user, problems, before = request, [], []
     for attempt in range(PLAN_TRIES):
         res = run.ask("reason", prompts.OUTLINE, user, max_out=out, effort="high",
                       label=label if not attempt else f"{label} (again: the plan was incomplete)")
         secs, problems = check_plan(fields(res.text, "section", ("title", "items", "purpose")), items)
         if not problems:
             return secs, leave_out(res.text, items), res.model
+        if sorted(problems) in before:           # the same fault again, after being told of it: asking once more is no remedy
+            raise LLMError(f"The structure could not be planned: the model gave a plan with the same fault twice "
+                           f"({'; '.join(problems[:4])}). It is not asked again by itself.", kind="plan")
+        before.append(sorted(problems))
         run.log(f"The planned structure was not complete ({'; '.join(problems[:3])}{' …' if len(problems) > 3 else ''}); "
                 "asked again.", "warn")
         user = (request + "\n\nYOUR PREVIOUS ANSWER\n" + fit(res.text, 6000, "head")
@@ -494,6 +671,7 @@ def prepare_outline(run: Run) -> None:
     new one is put after what it uses (update_structure), and only what changed is shown to the author."""
     from . import drawings
     p = run.p
+    settle_statements(run)
     items = kept_items(p)
     if not items:
         raise ValueError("Every statement was left out, so there is no paper to structure.")
@@ -864,7 +1042,7 @@ def talk_dispute(p: Project, did: str, text: str) -> dict:
                 cur["open"], cur["settled"] = False, verdict.split()[0]
                 cur["pending"] = []
                 y = next(x for x in S["items"] if x["id"] == a["id"])
-                y["depends"] = [i for i in y.get("depends", []) if i != b["id"]]
+                _waive(y, b["id"])
                 if verdict.startswith("avoided"):
                     y["instruction"] = (y.get("instruction", "") + "\n" + (instruction or text)).strip()
             p.save("statements", S)
@@ -949,7 +1127,7 @@ def talk_dispute(p: Project, did: str, text: str) -> dict:
 
         y = next(x for x in S["items"] if x["id"] == a["id"])
         for hid in held_ids:
-            y["depends"] = [i for i in y.get("depends", []) if i != hid]
+            _waive(y, hid)
             if part_verdicts.get(hid, "").startswith("avoided") and part_instructions.get(hid):
                 y["instruction"] = (y.get("instruction", "") + "\n" + part_instructions[hid]).strip()
 
@@ -996,19 +1174,23 @@ def replan_outline(p: Project, instruction: str) -> dict:
     instruction = (instruction or "").strip()[:2000]
     if not instruction:
         raise ValueError("Say how the structure should change.")
+    run = Run(p)
+    run.stage = "outline"
+    settle_statements(run)
     items = kept_items(p)
     O = p.load("outline") or {}
     now = "\n".join(f"{i}. {s['title']}: {', '.join(s['items'])}" for i, s in enumerate(O.get("sections", []), 2))
-    run = Run(p)
-    run.stage = "outline"
     try:
         secs, out, model = plan_structure(run, items, f"\n\nTHE CURRENT STRUCTURE\n{now}\n\nTHE AUTHOR'S INSTRUCTION (follow it)\n"
                                           f"{instruction}", label="Plan the structure with your instruction")
     except LLMError as e:
-        if e.kind != "transient":
+        if e.kind == "order":
+            raise ValueError("The structure was not changed. " + str(e)) from e
+        if e.kind not in ("transient", "plan"):
             raise
-        raise ValueError("The structure was not changed: the model's new plan was still incomplete after "
-                         f"{PLAN_TRIES} attempts. Send your instruction again, or move the statements yourself.") from e
+        raise ValueError("The structure was not changed: the model's new plan was still incomplete"
+                         + (f" after {PLAN_TRIES} attempts" if e.kind == "transient" else ", with the same fault twice")
+                         + ". Send your instruction again, or move the statements yourself.") from e
     O.update(sections=secs, instruction=instruction, model=model, leave_out=out)
     p.save("outline", O)
     return O
@@ -1139,7 +1321,7 @@ def talk_outline(p: Project, text: str) -> dict:
     pend = next((m for m in reversed(chat) if m.get("who") == "app" and m.get("move") and not m.get("resolved")), None)
     if verdict.startswith(("not_used", "avoided")):
         def change(y: dict, S: dict) -> None:
-            y["depends"] = [d for d in y.get("depends", []) if d != b["id"]]
+            _waive(y, b["id"])
             if verdict.startswith("avoided"):
                 y["instruction"] = (y.get("instruction", "") + "\n" + (instruction or text)).strip()
         _save_item(p, a["id"], change)

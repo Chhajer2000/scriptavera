@@ -176,6 +176,9 @@ z = Browser("203.0.113.77")
 r = z.req("POST", "/api/auth/google", json={"access_token": "tok:sub-z|zed@example.org|Zed Zeta"})
 assert r.status_code == 200 and r.json()["user"]["email"] == "zed@example.org" and "Max-Age=7776000" in r.headers.get("set-cookie", ""), r.text
 uid = hosting.unsign(r.headers["set-cookie"].split("sv_session=", 1)[1].split(";", 1)[0])["uid"]
+for c in list(z.s.cookies):                  # one session cookie per host, as a browser keeps it
+    if c.name == "sv_session":
+        z.s.cookies.clear(c.domain, c.path, c.name)
 z.s.cookies.set("sv_session", hosting.sign({"uid": uid, "email": "zed@example.org"}, days=10))
 r = z.req("GET", "/api/account")
 assert r.json()["signed_in"] and "sv_session=" in r.headers.get("set-cookie", "") and "Max-Age=7776000" in r.headers["set-cookie"], r.headers

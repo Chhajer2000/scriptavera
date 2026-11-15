@@ -558,6 +558,7 @@ kind: example | remark | question | construction | method | algorithm
 text: what it says, formulas exactly as in the notes (for a construction, a method or an algorithm: all of it, with every step)
 page: N
 relates: ids of the results or definitions it illustrates, comments on, or is used by, or none
+needs_before: for a construction, a method or an algorithm only: ids of the definitions, results, constructions or methods it is built from or applies, which the paper must therefore present before it, or none. Never the id of something that uses it (that id belongs in relates), and never two items that each name the other. For an example, a remark or a question: none
 </other>
 
 <storyline>Five to eight sentences: how the argument goes from the setting to the main result, naming the results by id.</storyline>
@@ -1518,6 +1519,18 @@ Answer in exactly this format:
 </part>
 </evaluation>
 <reply>A direct message to the author: if all parts hold, confirm that all parts are settled; if some parts are needed or missing, say clearly which parts hold and bring together all remaining parts (the doubts and the missing ones) in one clear follow-up with parts so the author can answer them all at once.</reply>"""
+
+USES = """The statements of a mathematics paper were listed with what each one uses, and the list contradicts itself: some statements are recorded as using each other in a circle (A uses B, and B, directly or through others, uses A). A paper presents its statements one after the other, each after what it uses, so in every circle at least one record is wrong: usually a statement was listed as using one that in fact uses it, or one it is only related to.
+
+Field: {field}
+
+You receive each circle: its statements, with their kinds and their pages in the notes, and for each of them which of the others in the circle it is recorded as using.
+
+For each statement decide, from the mathematics, which of the others in its circle it really uses. A uses B when A cannot be stated, built or proved before B is available: A applies B, is built from B, evaluates or continues what B introduces, or refers to B in its statement. Treating the same objects as B, standing next to B in the notes, or being used BY B is not using B. Your answer must contain no circle: afterwards the statements of each circle can be put in an order in which each comes after what it uses.
+
+Answer with one line for every statement you receive, and nothing else: its id, a colon, and the ids it uses among the others in its circle, or none.
+O3: O1, O2
+O1: none"""
 
 ARGUE_ORDER = """The author of a mathematics paper wants to present statement A before statement B. In the notes, the argument for A uses B, so the program refused the move. The author has replied. You decide, as a specialist in the field, whether the reply removes the dependence of A on B.
 
