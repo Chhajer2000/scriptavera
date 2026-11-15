@@ -98,9 +98,9 @@ print("0. the page names the files the program was started with; its own files a
 
 # ------------------------------------------------------------------ meta, journals, creation
 m = call("GET", "/api/meta")
-assert m["mock"] and [x["id"] for x in m["phases"]] == ["read", "write", "revise", "final"] and len(m["stages"]) == 24
+assert m["mock"] and [x["id"] for x in m["phases"]] == ["read", "write", "revise", "final"] and len(m["stages"]) == 29
 assert {s["phase"] for s in m["stages"]} == {"read", "write", "revise", "final"}
-assert [s["id"] for s in m["stages"] if s.get("gate")] == ["topiccheck", "confirm", "review", "scope", "outline", "proofcheck", "draftcheck", "decide", "finish"]
+assert [s["id"] for s in m["stages"] if s.get("gate")] == ["topiccheck", "confirm", "review", "scope", "outline", "proofcheck", "draftcheck", "reshapecheck", "reproofcheck", "decide", "finish"]
 assert m["plan"]["writer"]["chain"] == ["mock:sim-text"] and m["plan"]["writer"]["weaker"] == ["mock:sim-small", "mock:sim-vision"], m["plan"]["writer"]
 assert m["plan"]["fast"]["weaker"] == [] and len(m["plan"]["fast"]["chain"]) == 3
 assert set(m["templates"]) == {"amsart", "article", "elsarticle"} and m["templates"]["elsarticle"]["tested"] is False
@@ -236,12 +236,11 @@ assert done["ok"] and "Nothing was changed on page 3" in done["message"] and pro
 assert "Write your comment" in post(f"/api/projects/{pid}/correct_page", {"page": 3}, 400)["error"]
 b = project(pid)
 fig = b["figures"][0]
-assert fig["id"] == "f1" and fig["choice"] == "" and fig["tikz_ok"] in (True, None)
+assert fig["id"] == "f1" and fig["auto"] and fig["choice"] == ("tikz" if fig["tikz_ok"] else "orig") and fig["tikz_ok"] in (True, None)
 assert call("GET", f"/api/projects/{pid}/figure/f1").headers["content-type"] == "image/jpeg"
 if fig["tikz_ok"]:
     assert call("GET", f"/api/projects/{pid}/figure/f1", params={"kind": "tikz"}).headers["content-type"] == "image/png"
 assert call("GET", f"/api/projects/{pid}/figure/f9", 404)
-assert "each drawing" in post(f"/api/projects/{pid}/review", expect=400)["error"]
 # a figure drawn again: started at once, carried on by the server; meanwhile the transcript cannot be approved
 release = threading.Event()
 pipeline.start_review_job(p_, "fig:test", "Drawing a test figure again", lambda: release.wait(30) and {})
@@ -293,15 +292,17 @@ assert b["transcript"]["pages"]["5"]["edited"] and b["approved"] and b["figures"
 assert 'class="paper"' in b["draft"]["html"] and b["draft"]["results"] == 5 and b["draft"]["proofs"] == 4 and b["draft"]["sections"] == 3
 assert b["dossier"]["results"][2]["role"] == "main" and b["plan"]["sections"][1]["title"] == "Upper bounds" and b["intro"]["text"]
 rev = b["revision"]
-assert len(rev["items"]["simplify"]) == 1 and len(rev["items"]["issues"]) == 1 and len(rev["items"]["remarks"]) == 3 and rev["decisions"] is None
+assert len(rev["items"]["simplify"]) == 0 and len(rev["items"]["issues"]) == 1 and len(rev["items"]["remarks"]) == 3 and rev["decisions"] is None
 
 # ------------------------------------------------------------------ third stop: the author's decisions
 iid = rev["items"]["issues"][0]["id"]
-assert "still need your decision" in post(f"/api/projects/{pid}/decisions", {"simplify": {"S1": "accept"}, "issues": {iid: {"choice": "instruct"}}}, 400)["error"]
-post(f"/api/projects/{pid}/decisions", {"simplify": {"S1": "accept"}, "issues": {iid: {"choice": "fix"}}, "remarks": {}})
+assert "still need your decision" in post(f"/api/projects/{pid}/decisions", {"simplify": {}, "issues": {iid: {"choice": "instruct"}}}, 400)["error"]
+post(f"/api/projects/{pid}/decisions", {"simplify": {}, "issues": {iid: {"choice": "fix"}}, "remarks": {}})
 b = wait(pid, "assemble", ("done",))
 P = b["paper"]
-assert P["title"] and P["compile"]["template"] == "elsarticle" and "res:S1" in [x.get("label") for x in P["blocks"]]
+assert P["title"] and P["compile"]["template"] == "elsarticle"
+ss = b["state"]["stages"]
+assert ss["reshapecheck"].get("skipped") and ss["reproofcheck"].get("skipped") and ss["redraft"]["status"] == "done", "nothing planned: the revision's stops are passed"
 if P["compile"]["engine"]:            # if elsarticle is not installed, the PDF is set in the standard class, and both sources are offered
     assert P["compile"]["ok"]
     if P["compile"].get("fallback"):
@@ -322,7 +323,10 @@ assert len(F["titles"]) == 5
 F = post(f"/api/projects/{pid}/finish", {"action": "cite", "keys": ["Sample2018Simulated"], "instruction": "Keep it short."})["finish"]
 assert [r["key"] for r in F["related"] if r["in_intro"]] == ["Sample2018Simulated"], F["related"]
 F = post(f"/api/projects/{pid}/finish", {"action": "finish", "title": F["titles"][1]})["finish"]
-assert F["finished"] and project(pid)["state"]["stages"]["finish"]["status"] == "done" and project(pid)["paper"]["title"] == F["titles"][1]
+assert F["finished"] and project(pid)["state"]["stages"]["finish"]["status"] == "done"
+b = wait(pid, "build", ("done",))               # the final version is built from the author's choices: the last step
+assert b["paper"]["title"] == F["titles"][1] and F["titles"][1] in call("GET", f"/api/projects/{pid}/download/main.tex").text
+assert [s_["id"] for s_ in m["stages"]][-1] == "build" and all(x["status"] == "done" for x in b["state"]["stages"].values())
 print("finish: titles suggested and chosen, citations chosen, files rebuilt")
 
 # ------------------------------------------------------------------ the author edits the finished paper
@@ -347,10 +351,10 @@ assert post(f"/api/projects/{pid}/journal", {"journal": None})["profile"]["journ
 print("edits, rewrite on request, journal guide, requirements and statements ok")
 
 # ------------------------------------------------------------------ deciding again makes the final version again
-post(f"/api/projects/{pid}/decisions", {"simplify": {"S1": "reject"}, "issues": {iid: {"choice": "keep"}}, "remarks": {"P4": "Say in the introduction what zeta is.", "N1": "Leave it."}})
+post(f"/api/projects/{pid}/decisions", {"simplify": {}, "issues": {iid: {"choice": "keep"}}, "remarks": {"P4": "Say in the introduction what zeta is.", "N1": "Leave it."}})
 b = wait(pid, "assemble", ("done",))
 P = b["paper"]
-assert "res:S1" not in [x.get("label") for x in P["blocks"]] and not P["revision"]["simplified"]
+assert not P["revision"]["simplified"]
 assert P["title_source"] == "author" and P["title"].startswith("Bounds for"), "a title the author wrote stays when the final version is made again"
 assert [x["id"] for x in P["revision"]["remarks"]] == ["P4"] and "denotes the limit" in P["intro"], P["revision"]    # a remark on the introduction is applied there
 assert [x["id"] for x in P["revision"]["unapplied"]] == ["N1"], P["revision"]["unapplied"]                # nothing to anchor it to: reported, not guessed
@@ -369,12 +373,12 @@ assert s["status"] == "error" and s["resume_at"] is None and "free-tier limit" i
 os.environ["SCRIPTAVERA_MOCK_FAIL"] = ""
 n_before = len(project(pid)["calls"])
 post(f"/api/projects/{pid}/run")                              # Continue: the step is done anew, the rest brought up to date
-b = wait(pid, "finish", ("done",))
+b = wait(pid, "build", ("done",))
 again = [c["label"] for c in b["calls"][n_before:]]
-assert again == ["Referee report"], again                     # the decisions stand, the final version is unchanged: nothing else
+assert again == ["Referee report", "Suggest figures and tables"], again    # the decisions stand, the final version is unchanged: nothing else
 assert "catchup" not in b["state"] and b["state"]["stages"]["decide"].get("passed_again"), b["state"]["stages"]["decide"]
 os.environ["SCRIPTAVERA_MOCK_FAIL"] = "Propose titles"
-post(f"/api/projects/{pid}/decisions", {"simplify": {"S1": "accept"}, "issues": {iid: {"choice": "instruct", "note": "Replace the last value by log(n+1)."}}})
+post(f"/api/projects/{pid}/decisions", {"simplify": {}, "issues": {iid: {"choice": "instruct", "note": "Replace the last value by log(n+1)."}}})
 b = wait(pid, "assemble", ("error",))
 assert "simulated failure" in b["state"]["stages"]["assemble"]["error"] and b["state"]["error"]["stage"] == "assemble"
 n_before = len(b["calls"])

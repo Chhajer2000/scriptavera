@@ -284,7 +284,7 @@ def stage_figdesign(run: Run) -> None:
     def work(fid: str) -> None:
         run.check()
         old = have.get(fid) or {}
-        rec = draw_for_print(p, figs[fid], plan[fid], run.ask, seq, nums, old.get("instruction", ""))
+        rec = decide(draw_for_print(p, figs[fid], plan[fid], run.ask, seq, nums, old.get("instruction", "")))
         _save(p, fid, rec)
         with _lock:
             done[0] += 1
@@ -320,6 +320,7 @@ def set_choice(p: Project, fid: str, choice: str) -> dict:
         if choice == "pro" and not (rec.get("ok") or rec.get("tikz")):
             raise ValueError("This figure could not be drawn for print: the copy of your drawing is printed, or leave it out.")
         rec["choice"], rec["answered"] = choice, time.time()
+        rec.pop("auto", None)                      # the author's own answer from here on
         rec.pop("fresh", None)
         p.save("figures_pro", data)
     if choice == "none":
@@ -350,16 +351,40 @@ def confirm_all(p: Project, assume: bool = True) -> None:
             p.save("figures_pro", data)
 
 
+def decide(rec: dict) -> dict:
+    """Which version the paper prints: the app's answer, selected until the author changes it. The figure for print
+    when the second reader found that it says what the drawing says (with a correction only where the notes bear it
+    out); the copy of the drawing when it could not be drawn for print or does not. A figure for print that corrects
+    something the drawing shows is selected too, and marked: the author sees the correction named on its card and is
+    asked about it once more when approving. The author's own answer always stands."""
+    if rec.get("choice") and not rec.get("auto"):
+        return rec                                 # the author's own answer stands
+    rec["choice"], rec["auto"] = ("pro" if rec.get("ok") else "copy"), True
+    return rec
+
+
 def unanswered(p: Project) -> list[str]:
-    """Figures drawn for print that the author has not answered and that change something the drawing shows (a
-    correction), or whose check did not pass: these are put to the author explicitly at the approval."""
-    out = []
-    for fid, rec in entries(p).items():
-        if rec.get("choice"):
-            continue
-        if rec.get("corrections") or not rec.get("ok"):
-            out.append(fid)
-    return out
+    """Figures the paper prints for which no answer is recorded at all (none, since the app selects one for each)."""
+    return [fid for fid, rec in entries(p).items() if not rec.get("choice")]
+
+
+def select_defaults(p: Project) -> None:
+    """A figure drawn for print that has no answer yet (drawn by an earlier version, which asked the author about each
+    one) gets the app's answer, selected until the author changes it."""
+    with _lock:
+        data = p.load("figures_pro") or {}
+        open_ = [rec for rec in data.values() if isinstance(rec, dict) and not rec.get("choice") and rec.get("ok") is not None]
+        if open_:
+            for rec in open_:
+                decide(rec)
+            p.save("figures_pro", data)
+
+
+def to_confirm(p: Project) -> list[str]:
+    """Figures for print the app selected although they correct something the author's drawing shows: named to the
+    author once more at the approval of the proofs."""
+    select_defaults(p)
+    return [fid for fid, rec in entries(p).items() if rec.get("auto") and rec.get("choice") == "pro" and rec.get("corrections")]
 
 
 def redraw(p: Project, fid: str, instruction: str) -> dict:
@@ -380,7 +405,7 @@ def redraw(p: Project, fid: str, instruction: str) -> dict:
         from .llm import router
         return router.chat(role, system, user, hooks=run, **kw)
     seq, secs, nums = ordered(p)
-    rec = draw_for_print(p, figs[fid], plan[fid], ask, seq, nums, instruction)
+    rec = decide(draw_for_print(p, figs[fid], plan[fid], ask, seq, nums, instruction))
     _save(p, fid, rec)
     emit(p.id, "log", stage="proofcheck", level="done" if rec["ok"] else "warn",
          message=f"Figure {_num(fid)} drawn again for print with your instruction" + ("." if rec["ok"] else f": {rec['error']}."))

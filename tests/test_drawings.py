@@ -65,15 +65,16 @@ pipeline.start(p); wait(p, "confirm"); pipeline.submit_confirm(p, answers(p))
 pipeline.start(p); wait(p, "review")
 figs = {f["id"]: f for f in p.load("figures")["items"]}
 f1, f2 = figs["f1"], figs["f2"]
-assert f1["page"] == 1 and f2["page"] == 3 and f1.get("drawn") and f2.get("drawn") and f1["choice"] == f2["choice"] == "", figs
+assert f1["page"] == 1 and f2["page"] == 3 and f1.get("drawn") and f2.get("drawn"), figs
+assert f1["auto"] and f2["auto"] and f1["choice"] == pipeline.assumed_choice(f1) and f2["choice"] == pipeline.assumed_choice(f2), \
+    "the app's answer is selected for each drawing, until the author changes it"
 assert pipeline.figure_file(p, "f2", "orig").exists() and "judged" not in f2, "the drawing inside a proof is copied like any other"
 labels = [c["label"] for c in p.calls(5000)]
 assert not any(l.startswith("Decide which drawings") for l in labels), "nothing is decided before the structure"
 assert "Read the labels of figure 1 (page 1)" in labels and any(l.startswith("Read the labels of figure 2") for l in labels), labels
-try:
-    pipeline.submit_review(p, {}); raise SystemExit("every drawing needs an answer about its copy")
-except ValueError as e:
-    assert "page 1, 3)" in str(e), e
+assert pipeline.set_figure(p, "f1", choice="none")["auto"] is False, "the author can change the app's answer"
+again = pipeline.redraw_figure(p, "f1", "")
+assert again["auto"] and again["choice"] == pipeline.assumed_choice(again), "a new copy is a new question: the app selects its answer for it"
 try:
     pipeline.set_figure(p, "f2", choice="explain"); raise SystemExit("printing is not decided here")
 except ValueError as e:
@@ -181,6 +182,8 @@ n0 = len(o2.calls(5000))
 pipeline.start(o2); wait(o2, "review")
 labels = [c["label"] for c in o2.calls(5000)[n0:]]
 assert labels and all(("figure 2" in l or "page 3" in l) for l in labels), labels       # only the drawing not copied before
-assert {f["id"]: f["choice"] for f in o2.load("figures")["items"]} == {"f1": "orig", "f2": ""}
+g = {f["id"]: f for f in o2.load("figures")["items"]}
+assert g["f1"]["choice"] == "orig" and not g["f1"].get("auto"), "the author's answer stays"
+assert g["f2"]["auto"] and g["f2"]["choice"] == pipeline.assumed_choice(g["f2"]), "the new copy has the app's answer selected"
 print("6. drawings judged by an earlier version: the one it did not copy is copied now; the rest, the transcript and answers kept")
 print("drawings ok")

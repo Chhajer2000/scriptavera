@@ -40,8 +40,9 @@ ITEM_KINDS = ("definition", "lemma", "proposition", "theorem", "corollary", "con
               "construction", "method", "algorithm")
 PROVED = ("lemma", "proposition", "theorem", "corollary")          # a proof is written for these
 NOT_RESULTS = ("definition", "example", "remark", "question", "construction", "method", "algorithm")
-STAGES_AFTER_STRUCTURE = ("figdesign", "proofs", "proofcheck", "draft", "draftcheck", "simplify", "verify", "referee", "decide",
-                          "assemble", "finish")
+STAGES_AFTER_STRUCTURE = ("figdesign", "proofs", "proofcheck", "draft", "draftcheck", "reshape", "reshapecheck", "reproofs", "reproofcheck",
+                          "redraft", "verify", "referee", "decide",
+                          "assemble", "finish", "build")
 EXPLAINED = ("example", "remark", "construction", "method", "algorithm")   # a text is written after these
 TREATMENTS = ("keep", "credit", "conjecture", "omit")
 _lock = threading.Lock()
@@ -265,6 +266,8 @@ def edit_statement(p: Project, iid: str, data: dict) -> dict:
         if data.get("treatment") in TREATMENTS:
             if data["treatment"] == "credit" and not x.get("key"):
                 raise ValueError("No paper was found that contains this result, so it cannot be credited to one.")
+            if data["treatment"] == "omit" and x.get("treatment") != "omit":
+                x["before_omit"] = x.get("treatment") or "keep"      # what it goes back to when the author keeps it after all
             x["treatment"] = data["treatment"]
         if isinstance(data.get("statement"), str) and data["statement"].strip() and data["statement"].strip() != x["statement"]:
             x["statement"], x["edited"] = data["statement"].strip(), True
@@ -360,11 +363,9 @@ def submit_statements(p: Project, data: dict) -> dict:
         if ask:
             raise ValueError(f"Answer the question about {', '.join(ask)} first, or keep "
                              f"{'that statement' if len(ask) == 1 else 'those statements'} as written.")
-        kept = {x["id"] for x in S["items"] if x["treatment"] != "omit"}
-        for x in S["items"]:
-            used = [i for i in x.get("depends", []) if i not in kept and any(y["id"] == i for y in S["items"])]
-            if x["id"] in kept and used and x["kind"] not in ("example", "remark", "question"):
-                raise ValueError(f"{x['id']} uses {', '.join(used)}. Leave {x['id']} out as well, or keep {', '.join(used)}.")
+        pairs = uses_left_out(S["items"])
+        if pairs:                                # a kept statement uses one that is left out: put to the author, who may
+            raise_disputes(p, pairs, "scope")    # show that it is not needed, give another argument, or change the choice
     S["kind"], S["note"] = kind, str(data.get("note") or "").strip()[:1500]
     if kind != "not_ready":                      # confirmed: nothing here is new any more
         for x in S["items"]:
@@ -607,8 +608,12 @@ def drop_from_outline(p: Project, iid: str) -> dict:
         raise ValueError("This statement is not in the paper.")
     if x.get("role") == "main":
         raise ValueError("A main result cannot be left out here; change it at the statements step.")
+    pairs = uses_left_out(items, only=iid)
+    if pairs:                                    # a kept statement uses it: the author is asked before anything is dropped
+        raise_disputes(p, pairs, "outline", then="drop")
 
     def change(y: dict, S: dict) -> None:
+        y["before_omit"] = y.get("treatment") or "keep"
         y["treatment"], y["cut"] = "omit", y.get("cut") or "left out at the structure step"
         for z in S["items"]:
             if iid in (z.get("depends") or []):
@@ -621,6 +626,181 @@ def drop_from_outline(p: Project, iid: str) -> dict:
     O["leave_out"] = [o for o in O.get("leave_out") or [] if o["id"] != iid]
     p.save("outline", O)
     return O
+
+
+# ------------------------------------------------------------------ a statement left out that a kept one uses
+
+class Dispute(ValueError):
+    """A kept statement uses one the author is leaving out. It is not an error message: it opens a conversation in
+    which the author says why the kept statement does not need the other, or gives another argument for that step."""
+
+
+def uses_left_out(items: list[dict], only: str | None = None) -> list[tuple[dict, dict]]:
+    """(a, b) for every kept statement a whose argument uses a statement b that is left out; with `only`, for the
+    statement with that id, which the author is about to leave out."""
+    by = {x["id"]: x for x in items}
+    kept = {x["id"] for x in items if x.get("treatment") != "omit"}
+    return [(x, by[i]) for x in items if x["id"] in kept and x["kind"] not in ("example", "remark", "question")
+            for i in x.get("depends") or [] if i in by and (i == only if only else i not in kept)]
+
+
+def _names(p: Project, items: list[dict]) -> dict:
+    O = p.load("outline") or {}
+    return numbers(O.get("sections") or [], items) if O.get("sections") else {}
+
+
+def raise_disputes(p: Project, pairs: list[tuple[dict, dict]], at: str, then: str = "") -> None:
+    """Each such pair is put to the author as a conversation (kept with the statements), and the action is refused
+    until every one of them is settled: by the author's argument, or by keeping the one or leaving out the other."""
+    with _lock:
+        S = p.load("statements") or {}
+        nums = _names(p, S.get("items", []))
+        D = S.setdefault("disputes", [])
+        first = ""
+        for a, b in pairs:
+            d = next((d for d in D if d.get("open") and d["a"] == a["id"] and d["b"] == b["id"]), None)
+            where = f" (page {', '.join(map(str, a['pages']))} of your notes)" if a.get("pages") else ""
+            text = (f"{_named(a, nums)} uses {_named(b, nums)} in its argument{where}, and you are leaving {_named(b, nums)} out. "
+                    f"A paper cannot use a result it does not contain. If {_named(a, nums)} does not really need it, or if you have "
+                    f"another argument for that step, say so here: if it holds, {_named(b, nums)} is left out and the proof of "
+                    f"{_named(a, nums)} is written without it. Otherwise keep {_named(b, nums)}, or leave {_named(a, nums)} out as well.")
+            if d is None:
+                D.append({"id": f"{a['id']}-{b['id']}-{int(time.time() * 1000) % 100000}", "a": a["id"], "b": b["id"], "at": at, "then": then,
+                          "open": True, "chat": [{"who": "app", "text": text, "at": time.time()}]})
+            else:
+                d.update(at=at, then=then)
+            first = first or text
+        S["disputes"] = D[-40:]
+        p.save("statements", S)
+    raise Dispute(first)
+
+
+def open_disputes(p: Project, S: dict | None = None) -> list[dict]:
+    """The conversations that still stand in the way: the kept statement still lists the other as used, and the other
+    is left out (or is the one the author asked to leave out at the structure step)."""
+    S = S or p.load("statements") or {}
+    by = {x["id"]: x for x in S.get("items", [])}
+    out = []
+    for d in S.get("disputes") or []:
+        a, b = by.get(d["a"]), by.get(d["b"])
+        if d.get("open") and a and b and a.get("treatment") != "omit" and d["b"] in (a.get("depends") or []) \
+                and (b.get("treatment") == "omit" or d.get("then") == "drop"):
+            out.append(d)
+    return out
+
+
+def disputes_view(p: Project, S: dict) -> list[dict]:
+    items = S.get("items", [])
+    nums = _names(p, items)
+    by = {x["id"]: x for x in items}
+    kept = {x["id"] for x in items if x.get("treatment") != "omit"}
+    side = lambda x: {"id": x["id"], "name": _named(x, nums), "statement": x["statement"]}      # noqa: E731
+    return [{"id": d["id"], "a": side(by[d["a"]]), "b": side(by[d["b"]]), "at": d["at"], "then": d.get("then", ""), "chat": d["chat"],
+             # leaving the kept one out as well is offered when nothing kept uses it and it is not a main result
+             "can_omit_a": by[d["a"]].get("role") != "main" and not any(d["a"] in (y.get("depends") or []) for y in items if y["id"] in kept
+                                                                        and y["kind"] not in ("example", "remark", "question"))}
+            for d in open_disputes(p, S)]
+
+
+def _close_dispute(p: Project, did: str, how: str, say: str = "") -> None:
+    with _lock:
+        S = p.load("statements") or {}
+        for d in S.get("disputes") or []:
+            if d["id"] == did:
+                d["open"], d["settled"] = False, how
+                if say:
+                    d["chat"].append({"who": "ai", "text": say, "at": time.time()})
+        p.save("statements", S)
+
+
+def _after_dispute(p: Project, d: dict) -> None:
+    """A conversation is settled. At the structure step the statement the author asked to leave out is left out now,
+    once nothing kept uses it any more."""
+    if d.get("then") == "drop" and not any(o["b"] == d["b"] for o in open_disputes(p)):
+        try:
+            drop_from_outline(p, d["b"])
+        except ValueError:
+            pass                                   # another statement still uses it: its own conversation is open
+
+
+def talk_dispute(p: Project, did: str, text: str) -> dict:
+    """The author's reply in the conversation about a statement that is left out although a kept one uses it. The
+    reply is judged: when the kept statement does not need the other, or the author's other argument for that step
+    holds, the dependence goes, the argument is kept for the writer of that proof, and the statement is left out.
+    Otherwise the reason is given, and the author may answer again."""
+    text = (text or "").strip()[:4000]
+    if not text:
+        raise ValueError("Write your reason or your argument first.")
+    S = p.load("statements") or {}
+    d = next((x for x in open_disputes(p, S) if x["id"] == did), None)
+    if not d:
+        raise ValueError("This question is settled already. Reload the page.")
+    by = {x["id"]: x for x in S["items"]}
+    a, b = by[d["a"]], by[d["b"]]
+    nums = _names(p, S["items"])
+    pages, _ = writing_pages(p)
+    run = Run(p)
+    run.stage = d["at"]
+    user = (f"STATEMENT A (kept), {_named(a, nums)}\n{a['statement']}\n\nSTATEMENT B (left out), {_named(b, nums)}\n{b['statement']}\n\n"
+            f"THE AUTHOR'S ARGUMENT FOR A, FROM THE NOTES\n{author_argument(a, pages, 6000)}\n\n"
+            + "THE EXCHANGE SO FAR\n" + "\n".join(f"{m['who']}: {m['text']}" for m in d["chat"]) + "\n\n"
+            + f"THE AUTHOR'S REPLY\n{text}")
+    res = run.ask("reason", prompts.ARGUE_OMIT.format(field=run.field), user, max_out=1200, effort="high",
+                  label=f"Judge your reason for leaving out {b['id']}, which {a['id']} uses")
+    verdict = (extract_tag(res.text, "verdict") or "needed").strip().lower()
+    reply = re.sub(r"\s+", " ", extract_tag(res.text, "reply") or "").strip() or "No clear answer came back; try again."
+    instruction = _none(extract_tag(res.text, "instruction"))
+    settled = verdict.startswith(("not_used", "avoided"))
+    with _lock:
+        S = p.load("statements") or {}
+        cur = next((x for x in S.get("disputes") or [] if x["id"] == did), None)
+        if cur is None:
+            raise ValueError("This question is settled already. Reload the page.")
+        cur["chat"] += [{"who": "you", "text": text, "at": time.time()},
+                        {"who": "ai", "text": reply, "at": time.time(), "verdict": "needed" if not settled else verdict.split()[0]}]
+        if settled:
+            cur["open"], cur["settled"] = False, verdict.split()[0]
+            y = next(x for x in S["items"] if x["id"] == a["id"])
+            y["depends"] = [i for i in y.get("depends", []) if i != b["id"]]
+            if verdict.startswith("avoided"):
+                y["instruction"] = (y.get("instruction", "") + "\n" + (instruction or text)).strip()
+        p.save("statements", S)
+        if settled:
+            remember(p, S)
+    if settled:
+        _after_dispute(p, d)
+    return {"settled": settled, "verdict": "needed" if not settled else verdict.split()[0], "reply": reply}
+
+
+def settle_dispute(p: Project, did: str, how: str) -> dict:
+    """The author's own way out of such a conversation: 'keep' keeps the statement that was to be left out; 'omit'
+    leaves the statement that uses it out as well; 'close' lets the question be (at the structure step the statement
+    then simply stays in the paper; at the statements step the question comes back when the statements are confirmed)."""
+    S = p.load("statements") or {}
+    d = next((x for x in open_disputes(p, S) if x["id"] == did), None)
+    if not d:
+        return {"settled": True}
+    by = {x["id"]: x for x in S["items"]}
+    if how == "keep":
+        if by[d["b"]].get("treatment") == "omit":
+            _save_item(p, d["b"], lambda y, S_: y.update(treatment=y.pop("before_omit", None) or "keep"))
+        _close_dispute(p, did, "kept")
+    elif how == "omit":
+        a = by[d["a"]]
+        if a.get("role") == "main" and d["at"] == "outline":
+            raise ValueError("A main result cannot be left out here; change it at the statements step.")
+        if d["at"] == "outline":
+            drop_from_outline(p, a["id"])          # refused, with its own conversation, when a kept statement uses it
+        else:
+            _save_item(p, a["id"], lambda y, S_: y.update(before_omit=y.get("treatment") or "keep", treatment="omit"))
+        _close_dispute(p, did, "both left out")
+        _after_dispute(p, d)
+    elif how == "close":
+        if d.get("then") == "drop":
+            _close_dispute(p, did, "not left out")
+    else:
+        raise ValueError("Unknown action.")
+    return {"settled": how != "close" or d.get("then") == "drop"}
 
 
 def replan_outline(p: Project, instruction: str) -> dict:
@@ -1498,14 +1678,41 @@ def _slots(parts: list[str]) -> str:
 
 
 def stage_draft(run: Run) -> None:
-    """The paper put together: statements and proofs exactly as approved, with the text that joins them written in
-    its own places, then the introduction and the abstract from the finished paper."""
+    """The first draft: statements and proofs exactly as approved, with the text that joins them written in its own
+    places, then the introduction and the abstract from the finished paper."""
+    build_draft(run, second=False)
+
+
+def stage_redraft(run: Run) -> None:
+    """The second draft: the first draft with the changes the author accepted in the revision (the plan, then the new
+    proofs). Only what those changes touch is written again: the text that joins the results of a section whose
+    results changed, the introduction sentence by sentence where a statement it speaks of changed (the author's edits
+    kept), the abstract when a main result or the introduction changed. The first draft is kept."""
+    from . import reshape
     p = run.p
-    seq, secs, nums = ordered(p)
+    shaped, _ = reshape.model(p)
+    was = ((p.load("body") or {}).get("shape") or {}).get("applied") or []
+    if not shaped["applied"] and not was:
+        run.log("No change of the plan was accepted: the second draft is the first draft, as you approved it.")
+        return
+    build_draft(run, second=True)
+
+
+def build_draft(run: Run, second: bool) -> None:
+    p = run.p
+    # the paper as the author confirmed it, with the changes of the revision the author accepted (reshape.py): results
+    # stated together, an argument stated once, the sections in their new order. Before the revision is planned there
+    # are none, and this is the first draft
+    from . import reshape
+    keep = reuse_ok(p.state) or second             # the second draft keeps everything of the first that did not change
+    shaped, nums = reshape.model(p)
+    seq, secs, proofs = shaped["seq"], shaped["secs"], shaped["proofs"]
     if not seq:
         raise ValueError("There are no statements to put in the paper.")
-    proofs = (p.load("proofs") or {"items": {}})["items"]
+    for u in shaped["unapplied"]:
+        run.log(f"The change {u['id']} that you accepted could not be put into the paper: {u['why']}", "warn")
     pages, figs = writing_pages(p, final=True)
+    figs = {fid: {**f, "with": shaped["remap"].get(f.get("with"), f.get("with"))} for fid, f in figs.items()}
     library = {x["key"]: x for x in p.load("library", [])}
     parts = section_parts(secs, seq, nums, proofs)
     plan_lines = "\n".join(f"{i}. {s['title']}: " + ", ".join(f"{kind_name(next(x['kind'] for x in seq if x['id'] == j))} {nums.get(j, '')}"
@@ -1571,7 +1778,7 @@ def stage_draft(run: Run) -> None:
               "sections": [s["title"] for s in secs], "papers": sorted(library)}
     ikey = _sig(ibasis)
     old = p.load("intro") or {}
-    reuse = reuse_ok(p.state) and bool(old.get("text"))
+    reuse = keep and bool(old.get("text"))
     intro, notes, org, fresh_intro, model = "", [], "", False, old.get("model", "")
     # made by an earlier version, which kept no fingerprint: when the paper is brought up to date from a step after the
     # structure, nothing the introduction speaks of can have changed, so it is taken over as it stands
@@ -1613,9 +1820,14 @@ def stage_draft(run: Run) -> None:
              "pages": sorted({n for i in s["items"] for x in seq if x["id"] == i for n in x.get("pages") or []}) or [0]}
             for s in secs]
     p.save("plan", {"sections": plan, "organisation": org})
-    p.save("body", {"blocks": blocks, "organisation": org, "figures": figs})
+    waived, approved = "\n\n".join(shaped["waived"]), "\n\n".join(shaped["approved"])
+    p.save("body", {"blocks": blocks, "organisation": org, "figures": figs,
+                    # what the accepted changes of shape replaced and put in (the audit knows them as agreed), and the
+                    # proofs whose argument the app proposed (the paper's declaration names them)
+                    "shape": {"applied": shaped["applied"], "waived": waived, "approved": approved,
+                              "ai": [label_of(x) for x in seq if x["id"] in shaped["ai"]]}})
     from .pipeline import audit_pages
-    p.save("audit", fidelity.audit(audit_pages(approved_source(p)), body))
+    p.save("audit", fidelity.audit(audit_pages(approved_source(p)), body, waived=waived, approved=approved))
 
     # the abstract, from the finished paper
     run.progress(2, 3, "writing the abstract")
@@ -1629,15 +1841,15 @@ def stage_draft(run: Run) -> None:
     akey = _sig(kind, intro, prof.get("id") if isinstance(prof, dict) else str(prof),
                 [ibasis["stmts"][x["id"]] for x in seq if x.get("role") == "main" or x["kind"] == "theorem"])
     olda = p.load("abstract_draft") or {}
-    if reuse_ok(p.state) and olda.get("abstract") and not olda.get("key") and late and not fresh_intro:
+    if keep and olda.get("abstract") and not olda.get("key") and late and not fresh_intro:
         olda["key"] = akey                     # made by an earlier version: taken over (see the introduction above)
         p.save("abstract_draft", olda)
-    if reuse_ok(p.state) and olda.get("abstract") and olda.get("key") == akey:
+    if keep and olda.get("abstract") and olda.get("key") == akey:
         run.log("The abstract is kept as it stands: the main results and the introduction did not change.")
     else:
         user = (f"DOSSIER\n{dossier_text(planned_dossier(p), max(1200, int(room * 0.3)))}\n\nINTRODUCTION\n{fit(intro, int(room * 0.25), 'head')}\n\n"
                 f"BODY\n{fit(body, int(room * 0.4), 'middle')}")
-        if reuse_ok(p.state) and olda.get("abstract") and olda.get("edited"):
+        if keep and olda.get("abstract") and olda.get("edited"):
             user += ("\n\nTHE ABSTRACT AS IT STANDS (the author edited it: keep their wording wherever it is still right, and "
                      f"change only what the paper as it is now makes wrong)\n{olda['abstract']}")
         res = run.ask("writer", system, user, max_out=900, effort="medium", label="Write abstract")
@@ -1647,10 +1859,10 @@ def stage_draft(run: Run) -> None:
         p.save("abstract_draft", {"abstract": abstract, "keywords": parse_lines(extract_tag(res.text, "keywords").replace(",", "\n"))[:12],
                                   "msc": [m for m in (re.sub(r"[^0-9A-Za-z\-]", "", y) for y in extract_tag(res.text, "msc").split(","))
                                           if re.match(r"^\d{2}[A-Z\-]", m)][:4], "model": res.model, "key": akey,
-                                  **({"fresh": True} if reuse_ok(p.state) and olda.get("abstract") else {})})
-    run.progress(3, 3, "first draft ready")
+                                  **({"fresh": True} if keep and olda.get("abstract") else {})})
+    run.progress(3, 3, "second draft ready" if second else "first draft ready")
     n_proofs = sum(1 for b in blocks if b["type"] == "proof")
-    run.log(f"First draft: {len(secs)} sections, {len(seq)} statements, {n_proofs} proofs; introduction and abstract written.")
+    run.log(f"{'Second' if second else 'First'} draft: {len(secs)} sections, {len(seq)} statements, {n_proofs} proofs; introduction and abstract written.")
 
 
 def update_intro(run: Run, old: dict, basis: dict, stmts: str, openings: str, secs: list[dict], library: dict,
@@ -1746,6 +1958,10 @@ def submit_draft(p: Project, data: dict) -> None:
             cur.pop("fresh", None)
             p.save(name, cur)
     p.save("draft_ok", {"at": time.time()})
+    body = p.load("body") or {}
+    if not (body.get("shape") or {}).get("applied"):          # no change of the revision in it: this is the first draft
+        p.save("draft_first", {"at": time.time(), "blocks": body.get("blocks", []), "intro": (p.load("intro") or {}).get("text", ""),
+                               "abstract": (p.load("abstract_draft") or {}).get("abstract", "")})
     p.set_stage("draftcheck", status="done", finished=time.time())
     emit(p.id, "log", stage="draftcheck", level="done", message="First draft approved.")
 
@@ -1817,9 +2033,10 @@ def view(p: Project) -> dict:
                         "pro": {k: pr.get(k) for k in ("ok", "caption", "changes", "corrections", "check", "choice", "error",
                                                         "fresh", "at", "instruction", "auto")} if pr else None})
     return {"items": items, "kind": kind, "note": S.get("note", ""), "unused": S.get("unused", []),
-            "figures": figures, "open_figures": figpro.unanswered(p),
+            "figures": figures, "open_figures": figpro.to_confirm(p),
             "changed": {sid: p.state["stages"].get(sid, {}).get("changed") or [] for sid in ("scope", "outline", "proofcheck", "draftcheck")},
             "leave_out": O.get("leave_out") or [], "chat": O.get("chat") or [],
             "tabs": by_tab, "outline": O.get("sections") or [], "numbers": nums, "proofs": proofs,
             "abstract": (p.load("abstract_draft") or {}).get("abstract", ""),
-            "open_questions": open_questions(p), "open_proofs": open_proof_problems(p) if P else []}
+            "open_questions": open_questions(p), "open_proofs": open_proof_problems(p) if P else [],
+            "disputes": disputes_view(p, S)}

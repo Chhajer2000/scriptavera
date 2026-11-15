@@ -442,7 +442,7 @@ def _on_stamped(folder: Path, st: dict) -> None:
 # ------------------------------------------------------------------ the janitor
 
 def _finished(p: store.Project) -> bool:
-    return (p.state.get("stages", {}).get("finish") or {}).get("status") == "done"
+    return (p.state.get("stages", {}).get(store.STAGE_IDS[-1]) or {}).get("status") == "done"
 
 
 def tidy_once() -> None:

@@ -457,6 +457,7 @@ def stage_referee(run: Run) -> None:
     old = p.load("referee") or {}
     if reuse_ok(p.state) and old.get("points") is not None and old.get("sig") == body_sig(p):
         run.log("The paper the referee read is unchanged: the report is kept.")
+        suggest_visuals(run, (p.load("body") or {}).get("blocks", []), (p.load("intro") or {}).get("text", ""))
         return
     body = p.load("body") or {}
     blocks = body.get("blocks", [])
@@ -486,9 +487,87 @@ def stage_referee(run: Run) -> None:
               "points": points[:25], "model": res.model}
     p.save("referee", report)
     mine = sum(1 for x in report["points"] if x["route"] == "author")
+    suggest_visuals(run, blocks, intro)
     run.progress(1, 1, "report written")
     run.log(f"Referee's report: {len(report['points'])} point(s). {len(report['points']) - mine} concern presentation and are "
             f"dealt with in the copy-edit; {mine} concern the mathematics, the structure or the citations and are for you.")
+
+
+# ------------------------------------------- a table or a figure the paper lacks
+
+def suggest_visuals(run: Run, blocks: list[dict], intro: str) -> None:
+    """One reading of the whole draft for a table or a figure that the author did not make and that would make the
+    paper clearly better: the same kind of information for several cases set out in a table, a configuration the text
+    only describes drawn as a figure. Only what the draft already states goes into it. Each one is compiled; one that
+    does not compile is asked for once more with the error, then dropped. The author sees each with the reason and
+    the place, and decides whether the paper prints it."""
+    from .pipeline import figure_file
+    p = run.p
+    sig = body_sig(p)
+    old = p.load("additions") or {}
+    if old.get("sig") == sig:
+        return
+    units = {u["label"]: u for u in result_units(blocks) if u["label"]}
+    stamp = lambda u: _norm_space((u.get("statement") or "") + (u.get("proof") or ""))  # noqa: E731
+    kept = [a for a in old.get("items", []) if reuse_ok(p.state) and a.get("after") in units
+            and a.get("anchor") == stamp(units[a["after"]])]         # what it stands by did not change: kept, with its id
+    if not paperlib.find_engine():
+        p.save("additions", {"sig": sig, "items": kept})
+        return
+    figs = (p.load("body") or {}).get("figures") or {}
+    have = "\n".join(f"- {'Table' if f.get('kind') == 'table' else 'Figure'}: {f.get('caption') or '(no caption)'}" for f in figs.values()
+                     if f.get("mode") in ("tikz", "orig")) or "(none)"
+    have += "".join(f"\n- Already suggested, after {a['after']}: {a['caption']}" for a in kept)
+    system = prompts.SUGGEST_VISUALS.format(limit=3)
+    user = (f"FIGURES AND TABLES THE PAPER HAS\n{have}\n\nINTRODUCTION\n\n{intro}\n\nBODY\n\n"
+            + paperlib.blocks_to_latex(blocks))
+    run.progress(0, 1, "looking for a table or a figure the paper lacks")
+    res = run.ask("reason", system, fit(user, _room("reason", system, 3500), "middle"), max_out=3500, effort="high",
+                  label="Suggest figures and tables")
+    items = list(kept)
+    n = max([int(re.sub(r"\D", "", a["id"]) or 0) for a in old.get("items", [])] or [0])
+    for raw in re.findall(r"<addition>(.*?)</addition>", res.text or "", flags=re.S)[:3]:
+        f = {k: _norm_space(v) for k, v in re.findall(r"(?m)^(kind|after|why|from|caption|mention):[ \t]*(.*)$", raw)}
+        code = extract_tag(raw, "code").strip()
+        kind = "table" if "table" in f.get("kind", "").lower() else "figure"
+        after = next(iter(_labels_in(f.get("after", ""), set(units))), "")
+        env = "tabular" if kind == "table" else "tikzpicture"
+        m = re.search(r"\\begin\{" + env + r"\}.*\\end\{" + env + r"\}", code, flags=re.S)
+        if not (after and m and f.get("why") and f.get("caption")):
+            continue
+        code = m.group(0)
+        png, err = paperlib.render_tikz(code)
+        if png is None:                            # once more, with what LaTeX said
+            again = run.ask("reason", system, user + f"\n\nYOUR {kind.upper()} AFTER {after} DID NOT COMPILE: {err}\nGive that one "
+                            f"addition again, corrected, in the same format.\n<code>\n{code}\n</code>", max_out=2500,
+                            label="Suggest figures and tables (corrected)")
+            m = re.search(r"\\begin\{" + env + r"\}.*\\end\{" + env + r"\}", extract_tag(again.text or "", "code"), flags=re.S)
+            png, err = paperlib.render_tikz(m.group(0)) if m else (None, err)
+            if png is None:
+                run.log(f"A {kind} suggested after {units[after]['name']} could not be set in LaTeX ({err[:120]}): it is not proposed.", "warn")
+                continue
+            code = m.group(0)
+        n += 1
+        aid = f"a{n}"
+        path = figure_file(p, aid, "tikz")
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(png)
+        mention = f.get("mention", "")
+        items.append({"id": aid, "kind": kind, "after": after, "name": units[after]["name"], "why": f["why"], "from": f.get("from", ""),
+                      "caption": f["caption"], "mention": mention if "(REF)" in mention else "", "code": code,
+                      "anchor": stamp(units[after]), "model": res.model, "at": time.time()})
+    p.save("additions", {"sig": sig, "items": items})
+    new = len(items) - len(kept)
+    if new:
+        run.log(f"{new} table(s) or figure(s) that the paper does not have would make it clearer: each is put to you with the "
+                "reason and the place, and is printed only if you say so.")
+
+
+def accepted_additions(p: Project) -> dict:
+    """The suggested tables and figures the author accepted, as figures of the paper (by id)."""
+    dec = (p.load("decisions") or {}).get("additions") or {}
+    return {a["id"]: {"mode": "tikz", "tikz": a["code"], "caption": a["caption"], "kind": a["kind"], "suggested": True}
+            for a in (p.load("additions") or {}).get("items", []) if dec.get(a["id"]) == "accept"}
 
 
 # ---------------------------------------------------------- the author decides
@@ -572,21 +651,23 @@ def decision_items(p: Project) -> dict:
     remarks = failed + remarks
     for n, c in enumerate((p.load("dossier") or {}).get("concerns", []), 1):
         remarks.append({"id": f"N{n}", "source": "first reading of your notes", "where": "", "comment": c, "action": ""})
-    return {"simplify": simplify, "complete": complete, "issues": issues, "remarks": remarks}
+    additions = [{**a, "context": _where(ctx, a["after"])} for a in (p.load("additions") or {}).get("items", [])
+                 if a["after"] in ctx["units"]]
+    return {"simplify": simplify, "complete": complete, "issues": issues, "remarks": remarks, "additions": additions}
 
 
 def settle_if_nothing_to_decide(p: Project) -> bool:
     items = decision_items(p)
-    if items["simplify"] or items["complete"] or items["issues"] or items["remarks"]:
+    if items["simplify"] or items["complete"] or items["issues"] or items["remarks"] or items["additions"]:
         return False
-    p.save("decisions", {"simplify": {}, "complete": {}, "issues": {}, "remarks": {}, "at": time.time(), "auto": True})
+    p.save("decisions", {"simplify": {}, "complete": {}, "issues": {}, "remarks": {}, "additions": {}, "at": time.time(), "auto": True})
     return True
 
 
 def _saved_choices(p: Project) -> dict:
     d = p.load("decisions") or {}
     return {"simplify": d.get("simplify") or {}, "complete": d.get("complete") or {}, "issues": d.get("issues") or {},
-            "remarks": d.get("remarks") or {}}
+            "remarks": d.get("remarks") or {}, "additions": d.get("additions") or {}}
 
 
 def decisions_needed(p: Project) -> list[str]:
@@ -598,6 +679,8 @@ def decisions_needed(p: Project) -> list[str]:
             if (had["complete"].get(c["id"]) or {}).get("choice") not in ("accept", "edit", "instruct", "keep")]
     out += [f"the problem {c['id']} in {c.get('name') or c.get('label')} is new" for c in items["issues"]
             if (had["issues"].get(c["id"]) or {}).get("choice") not in ("fix", "keep", "instruct")]
+    out += [f"the suggested {a['kind']} {a['id']} is new" for a in items["additions"]
+            if had["additions"].get(a["id"]) not in ("accept", "reject")]
     return out
 
 
@@ -635,13 +718,20 @@ def submit_decisions(p: Project, data: dict) -> None:
         if choice not in ("fix", "keep", "instruct"):
             missing.append(c["id"])
         issues[c["id"]] = {"choice": choice, "note": note}
+    additions = {}
+    for a in items["additions"]:
+        choice = (data.get("additions") or {}).get(a["id"])
+        if choice not in ("accept", "reject"):
+            missing.append(a["id"])
+        additions[a["id"]] = choice
     if missing:
         raise ValueError(f"{len(missing)} item(s) still need your decision.")
     known = {r["id"] for r in items["remarks"]}
     for rid, note in (data.get("remarks") or {}).items():
         if rid in known and str(note).strip():
             remarks[rid] = str(note).strip()[:1500]
-    p.save("decisions", {"simplify": simplify, "complete": complete, "issues": issues, "remarks": remarks, "at": time.time()})
+    p.save("decisions", {"simplify": simplify, "complete": complete, "issues": issues, "remarks": remarks,
+                         "additions": additions, "at": time.time()})
     p.set_stage("decide", status="done", finished=time.time())
     acc = sum(1 for v in simplify.values() if v == "accept")
     fix = sum(1 for v in issues.values() if v["choice"] != "keep") + sum(1 for v in complete.values() if v["choice"] != "keep")
@@ -831,6 +921,22 @@ def apply_decisions(run: Run, blocks: list[dict], intro: str = "") -> tuple[list
         report["remarks"].append({"id": r["id"], "note": note, "where": "the introduction" if target == "intro" else label})
     for i, b in enumerate(blocks):
         b["id"] = f"b{i + 1}"
+    # a table or figure the author accepted: the sentence that refers to it and the float, after the result it
+    # stands by (after its proof, when it has one)
+    for a in items.get("additions", []):
+        if (dec.get("additions") or {}).get(a["id"]) != "accept":
+            continue
+        u = _unit(result_units(blocks), a["after"])
+        if not u:
+            report["unapplied"].append({"id": a["id"], "why": "the result it stands by is no longer in the paper."})
+            continue
+        at = (u["proof_at"] if u["proof_at"] is not None else u["at"]) + 1
+        word = "Table" if a["kind"] == "table" else "Figure"
+        mention = (a.get("mention") or "").replace(f"{word} (REF)", f"{word}~\\ref{{fig:{a['id']}}}").replace("(REF)", f"\\ref{{fig:{a['id']}}}")
+        text = (mention + "\n\n" if mention else "") + f"\\insertfigure{{{a['id']}}}"
+        blocks[at:at] = [{"type": "para", "text": text, "page": blocks[u["at"]].get("page", 0)}]
+        approved.append(text + "\n" + a["caption"] + "\n" + a["code"])
+        report.setdefault("added", []).append({"id": a["id"], "kind": a["kind"], "after": a["after"]})
     return blocks, intro, "\n\n".join(waived), "\n\n".join(approved), report
 
 

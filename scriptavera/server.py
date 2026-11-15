@@ -20,7 +20,7 @@ from starlette.responses import FileResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import __version__, config, domains, final, ingest, journals, literature, paper as paperlib, pipeline, revision, store, writing
+from . import __version__, config, domains, final, ingest, journals, literature, paper as paperlib, pipeline, reshape, revision, store, writing
 from . import arxivpack, assist, citecheck, costs, drafting, extras, hosting, memory, phone, placing, provenance, relines, reviews, sources, tenancy, typed, workspace
 from .llm import KEY_STEPS, PROVIDERS, ROLES, LLMError, router
 
@@ -527,6 +527,7 @@ def _bundle(p: store.Project) -> dict:
         "writing": drafting.view(p),
         "finish": final.finish_info(p) if p.load("paper") else None,
         "revision": revision.state_json(p),
+        "reshape": reshape.view(p),
         "journal": meta.get("journal"), "profile": journals.profile(meta.get("journal")),
         "statements": meta.get("statements") or {},
         "paper": p.load("paper"), "calls": p.calls(300),
@@ -1040,6 +1041,10 @@ async def api_scope(request: Request):
     later = _later_started(p, "scope")
     try:
         scope = drafting.submit_statements(p, await _body(request))
+    except drafting.Dispute:
+        # a kept statement uses one that is left out: not an error but a question to the author, shown as a conversation
+        pipeline.emit(p.id, "state")
+        return ok(dispute=True, writing=drafting.view(p))
     except ValueError as e:
         return fail(str(e))
     if later:
@@ -1090,6 +1095,36 @@ async def api_statement(request: Request):
     return ok(item=item, writing=drafting.view(p))
 
 
+async def api_dispute(request: Request):
+    """The conversation about a statement that is left out although a kept one uses it. `action` is 'talk' (the
+    author's reason or other argument, which is judged), 'keep' (keep the statement after all), 'omit' (leave the
+    statement that uses it out as well) or 'close'."""
+    p = _project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    body = await _body(request)
+    did, action = str(body.get("id") or ""), body.get("action")
+    d = next((x for x in drafting.open_disputes(p) if x["id"] == did), None)
+    if not d:
+        return ok(writing=drafting.view(p), settled=True)
+    why = _at(p, d["at"])
+    if why:
+        return fail(why)
+    try:
+        if action == "talk":
+            out = await run_in_threadpool(drafting.talk_dispute, p, did, str(body.get("text") or ""))
+        elif action in ("keep", "omit", "close"):
+            out = drafting.settle_dispute(p, did, action)
+        else:
+            return fail("Unknown action.")
+    except drafting.Dispute:                       # leaving the other out as well runs into a statement that uses it
+        out = {"settled": False}
+    except (ValueError, LLMError) as e:
+        return fail(str(e))
+    pipeline.emit(p.id, "state")
+    return ok(writing=drafting.view(p), **out)
+
+
 async def api_outline(request: Request):
     """The structure: a section renamed, a statement moved, the structure planned again with the author's instruction,
     or confirmed (then the proofs are written)."""
@@ -1118,6 +1153,8 @@ async def api_outline(request: Request):
         else:
             try:
                 drafting.edit_outline(p, body)
+            except drafting.Dispute:               # leaving out a statement that a kept one uses: a question to the author
+                return ok(writing=drafting.view(p), dispute=True)
             except ValueError as e:
                 if not body.get("move"):
                     raise
@@ -1211,7 +1248,7 @@ async def api_draftcheck(request: Request):
             drafting.submit_draft(p, body)
             if later:
                 pipeline.disarm(p.id)
-                p.update_from("simplify", "your changes to the first draft")
+                p.update_from("reshape", "your changes to the first draft")
             pipeline.start(p)
         else:
             drafting.edit_draft(p, body)
@@ -1241,12 +1278,42 @@ async def api_finish(request: Request):
             await run_in_threadpool(final.cite_intro, p, keys, str(body.get("instruction") or "")[:2000])
         elif action == "finish":
             await run_in_threadpool(final.finish, p, body)
+            pipeline.disarm(p.id)
+            if _later_started(p, "finish"):            # decided again: the final version is built again from it
+                p.update_from("build", "your title, introduction and citations")
+            pipeline.start(p)                          # the final version is built from the author's choices: the last step
         else:
             return fail("Unknown action.")
     except (ValueError, LLMError) as e:
         return fail(str(e))
     pipeline.emit(p.id, "state")
     return ok(finish=final.finish_info(p))
+
+
+async def api_reshape(request: Request):
+    """The author's decisions in the revision. At "Your plan" (step "reshapecheck"): each planned change accepted or
+    rejected; the proofs of the accepted ones are then written. At "Your review of the new proofs" (`proofs` true,
+    step "reproofcheck"): each new proof accepted, or the proof of the first draft kept; the second draft is then
+    written. Decided again later: what follows is brought up to date."""
+    p = _project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    body = await _body(request)
+    second = bool(body.get("proofs"))
+    sid = "reproofcheck" if second else "reshapecheck"
+    why = _at(p, sid)
+    if why:
+        return fail(why)
+    later = _later_started(p, sid)
+    try:
+        (reshape.submit_proofs if second else reshape.submit)(p, body.get("decisions") or {})
+    except ValueError as e:
+        return fail(str(e))
+    if later:
+        pipeline.disarm(p.id)
+        p.update_from("redraft" if second else "reproofs", "your review of the new proofs" if second else "your decisions on the plan of the revision")
+    pipeline.start(p)
+    return ok()
 
 
 async def api_decisions(request: Request):
@@ -2072,6 +2139,8 @@ routes = [
     Route("/api/projects/{pid}/figure/{fid}", api_figure, methods=["POST"]),
     Route("/api/projects/{pid}/review", api_review, methods=["POST"]),
     Route("/api/projects/{pid}/decisions", api_decisions, methods=["POST"]),
+    Route("/api/projects/{pid}/reshape", api_reshape, methods=["POST"]),
+    Route("/api/projects/{pid}/dispute", api_dispute, methods=["POST"]),
     Route("/api/projects/{pid}/topic", api_topic, methods=["POST"]),
     Route("/api/projects/{pid}/scope", api_scope, methods=["POST"]),
     Route("/api/projects/{pid}/finish", api_finish, methods=["POST"]),

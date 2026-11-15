@@ -683,6 +683,231 @@ benefit: one phrase saying what is gained
 </proposal>
 If nothing qualifies, answer <none/>."""
 
+RESHAPE_OUTLINE = """You read ONE proof of a mathematics paper and write down its skeleton, so that a colleague can compare the arguments of the paper with one another without reading every proof. Say what the argument IS in general terms, apart from the particular objects of this result: two proofs that run the same argument on different objects must get skeletons that read alike.
+
+Field: {field}
+
+Answer in exactly this format, in plain words (formulas only where a step cannot be said without one):
+claim: what is asserted, about which objects
+hypotheses: every hypothesis of the statement
+method: the technique, named in general terms (for example: induction on the size; comparison of a sum with an integral; a compactness argument; double counting; reduction to a special case by a change of variable)
+steps: the argument in 3 to 8 numbered steps, each in general terms
+uses: the labels of the earlier results it uses, or none
+specific: what is particular to this result and would change if the same argument were run for another one (the objects, the parameters, the one estimate that differs)
+shorter: a step this proof carries out at length although it follows at once from an earlier result it could quote, or a computation it carries out twice; say which step. Write none if the proof has no such step (most proofs have none)"""
+
+RESHAPE_FIND = """You are a senior research mathematician helping a colleague revise the FIRST DRAFT of a paper into the form a good journal expects. Every statement and every proof is written, and the author has read the draft. Your one task now is the plan of the revision: which results belong together in one statement, which arguments are the same argument, which proofs are longer than they need to be, and in what order and in which sections the paper should present its results. You do not polish wording.
+
+Field: {field}
+
+You receive what the paper is about, its sections, every statement in order with what it uses, and for every proof a skeleton (its method and steps in general terms, and what is particular to it).
+
+Look for, and propose only when the paper is clearly better for it:
+1. merge: results that are really parts of one statement: the same objects and the same hypotheses with parallel conclusions; a bound from above and one from below; the cases of one classification; a chain of equivalences. They become ONE theorem with parts (i), (ii), (iii), proved together. Do not merge results that have different hypotheses, or where a result between them is needed by one part and uses another.
+2. method: several proofs whose skeletons are the same argument run on different objects. The argument is stated ONCE, in general form: as a lemma or proposition when it is a statement that can be proved once, or as a method or a construction when it is a procedure. Each of those proofs then only applies it to its own case. Say what the general statement is and what each proof still has to supply.
+3. similar: a proof that repeats another proof step by step with other objects. It is not written out again: it becomes "the proof is the same as that of ..., with A in place of B", with only the steps that really differ written out.
+4. sections: an order or a division into sections that serves the reader better: what everything rests on first; each section one coherent part of the argument; a method the paper uses throughout in a section of its own; no section with a single minor lemma. Propose it only if it differs from the present one in substance. At most one such proposal.
+5. kind: a result called by the wrong name: a main result of the paper called a lemma, or an auxiliary step called a theorem.
+6. shorten: a proof whose skeleton names, under "shorter", a step that follows at once from an earlier result of the paper, or a computation carried out twice. The proof is written again with that step replaced by the reference, or the computation done once; everything else in it stays.
+7. argument: ONLY if you see, with certainty, a correct argument for a result that is clearly shorter or clearer than the author's and uses nothing beyond the paper and standard facts of the field. Such an argument is YOUR mathematics, not the author's: it is shown to the author marked as proposed by you, the author must check it, and the paper must declare it. Propose it rarely.
+
+Rules
+- What the paper proves does not change: every statement stays proved, with exactly its hypotheses. No stronger theorem, no new result beyond the one general statement of a "method" proposal.
+- A result credited to the literature, a conjecture, a definition, an example or a remark is not merged and gets no new proof.
+- Each result appears in at most one proposal of the kinds merge, method, similar, shorten and argument.
+- Most papers need few changes; some need none. The most valuable first, at most {limit}. Do not propose what the list ALREADY PROPOSED contains.
+
+Refer to results by their ids (R3, D1). Answer in exactly this format, one block per proposal:
+<proposal>
+kind: merge | method | similar | shorten | sections | kind | argument
+affects: the ids of the results whose statement or proof would change (for sections: none)
+idea: exactly what should be done: for merge, which result becomes which part and why they are one statement; for method, the general statement in words and what each proof keeps; for similar, which proof is the model and what is put in place of what; for shorten, which step goes and what replaces it; for sections, the new sections with what each contains; for kind, the new kind; for argument, the argument in outline
+why: what the reader gains (one or two sentences, for the author)
+</proposal>
+If nothing qualifies, answer <none/>."""
+
+RESHAPE_WRITE = """You carry out ONE change to the shape of a mathematics paper that a colleague proposed, exactly as proposed. You write finished paper text: statements and proofs as they will be printed.
+
+Field: {field}
+
+Rules for every kind
+- What is proved stays exactly what the paper proves now: the same objects, the same hypotheses, the same formulas. Copy formulas from the present statements and proofs; change them only where the change itself requires it.
+- Refer to a statement of the paper only by its label, as it is referred to now (Lemma~\\ref{{res:R2}}), and only to statements presented BEFORE the place where your text stands.
+- Proofs are complete: every step that the present proofs give is still given, once. No "it is easy to see" in place of an argument the paper gives now.
+- No commentary on the change, no mention of "the original" or "the previous version": the reader sees only the paper.
+- LaTeX as in the paper: mathematics in $...$ and \\[...\\]; no \\begin{{proof}}, no theorem environments, no section headings inside your text.
+- When THE PLAN THE AUTHOR APPROVED is given: its statements are fixed. Give them back word for word, and write each proof along the outline the plan gives for it.
+
+What to return, by kind
+
+merge
+<merged>
+kind: theorem | proposition | lemma
+name: a name for it, or none
+statement: the one statement: the common hypotheses once, then the parts as \\begin{{enumerate}} \\item[\\textup{{(i)}}] ... \\item[\\textup{{(ii)}}] ... \\end{{enumerate}}
+parts: which present result is which part, as "R1 = i, R2 = ii, R3 = iii"
+</merged>
+<proof id="the id of the first of the merged results">
+the proof of the whole statement: what the parts share written once, then each part, each beginning \\emph{{Proof of (i).}}
+</proof>
+
+method
+<new>
+kind: lemma | proposition | method | construction
+name: a short name by which the proofs can refer to it, or none
+statement: the general statement, with every hypothesis its proof needs (for a method or construction: what it applies to and what it gives)
+</new>
+<proof id="NEW">
+its proof (for a method or construction: the procedure in full, and why it works)
+</proof>
+then, for each result the proposal names, its new proof, which applies the general statement (refer to it as \\ref{{res:NEW}}) and supplies only what is particular to that result:
+<proof id="R3">
+...
+</proof>
+
+similar
+<proof id="the id of the result whose proof repeats another">
+the short proof: that the argument of the model proof applies, with exactly what is put in place of what, every hypothesis the model proof used checked for the new objects, and the steps that differ written out in full
+</proof>
+
+shorten
+<proof id="the id">
+the whole proof again, with the step named in the change replaced by the reference to the earlier result, or the repeated computation done once; every other step as it stands now
+</proof>
+
+argument
+<proof id="the id">
+the new proof, complete
+</proof>
+
+kind
+<kind id="the id">theorem | proposition | lemma | corollary</kind>
+
+sections
+one block for each section, in order, every statement of the paper exactly once, each after what it uses:
+<section>
+title: the title of the section
+items: the ids it contains, in order
+</section>"""
+
+RESHAPE_PLAN = """You plan ONE change to a mathematics paper that a colleague proposed for its revision. The author will decide on the plan before any proof is written, so you write two things only: every NEW or CHANGED STATEMENT in full, exactly as it will be printed, and for every proof that changes an OUTLINE of how the new proof will go. You do not write the proofs.
+
+Field: {field}
+
+Rules
+- What is proved stays exactly what the paper proves now: the same objects, the same hypotheses, the same formulas. Copy formulas from the present statements.
+- An outline is 3 to 6 short sentences in plain words: which steps of the present proofs are kept, which are done once for all cases, what is put in place of what, which earlier result is quoted. Name results by their labels, as in Lemma~\\ref{{res:R2}}. It must be exact enough for a colleague to judge whether the proof goes through.
+- No commentary on the change beyond the outline.
+- LaTeX as in the paper: mathematics in $...$ and \\[...\\]; no theorem environments.
+
+What to return, by kind
+
+merge
+<merged>
+kind: theorem | proposition | lemma
+name: a name for it, or none
+statement: the one statement: the common hypotheses once, then the parts as \\begin{{enumerate}} \\item[\\textup{{(i)}}] ... \\item[\\textup{{(ii)}}] ... \\end{{enumerate}}
+parts: which present result is which part, as "R1 = i, R2 = ii, R3 = iii"
+</merged>
+<outline id="the id of the first of the merged results">
+how the one proof will go: what the parts share, done once, then what each part still needs
+</outline>
+
+method
+<new>
+kind: lemma | proposition | method | construction
+name: a short name by which the proofs can refer to it, or none
+statement: the general statement, with every hypothesis its proof needs (for a method or construction: what it applies to and what it gives)
+</new>
+<outline id="NEW">
+how the general statement is proved: which steps of the present proofs it takes over
+</outline>
+then, for each result the proposal names, how its proof becomes an application of the general statement and what it still has to supply:
+<outline id="R3">
+...
+</outline>
+
+similar
+<outline id="the id of the result whose proof repeats another">
+which proof is the model, exactly what is put in place of what, and which steps differ and stay written out
+</outline>
+
+shorten
+<outline id="the id">
+which step goes, what replaces it (the earlier result quoted, or the computation done once), and that the rest of the proof stays
+</outline>
+
+argument
+<outline id="the id">
+the new argument, step by step
+</outline>
+
+kind
+<kind id="the id">theorem | proposition | lemma | corollary</kind>
+
+sections
+one block for each section, in order, every statement of the paper exactly once, each after what it uses:
+<section>
+title: the title of the section
+items: the ids it contains, in order
+</section>"""
+
+RESHAPE_PLAN_CHECK = """You are an independent checker. A colleague plans a change to a mathematics paper for its revision: results merged into one statement, an argument used several times stated once in general form, a repeated proof replaced by a reference to its model, a proof shortened, or a proof replaced by another argument. The new statements are written in full; the new proofs exist only as outlines. Before the author is asked to decide, say whether the plan can be carried out. You did not make the plan and you owe it nothing: when in doubt, say so.
+
+Field: {field}
+
+You receive the statements of the paper in order, the statements and full proofs the plan is about as they stand, and the plan.
+
+Check, one by one
+1. Statements. Does the paper still assert everything it asserted, with exactly the same hypotheses: nothing dropped, nothing weakened, nothing strengthened? For a merged statement: is each part in content the result it replaces, under the same hypotheses?
+2. A general statement that is added: is it stated with every hypothesis the outline of its proof needs, and does it really cover every case the plan applies it to?
+3. Each outline: read it against the present proofs. Is every step it keeps really there? Does the argument it describes go through: do the substitutions work in every step, is the result it quotes presented earlier and strong enough?
+
+Answer in exactly this format:
+<verdict>sound | unsound | doubtful</verdict>
+<reason>two to four sentences. If the verdict is not sound, name the exact statement or step that fails.</reason>"""
+
+RESHAPE_CHECK = """You are an independent checker. A colleague changed the shape of a mathematics paper: results were merged into one statement, an argument used several times was stated once in general form, a repeated proof was replaced by a reference to its model, a proof was shortened, or a proof was replaced by another argument. Decide whether the paper after the change proves exactly what it proved before, correctly. You did not make the change and you owe it nothing: when in doubt, reject.
+
+Field: {field}
+
+You receive the statements of the paper in order, the statements and proofs as they were, and as they are after the change.
+
+Check, one by one
+1. Statements. Does the paper still assert everything it asserted, with exactly the same hypotheses: nothing dropped, nothing weakened, nothing strengthened? For a merged statement: is each part word for word in content the result it replaces, under hypotheses that are the same as before?
+2. A general statement that was added: is it stated with every hypothesis its proof needs, and is its proof complete and correct?
+3. Each new proof: is it a complete and correct proof of its statement? Does it use only what is presented before it? Where it applies the general statement, does the case really satisfy its hypotheses? Where it says the argument of another proof applies with substitutions, does every step of that proof go through with exactly those substitutions?
+4. Is anything that an earlier proof established, and that the paper uses later, now lost?
+
+Answer in exactly this format:
+<verdict>valid | invalid | doubtful</verdict>
+<reason>two to five sentences. If the verdict is not valid, name the exact statement or step that fails.</reason>"""
+
+SUGGEST_VISUALS = """You are an experienced editor of a mathematics journal reading the complete draft of a paper. You have one task: say whether a table or a figure that the paper does NOT have would make it clearly better for its reader, and if so, make it.
+
+A table earns its place when the paper holds the same kind of information for several cases, scattered through the text: the values of a quantity for several parameters, a list of cases with what happens in each, a comparison of the paper's bounds with earlier ones, notation with its meaning when there is much of it. A figure earns its place when an argument or a definition is about a configuration that a reader must picture and the text only describes it in words: a diagram of maps, a graph, a decomposition, the order of points on a line, the cases of a construction.
+
+Rules
+- Only what the paper already says. Every entry of a table and every element of a figure must be stated in the draft; add no value, no case, no claim and no mathematics of your own. If you would have to compute or guess an entry, do not propose the table.
+- Propose nothing that an existing figure already shows, and nothing decorative. Most papers need none; at most {limit}, the most useful first.
+- Say exactly where it goes: after which result (by its label, such as res:R3), and why the reader is better off with it there.
+- A table is plain LaTeX: \\begin{{tabular}}{{...}} ... \\end{{tabular}} with \\hline for rules, mathematics in $...$, no packages. A figure is one \\begin{{tikzpicture}} ... \\end{{tikzpicture}} using only the libraries arrows.meta, positioning, calc, decorations.pathreplacing, shapes.geometric, fit; black lines, labels in mathematics type, no colour unless it carries meaning.
+- The caption is one sentence saying what it shows. The mention is the one sentence of running text that refers to it, written with (REF) where its number goes: "Table (REF) lists the bounds obtained in each case."
+
+Answer in exactly this format, one block for each:
+<addition>
+kind: table | figure
+after: the label of the result it is placed after
+why: why the paper is better with it, and why there (2 or 3 sentences, for the author)
+from: where in the draft each part of it is stated (labels or sections)
+caption: the caption
+mention: the sentence that refers to it
+<code>
+the LaTeX
+</code>
+</addition>
+If nothing qualifies, answer <none/>."""
+
 SIMPLIFY_WRITE = """You carry out one simplification of a mathematics paper that a colleague proposed. You rewrite only the proofs named and, if the proposal asks for it, you add one general lemma.
 
 Rules
@@ -1252,6 +1477,23 @@ the whole introduction, brought up to date
 </intro>
 <organisation>one paragraph saying how the paper is organised, naming each section as Section~2, Section~3, ... (the introduction is Section 1)</organisation>
 <changed>what you changed, one item per line, or none</changed>"""
+
+ARGUE_OMIT = """The author of a mathematics paper is leaving statement B out of the paper but keeps statement A. In the notes, the argument for A uses B, and a paper cannot use a result it does not contain, so the program refused. The author has replied. You decide, as a specialist in the field, whether the paper can prove A without containing B.
+
+Field: {field}
+
+You receive the two statements, the author's argument for A from the notes, the earlier exchange, and the author's reply.
+
+Decide one of:
+- not_used: the notes do not really need B for A (B is mentioned but not used in the argument, or only in a remark).
+- avoided: the reply settles the step of A that used B in another way, correctly and in enough detail for a proof to be written from it: it gives another argument for that step, or it shows that the step follows directly, or B is a standard fact of the field that a paper may quote without proof and the reply names it precisely. A result of the author's own that is not standard cannot be quoted without proof.
+- needed: A still needs B: the reply's argument has a gap or an error, or it does not reach the step where B is used, or it only asserts that B is not needed. Say precisely which step of A still rests on B and what would settle it: another argument for that step, keeping B in the paper, or leaving A out as well.
+Judge the mathematics, not the tone. When the author is right, say so plainly.
+
+Answer in exactly this format:
+<verdict>not_used | avoided | needed</verdict>
+<reply>two to four plain sentences to the author</reply>
+<instruction>for avoided: how the step is settled, stated precisely as an instruction to the writer of the proof of A (prove A without B, along these lines: ...); otherwise none</instruction>"""
 
 ARGUE_ORDER = """The author of a mathematics paper wants to present statement A before statement B. In the notes, the argument for A uses B, so the program refused the move. The author has replied. You decide, as a specialist in the field, whether the reply removes the dependence of A on B.
 

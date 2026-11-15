@@ -71,8 +71,11 @@ try:
         pg.on("pageerror", lambda e: errors.append("PAGEERROR " + str(e)))
         # ---- step 9: the copies only
         pg.goto(f"http://127.0.0.1:{PORT}/#p/{p.id}/review"); pg.wait_for_selector(".review"); time.sleep(0.8)
+        pg.click('.rv3-row .rv-p[data-n="1"]'); time.sleep(0.5)       # the page of the first drawing
         card = pg.inner_text("#fig-f1")
         assert "Is the copy what you drew?" in card and "decided with the structure" in card, card
+        assert "selected by the app" in card.lower() and pg.locator("#fig-f1 .choice.on").count() == 1, "the app's answer is selected, and can be changed"
+        assert not any(x.startswith("fig:") for x in pg.evaluate("openItems().map((x) => x.key)")), "it does not wait for an answer"
         assert pg.locator('#fig-f1 .choice[data-v="explain"]').count() == 0 and pg.locator("#fig-f1 .capbox").count() == 0
         pg.screenshot(path=str(OUT / "d1_copy.png"))
         for _ in range(20):                                           # every item settled: Approve opens
@@ -117,11 +120,9 @@ try:
             if not left_:
                 break
             pg.click(f'#proof-{left_[0]} [data-act="pdecide"][data-v="keep"]'); time.sleep(0.8)
-        pg.click('[data-act="papprove"]'); pg.wait_for_selector(".dialog, dialog, .modal", timeout=5000); time.sleep(0.3)
-        text = pg.inner_text("body")
-        assert "not confirmed yet" in text and "page 3" in text, text[-1500:]
-        pg.screenshot(path=str(OUT / "d4_approve.png"))
-        pg.click('[data-act="cfyes"]'); time.sleep(1.0)
+        assert "decided by the app" in pg.inner_text("#figpro-f2") and "your decision" in pg.inner_text("#figpro-f1")
+        pg.screenshot(path=str(OUT / "d4_decided.png"))
+        pg.click('[data-act="papprove"]'); time.sleep(1.0)          # nothing to confirm: no correction was proposed
         at("proofcheck", ("done",), 30)
         b.close()
     pro = figpro.entries(p)

@@ -1150,7 +1150,9 @@ class Router:
         headers = {"Authorization": f"Bearer {m.key}", "Content-Type": "application/json"}
         if m.provider == "openrouter":
             headers["X-Title"] = "Scriptavera"
-        timeout = 240 if images or need > 20000 else 150
+        # how long to wait for an answer before taking the model for overloaded: a page read is normally answered in
+        # under a minute, so after two and a half minutes of silence the request is given up and another model asked
+        timeout = 240 if len(images) > 1 or need > 20000 else 150
         if eff == "high" or max_out > 6000:
             timeout = 480                      # long reasoning before a long answer: several minutes is normal
 
@@ -1166,8 +1168,11 @@ class Router:
             try:
                 r = requests.post(url, headers=headers, data=json.dumps({**body, **optional}), timeout=timeout)
             except requests.ReadTimeout as e:
-                # no answer in all this time: asking the same model again would most likely wait as long once more
+                # no answer in all this time: the model is overloaded (a provider in great demand keeps requests
+                # waiting instead of refusing them). It is rested for five minutes, so that the other pages and the
+                # next requests go to another model at once instead of each waiting as long
                 speed.note(m, max(time.time() - t0, timeout))
+                m.cooldown_until, m.note = max(m.cooldown_until, time.time() + 300), "not answering (overloaded)"
                 raise _Skip(f"no answer in {int(timeout)}s ({type(e).__name__})", slow=True)
             except requests.RequestException as e:
                 net_errors += 1

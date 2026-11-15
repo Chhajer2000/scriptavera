@@ -219,7 +219,7 @@ function proseLite(t) {
   h = h.replace(/\\(?:eq)?ref\s*\{([^{}]+)\}/g, (m0, l) => esc(labelNumber(l)));
   h = h.replace(/\\label\s*\{[^{}]*\}/g, "").replace(/\\insertfigure\s*\{([^{}]+)\}/g, '<span class="fig">The figure is placed here.</span>');
   for (let i = 0; i < 2; i++) h = h.replace(/\\(?:emph|textit)\{([^{}]*)\}/g, "<em>$1</em>").replace(/\\textbf\{([^{}]*)\}/g, "<strong>$1</strong>").replace(/\\(?:textrm|text)\{([^{}]*)\}/g, "$1");
-  h = h.replace(/\\(?:begin|end)\{(?:itemize|enumerate|center|quote)\}/g, "").replace(/\\item\b/g, "<br>• ");
+  h = h.replace(/\\(?:begin|end)\{(?:itemize|enumerate|center|quote)\}/g, "").replace(/\\item\s*\[(?:\\textup\{)?([^\]{}]*)\}?\]/g, "<br>$1 ").replace(/\\item\b/g, "<br>• ");
   h = h.replace(/\\(?:qedhere|noindent|medskip|smallskip|bigskip|par)\b/g, "").replace(/~/g, "&nbsp;");
   h = h.replace(/``/g, "“").replace(/&#39;&#39;/g, "”").replace(/---/g, "—").replace(/--/g, "–").replace(/\\([%&#_$])/g, "$1").replace(/\\ /g, " ");
   h = h.replace(/\u0000(\d+)\u0000/g, (m, i) => `<span class="math">${keep[+i]}</span>`);
@@ -291,7 +291,7 @@ function autoView() {
   if (run) return run;
   const err = ids.find((i) => st(i).status === "paused" || st(i).status === "error");
   if (err) return err;
-  if (ids.every((i) => st(i).status === "done")) return "assemble";
+  if (ids.every((i) => st(i).status === "done")) return ids.includes("build") ? "build" : "assemble";
   return ids.find((i) => st(i).status !== "done") || "assemble";
 }
 
@@ -504,7 +504,7 @@ function drawTop() {
     ${S.b.usage && S.b.usage.total.calls ? `<button class="chip" data-act="costs" title="What this paper has cost in AI calls so far, and the estimate for the whole paper">${money(S.b.usage.total.cost)} so far</button>` : ""}
     <span class="tb-space"></span>`;
   if (S.b.paper && !running()) h += `<button class="btn small" data-act="addpagesdlg" title="Add new pages to these notes: only they are read, and every part of the paper that does not change is kept">${ICON.pages}Add pages</button>`;
-  if (S.b.editor && S.b.editor.can && !running() && !(S.view === "assemble" && S.b.paper)) {     // the paper view has its own
+  if (S.b.editor && S.b.editor.can && !running() && !onPaper()) {     // the paper view has its own
     h += `<a class="btn small ${unfinished ? "" : "primary"}" href="/editor/${encodeURIComponent(S.pid)}" title="Work on the LaTeX files directly, with the PDF beside them, the history, and commands to the AI">Go to editor</a>`;
   }
   if (running()) h += `<span class="muted small"><span class="spinner"></span> Working</span><button class="btn small" data-act="stop">Stop</button>`;
@@ -538,7 +538,8 @@ function ago(t) {
 /* What each step that waits for the author asks of them, as the line on the paper's card. */
 const GATE_ASK = { topiccheck: "Check the topic and the papers found", confirm: "Confirm the notation", review: "Check the transcription",
   scope: "Check the statements", outline: "Confirm the structure", proofcheck: "Review the proofs",
-  draftcheck: "Read the first draft", decide: "Decide on the proposed changes", finish: "Choose the title, check the citations" };
+  draftcheck: "Read the first draft", reshapecheck: "Decide on the plan of the revision", reproofcheck: "Review the new proofs",
+  decide: "Decide on the proposed changes", finish: "Choose the title, check the citations" };
 function paperStatus(p) {
   /* What a paper is doing now, in a few words, and the colour that goes with it. */
   if (p.imported) return ["LaTeX paper", "plain"];
@@ -1028,6 +1029,19 @@ const SIMPLIFY_KIND = { "general-lemma": "A method used several times, stated on
 const SEVERITY = { error: ["Error", "red"], gap: ["Gap in the argument", "hl"], slip: ["Slip of the pen", "hl"] };
 const POINT_TYPE = { mathematics: "Mathematics", structure: "Structure", citation: "Citations", presentation: "Presentation", notation: "Notation", typography: "Typography" };
 
+function additionCard(a) {
+  /* a table or figure the paper does not have, suggested by the app: what it is, why, where; the author says yes or no */
+  const D = S.decide, v = D.additions[a.id], word = a.kind === "table" ? "table" : "figure";
+  const pick = (val, label) => `<button class="pick ${v === val ? "on" : ""}" data-act="decadd" data-id="${a.id}" data-v="${val}" aria-pressed="${v === val}">${label}</button>`;
+  return `<div class="dcard ${v ? "ok" : ""}" id="dec-${a.id}">
+    <div class="dcard-h"><span class="chip blue">Suggested ${word}</span><span class="muted small">to stand after ${esc(a.name)}; your notes have no such ${word}</span></div>
+    <div class="dlabel">Why the paper is better with it</div><p>${rich(named(a.why))}</p>
+    ${a.from ? `<p class="muted small">Everything in it is already stated in the draft: ${rich(named(a.from))}</p>` : ""}
+    <figure class="p-fig"><img src="/api/projects/${S.pid}/figure/${a.id}?kind=tikz&v=${Math.round(a.at || 0)}" alt="The suggested ${word}" style="max-width:100%;background:#fff;border-radius:6px">
+      <figcaption><span class="fig-head">${word === "table" ? "Table" : "Figure"}.</span> ${inner(latexLite(a.caption))}</figcaption></figure>
+    ${a.mention ? `<p class="muted small">The text will refer to it: “${inner(latexLite(a.mention.replace("(REF)", "n")))}”</p>` : ""}
+    <div class="picks" role="group" aria-label="Your decision">${pick("accept", `Add this ${word}`)}${pick("reject", "Do not add it")}</div></div>`;
+}
 function proposalCard(pr, form) {
   const D = S.decide;
   const pick = (v, label) => `<button class="pick ${D && D.simplify[pr.id] === v ? "on" : ""}" data-act="decsim" data-id="${pr.id}" data-v="${v}" aria-pressed="${D && D.simplify[pr.id] === v}">${label}</button>`;
@@ -1121,7 +1135,7 @@ function issueCard(c, form) {
 
 /* ---------------------------------------------------------- stage screen */
 const STAGE_ROLE = { scout: "vision_fast", survey: "vision_best", transcribe: "vision_best", figures: "vision_best", search1: "fast", reading: "reader",
-  understand: "reason", scope: "reason", outline: "reason", figdesign: "vision_best", proofs: "reason", draft: "writer", simplify: "reason",
+  understand: "reason", scope: "reason", outline: "reason", figdesign: "vision_best", proofs: "reason", draft: "writer", reshape: "reason", reproofs: "reason", redraft: "writer",
   verify: "reason", referee: "reason", assemble: "writer" };
 
 function catchupBanner() {
@@ -1716,6 +1730,10 @@ function panelHtml(open, done, openBy) {
     if (mine.length) h += `<div class="pp-sec"><div class="pp-h">${nFlags ? `${nFlags === 1 ? "One passage" : nFlags + " passages"} may be misread` : ""}${nFlags && nFigs ? "; " : ""}${nFigs ? `${nFigs === 1 ? "a drawing needs" : nFigs + " drawings need"} your decision` : ""}</div>
       <p class="muted small">${nFlags ? "Highlighted in the middle. Answer each one here, or confirm the page as it was read." : "Shown in the middle where it stands on the page."}</p>
       ${mine.map((x) => x.type === "fig" ? figureCard(x.f) : flagCard(x.f, rec.text)).join("")}</div>`;
+    // a drawing whose answer the app selected: shown with that answer, to be left as it is or changed; it does not hold up the approval
+    const chosen = figsOn(n).filter((f) => f.auto && f.choice && !f.dup && !figOpen(f));
+    if (chosen.length) h += `<div class="pp-sec"><div class="pp-h">${chosen.length === 1 ? "A drawing on this page" : chosen.length + " drawings on this page"}: the answer is selected by the app</div>
+      <p class="muted small">Compare the copy with your drawing. Leave the answer if it is right, or choose another one.</p>${chosen.map(figureCard).join("")}</div>`;
 
     const last = lastCorrection(n), busy = !!jobFor("page:" + n);
     if (last) h += `<div class="pp-sec pp-done ${R.fresh === n ? "fresh" : ""}"><div class="pp-h">${last.changes && last.changes.length ? "Corrected from your comment" : "Your comment was read; nothing needed changing"}</div>
@@ -1884,11 +1902,11 @@ function figureCard(f) {
     + opt("orig", "Use my own drawing as I drew it", "the drawing cut from your page") : copy;
   const order = j.use === "annotation" ? [asText, copies] : [copies, asText];
   return `<div class="qcard figcard" id="fig-${f.id}" data-page="${f.page}">
-    <div class="qcard-h"><b>Drawing${f.of > 1 ? ` ${f.k + 1} of ${f.of}` : ""}</b><span class="muted small">${drawn ? "Is the copy what you drew?" : "This drawing is not copied yet."}</span></div>
+    <div class="qcard-h"><b>Drawing${f.of > 1 ? ` ${f.k + 1} of ${f.of}` : ""}</b><span class="muted small">${drawn ? "Is the copy what you drew?" : "This drawing is not copied yet."}</span>${f.auto && f.choice && !f.dup ? '<span class="chip">selected by the app</span>' : f.choice && drawn ? '<span class="chip green">your answer</span>' : ""}</div>
     <p class="muted small" style="margin:0 0 6px">Here only the copy is checked. Whether the paper prints it, where, and its caption, are decided with the structure, with the whole paper in view; you see that decision there and can change it.</p>
     ${drawn ? figurePair(f) + figCheck(f) : `<div class="figdesc">${inner(mixed(f.desc))}<div class="muted small">Your drawing is on page ${f.page}, shown on the left.</div></div>`}
     ${drawn && f.weak ? `<div class="figweak">Redrawn by ${esc(f.model || "a weaker model")}, a weaker model. Compare it closely with your drawing, or draw it again.</div>` : ""}
-    <div class="figlbl" style="margin-top:4px">Your answer</div>
+    <div class="figlbl" style="margin-top:4px">${f.auto && f.choice ? `Selected by the app${f.choice === "tikz" ? ": its check found no difference between the copy and your drawing" : f.choice === "orig" ? (f.tikz_ok ? ": its check found a difference between the copy and your drawing" : ": it could not be drawn again") : ""}. Change it if it is wrong` : "Your answer"}</div>
     <div class="choices" role="radiogroup" aria-label="Your answer for this drawing">
       ${order.join("")}${opt("none", "Leave it out completely", "for a doodle or an abandoned attempt; the writers do not see it")}
     </div>
@@ -1955,7 +1973,7 @@ function approveTab(open, done) {
   return `<div class="approve-card"><div class="big-tick">✓</div><h2>Everything is checked</h2>
     <ul class="sumlist"><li>${plural(P.length, "page")} read${adding ? ", and more still being read" : ""}</li>
       <li>${plural(done.filter((x) => x.type === "flag").length, "doubtful reading")} settled</li>
-      <li>${plural(kept, "drawing")} copied${out ? `, ${out} left out` : ""}${done.some((x) => x.type === "note") ? `, ${plural(done.filter((x) => x.type === "note").length, "note")} written into the text` : ""}. Which the paper prints is decided with the structure.</li>
+      <li>${plural(kept, "drawing")} copied${out ? `, ${out} left out` : ""}${done.some((x) => x.type === "note") ? `, ${plural(done.filter((x) => x.type === "note").length, "note")} written into the text` : ""}. Which the paper prints is decided with the structure.${(S.b.figures || []).some((f) => f.auto && f.choice && !f.dup) ? ` For ${plural((S.b.figures || []).filter((f) => f.auto && f.choice && !f.dup).length, "drawing")} the answer is the one the app selected; you can change it on the drawing's card.` : ""}</li>
       <li>${edited.length ? `Pages you changed: ${edited.join(", ")}` : "No page changed by hand"}</li></ul>
     ${leftOutBanner("margin:0 auto 12px;max-width:460px")}
     <p class="muted small">Approving starts the writing: the whole of your notes is read together. The transcript cannot be changed after that without redoing the later steps.</p>
@@ -2437,14 +2455,15 @@ function figProCard(f, review) {
     : `<figure class="nofig"><div>${pr ? esc(pr.error || "It could not be drawn for print.") + " The copy of your drawing is printed." : "Not drawn for print yet."}</div><figcaption>For print</figcaption></figure>`;
   const fixes = (pr && pr.corrections) || [];
   const choice = pr && pr.choice, opt = (val, label, hint, off) => `<button class="choice ${choice === val ? "on" : ""}" role="radio" aria-checked="${choice === val}" data-act="figpro" data-id="${f.id}" data-v="${val}" ${busy || off ? "disabled" : ""}><span class="dot" aria-hidden="true"></span><span><b>${label}</b>${hint ? `<small>${hint}</small>` : ""}</span></button>`;
-  return `<div class="qcard figcard ${review && fixes.length && !choice ? "ask" : ""}" id="figpro-${f.id}">
+  const unseen = !!(pr && pr.auto && choice === "pro" && fixes.length);      // the app selected a figure that corrects the drawing
+  return `<div class="qcard figcard ${review && (unseen || (fixes.length && !choice)) ? "ask" : ""}" id="figpro-${f.id}">
     <div class="qcard-h"><b>The drawing on page ${f.page}</b>${withWhat(f) ? `<span class="muted small">printed ${f.in_proof ? "inside the proof of" : "with"} ${withWhat(f)}</span>` : ""}
       ${pr && pr.fresh && (st("proofcheck").changed || []).length ? '<span class="chip blue">drawn again</span>' : ""}
-      ${choice ? `<span class="chip">${choice === "pro" ? "the figure for print" : choice === "copy" ? "your drawing" : "not printed"}${pr.auto ? ", taken for you" : ""}</span>` : ""}</div>
+      ${choice ? `<span class="chip ${pr.auto ? "" : "green"}">${choice === "pro" ? "the figure for print is printed" : choice === "copy" ? "your drawing is printed" : "not printed"}${pr.auto ? ": decided by the app" : ": your decision"}</span>${unseen ? '<span class="chip hl">with a correction: check it</span>' : ""}` : '<span class="chip hl">a correction to confirm</span>'}</div>
     <div class="figpro-pair">${mine}${printed}</div>
     ${pr && pr.caption ? `<div class="small" style="margin-top:6px"><b>Caption:</b> ${inner(latexLite(pr.caption))}</div>` : ""}
     ${pr && (pr.changes || []).length ? `<details class="more"><summary>How it was set for print (${pr.changes.length})</summary><ul class="changed-list small">${pr.changes.map((c) => `<li>${inner(mixed(c))}</li>`).join("")}</ul></details>` : ""}
-    ${fixes.length ? `<div class="figfix"><b>${fixes.length === 1 ? "A correction" : plural(fixes.length, "correction")} your notes show: confirm ${fixes.length === 1 ? "it" : "them"}.</b>
+    ${fixes.length ? `<div class="figfix"><b>${unseen ? `The figure for print corrects something your drawing shows. The app selected it because your notes bear the correction out; choose your own drawing below if it is wrong.` : `${fixes.length === 1 ? "A correction" : plural(fixes.length, "correction")} your notes show.`}</b>
       ${fixes.map((c) => `<div class="small" style="margin-top:4px">${inner(mixed(c.what))}${c.instead ? ` <span class="muted">(your drawing shows ${inner(mixed(c.instead))})</span>` : ""}${c.why ? `<div class="muted">The notes: ${inner(mixed(c.why))}</div>` : ""}</div>`).join("")}</div>` : ""}
     ${pr && pr.check && (pr.check.problems || []).length && !pr.ok ? `<div class="flag small red">A second reader found it different from your drawing: ${pr.check.problems.map((x) => esc(x)).join("; ")}</div>` : ""}
     ${review ? `<div class="figlbl" style="margin-top:8px">The paper prints</div><div class="choices" role="radiogroup" aria-label="What the paper prints">
@@ -2559,15 +2578,106 @@ function viewProofReview() {
       ${cnt("failed") ? `<span class="chip red">${cnt("failed")} without a correct proof</span>` : ""}</div>
       <p class="muted small" style="margin-top:8px">A model's check is strong evidence, not a certificate. The proofs are checked again, step by step, after the first draft.</p></div>
       ${(w.figures || []).some((f) => f.use === "paper") ? `<div class="sec" id="pfigs"><h2>Figures for print</h2><p>Each figure the paper prints, drawn the way a research paper draws it, beside your drawing.
-        What it shows is what you drew; a mistake in the drawing is corrected only where your notes show it, and each such correction is named for you to confirm. Say which version the paper prints.
-        One you do not answer is printed as drawn for print when its check passed, else as your own drawing.</p>
+        The app has decided which version the paper prints: the figure for print when a second reader found it says exactly what your drawing says, else your own drawing. You need not answer anything, and can change any of it.
+        You are asked only where a figure for print corrects something your drawing shows (a mistake your notes bear out): that is a decision about the mathematics, and yours.</p>
         ${w.figures.filter((f) => f.use === "paper").map((f) => figProCard(f, true)).join("")}</div>` : ""}
       <div class="sec">${proofsInOrder(true)}</div></div></div>
-    <div class="gatebar"><span class="muted small">${left ? `${plural(left, "proof")} need${left === 1 ? "s" : ""} your decision` : (w.open_figures || []).length ? `${plural(w.open_figures.length, "figure")} with a correction to confirm` : "Nothing waits for your decision"}</span><span class="tb-space"></span>
+    <div class="gatebar"><span class="muted small">${left ? `${plural(left, "proof")} need${left === 1 ? "s" : ""} your decision` : (w.open_figures || []).length ? `${plural(w.open_figures.length, "figure")} selected by the app with a correction: check ${w.open_figures.length === 1 ? "it" : "them"}` : "Nothing waits for your decision"}</span><span class="tb-space"></span>
       <button class="btn primary big" data-act="papprove" ${S.busy || running() || left ? "disabled" : ""}>${S.busy === "papprove" ? "Saving…" : left ? `Decide on ${plural(left, "proof")} first` : "Approve the proofs and write the first draft"}</button></div>`;
 }
 
-/* step 17: the first draft */
+/* the shape of the paper: each proposed change beside what it replaces; the author accepts or rejects it */
+function shapeState(second) {
+  const R = S.b.reshape || { proposals: [], decisions: {} };
+  if (!S.shape || S.shape.pid !== S.pid) S.shape = { pid: S.pid, d: {}, d2: {} };
+  for (const pr of R.proposals || []) if (!(pr.id in S.shape.d)) S.shape.d[pr.id] = (R.decisions || {})[pr.id] || "";
+  for (const pr of R.written || []) if (!(pr.id in S.shape.d2)) S.shape.d2[pr.id] = (R.decisions2 || {})[pr.id] || "";
+  return second ? S.shape.d2 : S.shape.d;
+}
+/* One change of the revision. At "Your plan" (second false) it shows the new statements in full and each changed
+   proof in outline; at "Your review of the new proofs" (second true) the proofs as written, beside those they replace. */
+function shapeCard(pr, second) {
+  const D = shapeState(second), v = D[pr.id], tex = (t) => `<div class="tex-block">${latexLite(t || "")}</div>`, o = pr.outline;
+  const pick = (val, label) => `<button class="pick ${v === val ? "on" : ""}" data-act="shapepick" data-s="${second ? 2 : 1}" data-id="${pr.id}" data-v="${val}" aria-pressed="${v === val}">${label}</button>`;
+  const names = Object.values(pr.names || {});
+  const proves = ["merge", "method", "similar", "shorten", "argument"].includes(pr.kind);
+  let body = "";
+  if (pr.kind === "merge") {
+    const a = pr.after[0];
+    body = `<div class="twocol"><div><div class="col-h">In the first draft: ${plural(pr.before.length, "statement")}</div>${pr.before.map((b) => `<div class="dlabel" style="margin-top:8px">${esc(b.name)}</div>${tex(b.statement)}`).join("")}</div>
+      <div><div class="col-h">${second ? "Now" : "Planned"}: one ${esc(a.name.toLowerCase())}</div><div class="dlabel" style="margin-top:8px">${Object.entries(pr.parts || {}).map(([n, r]) => `${esc(n)} becomes part ${esc(r)}`).join("; ")}</div><div class="tex-block new">${latexLite(a.statement)}</div></div></div>
+      ${o ? `<div class="dlabel" style="margin-top:10px">How its proof will go (outline; the proof is written once you accept)</div><div class="tex-block new">${latexLite(a.proof)}</div>
+        <details class="more"><summary>The proofs it would replace</summary>${pr.before.map((b) => `<div class="dlabel" style="margin-top:8px">Proof of ${esc(b.name)}, in the first draft</div>${tex(b.proof)}`).join("")}</details>`
+      : `<div class="dlabel" style="margin-top:10px">The proof of the one statement</div><div class="tex-block new">${latexLite(a.proof)}</div>
+        <details class="more" open><summary>The proofs it replaces</summary>${pr.before.map((b) => `<div class="dlabel" style="margin-top:8px">Proof of ${esc(b.name)}, in the first draft</div>${tex(b.proof)}`).join("")}</details>`}`;
+  } else if (pr.kind === "sections") {
+    const toc = (S_) => `<ol class="changed-list" start="2">${S_.map((s) => `<li><b>${esc(s.title)}</b><div class="muted small">${s.items.map(esc).join(", ")}</div></li>`).join("")}</ol>`;
+    body = `<div class="twocol"><div><div class="col-h">The sections of the first draft</div>${toc(pr.sections_now)}</div><div><div class="col-h">Planned</div>${toc(pr.sections_new)}</div></div>`;
+  } else if (pr.kind === "kind") {
+    body = `<ul class="changed-list">${pr.renamed.map((r) => `<li>${esc(r.name)} would be called a <b>${esc(r.to.toLowerCase())}</b></li>`).join("")}</ul>`;
+  } else {
+    body = (pr.added ? `<div class="dnew"><div class="dlabel">New, stated once: ${esc(pr.added.name)}</div><div class="tex-block new">${latexLite(pr.added.statement)}</div>
+        <div class="dlabel" style="margin-top:8px">${o ? "How it will be proved (outline)" : /Method|Construction/.test(pr.added.name) ? "In full" : "Its proof"}</div><div class="tex-block new">${latexLite(pr.added.proof)}</div></div>` : "")
+      + pr.after.map((a) => { const b = pr.before.find((x) => x.id === a.id) || {};
+        return `<div class="dlabel" style="margin-top:12px">Proof of ${esc(a.name)}</div><div class="twocol"><div><div class="col-h">In the first draft</div>${tex(b.proof)}</div>
+          <div><div class="col-h">${o ? "How the new proof will go (outline)" : "The new proof"}</div><div class="tex-block new">${latexLite(a.proof)}</div></div></div>`; }).join("");
+  }
+  const ai = !pr.ai ? "" : o
+    ? `<div class="figfix"><b>This argument is not in your notes: the app found it.</b> <span class="small">If you accept it here, it is written out in full and read line by line, and you read it yourself at the next stop before it can enter the paper.
+      A paper that uses it says so: its declaration on the use of AI tools names this proof. Journals allow this when it is declared and you take responsibility for it; an AI tool is never an author.</span></div>`
+    : `<div class="figfix"><b>This argument is not in your notes: the app found it.</b> <span class="small">It passed an independent check and a line-by-line reading, but a model's check is not a certificate: read it yourself before you accept it.
+      If you accept it, the paper's declaration on the use of AI tools says that the argument of this proof was proposed by the tool and checked by you. Journals allow this when it is declared and you take responsibility for it; an AI tool is never an author.</span></div>`;
+  return `<div class="dcard ${v ? "ok" : ""}" id="shape-${second ? "w" : ""}${pr.id}">
+    <div class="dcard-h"><span class="chip ${pr.ai ? "hl" : "blue"}">${esc(pr.title)}</span>${names.length ? `<span class="muted small">${esc(names.join(", "))}</span>` : ""}</div>
+    <p>${rich(named(pr.idea))}</p>
+    ${pr.why ? `<p class="muted small">What the reader gains: ${rich(named(pr.why))}</p>` : ""}
+    ${ai}
+    ${pr.check ? `<p class="muted small">${o ? "An independent reading of this plan against your proofs" : "An independent check found that the paper proves exactly what it proved before"}: ${rich(named(pr.check))}</p>` : ""}
+    ${(pr.on || []).length ? `<p class="muted small">This was written on top of another change of your plan (${esc(pr.on.join(", "))}): it is used only if you accept that one too.</p>` : ""}
+    ${body}
+    <div class="picks" role="group" aria-label="Your decision">${second
+      ? pick("accept", pr.ai ? "I have checked it: use this argument" : "Use the new proof") + pick("reject", "Keep the first draft's proof")
+      : pick("accept", proves ? "Accept: have the proof written" : "Accept this change") + pick("reject", "Keep the first draft as it is")}</div></div>`;
+}
+function skeletonList(secs, marked) {
+  return `<ol class="changed-list" start="2">${secs.map((s) => `<li><b>${esc(s.title)}</b><div class="small">${s.items.map((x) => marked && x.mark
+    ? `<span style="white-space:nowrap">${esc(x.name)} <span class="chip ${x.mark === "another argument" ? "hl" : "blue"}">${esc(x.mark)}</span></span>`
+    : `<span class="muted">${esc(x.name)}</span>`).join(", ")}</div></li>`).join("")}</ol>`;
+}
+function viewShape() {
+  const x = st("reshapecheck"), R = S.b.reshape || { proposals: [] };
+  if (!R.proposals.length || x.status === "running" || (x.status !== "waiting" && x.status !== "done")) return viewStage("reshapecheck");
+  const D = shapeState(false), left = R.proposals.filter((pr) => !D[pr.id]).length, K = R.skeleton;
+  const writes = R.proposals.some((pr) => D[pr.id] === "accept" && !["kind", "sections"].includes(pr.kind));
+  return `<div class="wrap" style="padding-bottom:0">${catchupBanner()}${changedBanner("reshapecheck")}<div class="head"><h1>Your plan for the revision</h1>
+      <p>Your first draft follows your notes. It was now read as a whole for the form a journal expects: results that are parts of one statement, an argument that several proofs share, a proof that repeats another or is longer than it needs to be, the order of the sections.
+        Below is the plan: every new statement in full and, for every proof that would change, an outline of how the new proof will go. No proof has been written yet: the proofs are written only for the changes you accept here, and you review each of them before it enters the paper. Your first draft is kept.</p></div>
+    ${x.status === "done" || x.reopened ? `<div class="banner blue"><div class="grow">You decided these already. ${AGAIN}</div></div>` : ""}
+    <div class="sheet">
+      ${K ? `<div class="sec" id="shape-skeleton"><div class="twocol"><div><div class="col-h">The first draft</div>${skeletonList(K.now, false)}</div>
+        <div><div class="col-h">If you accept every change of the plan</div>${skeletonList(K.new, true)}</div></div></div>` : ""}
+      <div class="sec">${R.proposals.map((pr) => shapeCard(pr, false)).join("")}</div>
+      ${(R.dropped || []).length ? `<div class="sec"><details class="more"><summary>${plural(R.dropped.length, "possible change")} looked at and not put in the plan</summary>
+        <ul class="changed-list small">${R.dropped.map((d) => `<li><b>${esc(d.title)}</b>${d.names.length ? " (" + esc(d.names.join(", ")) + ")" : ""}: ${esc(d.reason)}</li>`).join("")}</ul></details></div>` : ""}</div></div>
+    <div class="gatebar"><span class="muted small">${left ? `${plural(left, "change")} need${left === 1 ? "s" : ""} your decision` : "Every change is decided"}</span><span class="tb-space"></span>
+      <button class="btn primary big" data-act="shapeconfirm" ${S.busy || running() || left ? "disabled" : ""}>${S.busy === "shapeconfirm" ? "Saving…" : left ? `Decide on ${plural(left, "change")} first` : writes ? "Confirm the plan and have the proofs written" : "Confirm the plan"}</button></div>`;
+}
+function viewNewProofs() {
+  const x = st("reproofcheck"), R = S.b.reshape || { written: [] }, W_ = R.written || [];
+  if (!W_.length || x.status === "running" || (x.status !== "waiting" && x.status !== "done")) return viewStage("reproofcheck");
+  const D = shapeState(true), left = W_.filter((pr) => !D[pr.id]).length;
+  return `<div class="wrap" style="padding-bottom:0">${catchupBanner()}${changedBanner("reproofcheck")}<div class="head"><h1>Your review of the new proofs</h1>
+      <p>The proofs of the changes you accepted in your plan are written, one change on top of the other so that they fit together. Each was checked to prove exactly what your first draft proves.
+        Here each new proof stands beside the one it replaces: use it, or keep the proof of your first draft. The second draft is then put together from what you accept, and every proof in it is read line by line in the proof check that follows.</p></div>
+    ${x.status === "done" || x.reopened ? `<div class="banner blue"><div class="grow">You reviewed these already. ${AGAIN}</div></div>` : ""}
+    <div class="sheet"><div class="sec">${W_.map((pr) => shapeCard(pr, true)).join("")}</div>
+      ${(R.failed || []).length ? `<div class="sec"><details class="more" open><summary>${plural(R.failed.length, "change")} of your plan dropped: the first draft's version stands</summary>
+        <ul class="changed-list small">${R.failed.map((d) => `<li><b>${esc(d.title)}</b>${d.names.length ? " (" + esc(d.names.join(", ")) + ")" : ""}: ${esc(d.reason)}</li>`).join("")}</ul></details></div>` : ""}</div></div>
+    <div class="gatebar"><span class="muted small">${left ? `${plural(left, "new proof")} need${left === 1 ? "s" : ""} your decision` : "Every new proof is decided"}</span><span class="tb-space"></span>
+      <button class="btn primary big" data-act="proofsconfirm" ${S.busy || running() || left ? "disabled" : ""}>${S.busy === "proofsconfirm" ? "Saving…" : left ? `Decide on ${plural(left, "proof")} first` : "Confirm and write the second draft"}</button></div>`;
+}
+
+/* the first draft */
 function viewDraftReview() {
   const x = st("draftcheck"), w = W(), dr = S.b.draft, it = S.b.intro || {};
   if (!dr || x.status === "running") return viewStage("draftcheck");
@@ -2599,7 +2709,62 @@ function writingStageBody(id) {
   }
   return "";
 }
+/* A statement is left out although a kept one uses it: a box in which the author talks to the app about it. The
+   author says why the kept statement does not need the other, or gives another argument for that step; the reply is
+   judged, and a reason that is not enough gets an answer. Or the author keeps the statement after all, or leaves the
+   other out as well. `S.dp.from` is what the author was doing ("confirm" the statements, "drop" at the structure). */
+function disputeDialog() {
+  const d = (W().disputes || [])[0];
+  if (!d) return "";
+  const dp = S.dp || (S.dp = {}), more = (W().disputes || []).length - 1, busy = S.busy === "dptalk";
+  const a = esc(d.a.name), b = esc(d.b.name);
+  return `<div class="dialog wide" id="dpdialog" role="dialog" aria-modal="true" aria-labelledby="dph">
+    <div class="dlg-h"><h2 id="dph">${a} uses ${b}, which you are leaving out</h2><button class="btn small quiet" data-act="dpclose">Close</button></div>
+    <div class="dlg-b">
+      <div class="twocol"><div><div class="dlabel">Kept: ${a}</div><div class="tex-block">${latexLite(d.a.statement)}</div></div>
+        <div><div class="dlabel">Left out: ${b}</div><div class="tex-block">${latexLite(d.b.statement)}</div></div></div>
+      <div class="chat" id="dpchat">${d.chat.map((m) => `<div class="msg ${m.who}"><div class="msg-who">${m.who === "you" ? "You" : m.who === "app" ? "Scriptavera" : m.verdict && m.verdict !== "needed" ? "Reply: your argument holds" : "Reply"}</div>
+        <div>${inner(lite(numRefs(m.text)))}</div></div>`).join("")}${busy ? `<div class="msg ai"><div class="msg-who">Reply</div><div><span class="spinner"></span> Checking your argument…</div></div>` : ""}</div>
+      <textarea rows="4" data-dptext placeholder="Why ${a} does not need ${b}, or your other argument for that step" ${busy ? "disabled" : ""}>${esc(dp.text || "")}</textarea>
+      <p class="muted small" style="margin-top:6px">Your reply goes to the model that reasons about the mathematics. If your reason holds, ${b} is left out and the proof of ${a} is written without it${d.at === "scope" && dp.from === "confirm" ? ", and the statements are confirmed" : ""}. If it does not, you get the reason and can answer again.${more > 0 ? ` ${plural(more, "more question")} of this kind follow${more === 1 ? "s" : ""}.` : ""}</p>
+    </div>
+    <div class="dlg-f"><button class="btn" data-act="dpkeep" ${S.busy ? "disabled" : ""}>Keep ${b} in the paper</button>
+      ${d.can_omit_a ? `<button class="btn" data-act="dpomit" ${S.busy ? "disabled" : ""}>Leave ${a} out as well</button>` : ""}
+      <span class="tb-space"></span><button class="btn primary" data-act="dptalk" ${S.busy ? "disabled" : ""}>${busy ? "Checking…" : "Send"}</button></div></div>`;
+}
+function showDispute(from) {
+  if (!(W().disputes || []).length) return false;
+  S.dp = { from: from || (S.dp || {}).from || "", text: (S.dp || {}).text || "" };
+  showDialog(disputeDialog());
+  const c = $("#dpchat"); if (c && c.lastElementChild) c.lastElementChild.scrollIntoView({ block: "nearest" });
+  return true;
+}
+async function disputeAct(action) {
+  const d = (W().disputes || [])[0], dp = S.dp || {};
+  if (!d) { closeDialog(); return; }
+  const text = (dp.text || "").trim();
+  if (action === "talk" && !text) return toast("Write your reason or your argument first.", true);
+  S.busy = action === "talk" ? "dptalk" : "dp"; showDialog(disputeDialog());
+  let r = null;
+  try {
+    r = await api(`/api/projects/${S.pid}/dispute`, { method: "POST", body: { id: d.id, action, text } });
+    if (r.writing) S.b.writing = r.writing;
+    if (action === "talk") dp.text = "";
+  } catch (e) { toast(e.message, true); }
+  S.busy = "";
+  if (!r) { showDialog(disputeDialog()); return; }
+  if ((W().disputes || []).length && action !== "close") { render(); showDispute(dp.from); return; }   // not settled, or the next one
+  closeDialog(); S.dp = null; render();
+  if (action === "close") return;
+  if (dp.from === "confirm" && d.at === "scope") { toast("Settled. Confirming the statements."); return ACT.stmtsubmit(); }
+  toast(action === "keep" ? "It stays in the paper." : d.then === "drop" ? "Settled: it is left out." : "Settled.");
+}
+
 const WRITING_ACT = {
+  dptalk() { return disputeAct("talk"); },
+  dpkeep() { return disputeAct("keep"); },
+  dpomit() { return disputeAct("omit"); },
+  dpclose() { return disputeAct("close"); },
   stab(el) { S.stab = el.dataset.v; render(); },
   stmtedit(el) { S.wEdit = el.dataset.id; S.wDraft = null; render(); const t = $(`[data-sedit="${el.dataset.id}"]`); if (t) t.focus(); },
   stmtcancel() { S.wEdit = null; S.wDraft = null; render(); },
@@ -2621,7 +2786,11 @@ const WRITING_ACT = {
     const w = W(), kind = S.wKind || w.kind || "article";
     S.busy = "stmtsubmit"; render();
     try {
-      await api(`/api/projects/${S.pid}/scope`, { method: "POST", body: { kind, note: S.wNote != null ? S.wNote : (w.note || "") } });
+      const r = await api(`/api/projects/${S.pid}/scope`, { method: "POST", body: { kind, note: S.wNote != null ? S.wNote : (w.note || "") } });
+      if (r.dispute) {            // a kept statement uses one that is left out: the author is asked, in a box of its own
+        if (r.writing) S.b.writing = r.writing;
+        S.busy = ""; render(); showDispute("confirm"); return;
+      }
       S.follow = kind !== "not_ready"; S.wKind = null; S.wNote = null; history.replaceState(null, "", `#p/${S.pid}`);
       toast(kind === "not_ready" ? "Stopped here, as you chose." : "Statements confirmed. Putting them in order now.");
       await refresh();
@@ -2629,7 +2798,7 @@ const WRITING_ACT = {
     S.busy = ""; render();
   },
   async omove(el) { await moveItem(el.dataset.id, el.dataset.to); },
-  async odrop(el) { if (await wPost("outline", { drop: el.dataset.id })) toast("Left out."); },
+  async odrop(el) { const r = await wPost("outline", { drop: el.dataset.id }); if (r && r.dispute) showDispute("drop"); else if (r) toast("Left out."); },
   async otalk() {
     if (!(S.oInstr || "").trim()) return toast("Write your message first.", true);
     if (await wPost("outline", { action: "talk", text: S.oInstr }, "otalk")) { S.oInstr = ""; render(); const c = $("#ochat"); if (c) c.scrollIntoView({ block: "end" }); }
@@ -2641,6 +2810,29 @@ const WRITING_ACT = {
   },
   async oconfirm() {
     if (await wPost("outline", { action: "confirm" }, "oconfirm")) { S.follow = true; history.replaceState(null, "", `#p/${S.pid}`); toast("Structure confirmed. The figures for print are drawn, then the proofs written."); await refresh(); }
+  },
+  shapepick(el) {
+    const second = el.dataset.s === "2", D = shapeState(second), id = el.dataset.id; D[id] = D[id] === el.dataset.v ? "" : el.dataset.v; render();
+    const next = ((second ? S.b.reshape.written : S.b.reshape.proposals) || []).find((pr) => !D[pr.id]);
+    if (D[id] && next) { const c = $(`#shape-${second ? "w" : ""}${next.id}`); if (c) c.scrollIntoView({ block: "start", behavior: "smooth" }); }
+  },
+  async shapeconfirm() {
+    S.busy = "shapeconfirm"; render();
+    try {
+      const D = shapeState(false), any = Object.values(D).some((v) => v === "accept");
+      await api(`/api/projects/${S.pid}/reshape`, { method: "POST", body: { decisions: D } });
+      S.follow = true; history.replaceState(null, "", `#p/${S.pid}`);
+      toast(any ? "Plan confirmed. The proofs of what you accepted are written now; you review them before the second draft." : "Plan confirmed: the first draft keeps its shape.");
+    } catch (e) { toast(e.message, true); }
+    S.busy = ""; await refresh();
+  },
+  async proofsconfirm() {
+    S.busy = "proofsconfirm"; render();
+    try {
+      await api(`/api/projects/${S.pid}/reshape`, { method: "POST", body: { proofs: true, decisions: shapeState(true) } });
+      S.follow = true; history.replaceState(null, "", `#p/${S.pid}`); toast("Confirmed. The second draft is put together from what you accepted.");
+    } catch (e) { toast(e.message, true); }
+    S.busy = ""; await refresh();
   },
   async ofiguse(el) {
     if (await wPost("outline", { figure: { id: el.dataset.id, use: el.dataset.v } })) toast(el.dataset.v === "paper" ? "It is printed: drawn for print before the proofs." : "Not printed; the writers of its proof still read it.");
@@ -2667,14 +2859,11 @@ const WRITING_ACT = {
   },
   async papprove() {
     /* every figure drawn for print is confirmed by the author before the first draft: by an answer on its card, or here */
-    const open = (W().figures || []).filter((f) => f.use === "paper" && f.pro && !f.pro.choice);
+    const open = (W().figures || []).filter((f) => f.use === "paper" && f.pro && f.pro.auto && f.pro.choice === "pro" && (f.pro.corrections || []).length);
     if (open.length) {
-      const fixed = open.filter((f) => (f.pro.corrections || []).length || !f.pro.ok), plain = open.filter((f) => !fixed.includes(f));
-      const ok = await askConfirm({ title: `${plural(open.length, "figure")} for print not confirmed yet`, danger: false, yes: "Approve with these",
-        body: `<p>You have not said which version the paper prints for ${open.length === 1 ? "this figure" : "these figures"}. Approving now confirms:</p><ul>
-          ${plain.length ? `<li>${plain.map((f) => `the figure on page ${f.page}`).join(", ")}: printed as drawn for print (only how ${plain.length === 1 ? "it looks" : "they look"} changed).</li>` : ""}
-          ${fixed.length ? `<li>${fixed.map((f) => `the figure on page ${f.page}`).join(", ")}: printed as your own drawing, because ${fixed.length === 1 ? "its version for print names a correction (or did not pass its check)" : "their versions for print name a correction (or did not pass their check)"} that you have not confirmed.</li>` : ""}</ul>
-          <p>Or go back and answer each figure.</p>` });
+      const ok = await askConfirm({ title: `${plural(open.length, "figure")} with a correction`, danger: false, yes: `Approve: print the corrected figure${open.length > 1 ? "s" : ""}`,
+        body: `<p>The figure for print of ${open.map((f) => `the drawing on page ${f.page}`).join(", ")} corrects something your drawing shows. The app selected it because your notes bear the correction out.
+          Approving now prints it. Or go back, read the correction on the figure's card, and choose your own drawing there if it is wrong.</p>` });
       if (!ok) { const c = $("#pfigs"); if (c) c.scrollIntoView({ block: "start" }); return; }
     }
     if (await wPost("proofs", { action: "approve", assume: true }, "papprove")) { S.follow = true; history.replaceState(null, "", `#p/${S.pid}`); toast("Proofs approved. Writing the first draft now."); await refresh(); }
@@ -2701,6 +2890,7 @@ function writingInput(el) {
   if (el.dataset.sanswer !== undefined) { (S.wAns = S.wAns || {})[el.dataset.sanswer] = el.value; return true; }
   if (el.dataset.wnote !== undefined) { S.wNote = el.value; return true; }
   if (el.dataset.oinstr !== undefined) { S.oInstr = el.value; return true; }
+  if (el.dataset.dptext !== undefined) { (S.dp = S.dp || {}).text = el.value; return true; }
   if (el.dataset.pcomment !== undefined) { (S.pCom = S.pCom || {})[el.dataset.pcomment] = el.value; return true; }
   if (el.dataset.pstmt !== undefined) { S.pStmtText = el.value; return true; }
   if (el.dataset.dabs !== undefined) { S.dAbs = el.value; return true; }
@@ -2738,7 +2928,7 @@ function finishState() {
 function scholar(q) { return `https://scholar.google.com/scholar?q=${encodeURIComponent(q)}`; }
 function viewFinish() {
   const F = S.b.finish, P = S.b.paper, x = st("finish");
-  if (!F || !P) return `<div class="wrap"><div class="empty"><strong>Not reached yet</strong>This step opens once the final version has been written.</div></div>`;
+  if (!F || !P) return `<div class="wrap"><div class="empty"><strong>Not reached yet</strong>This step opens once your decisions are applied and the paper is copy-edited.</div></div>`;
   const R = finishState();
   const errors = F.open.filter((o) => o.level === "error"), notes = F.open.filter((o) => o.level !== "error");
   const ownOn = !F.titles.includes(R.title);
@@ -2787,17 +2977,17 @@ function viewFinish() {
           <button class="btn primary" data-act="fcite" ${S.busy ? "disabled" : ""}>${S.busy === "fcite" ? "Rewriting…" : "Rewrite the introduction to cite exactly these"}</button></div>` : ""}</div>
     </div></div>
     <div class="gatebar"><span class="muted small">Title: ${R.title ? inner(latexLite(R.title)) : "not chosen"}</span><span class="tb-space"></span>
-      <button class="btn primary big" data-act="ffinish" ${S.busy || running() ? "disabled" : ""}>${S.busy === "ffinish" ? "Building the files…" : "Finish the paper"}</button></div>`;
+      <button class="btn primary big" data-act="ffinish" ${S.busy || running() ? "disabled" : ""}>${S.busy === "ffinish" ? "Saving…" : "Build the final version"}</button></div>`;
 }
 
 /* ----------------------------------------------------------- decide gate */
 function decideSig() {
   const it = (S.b.revision || {}).items || { simplify: [], issues: [], remarks: [] };
-  return [...it.simplify, ...(it.complete || []), ...it.issues, ...it.remarks].map((x) => x.id).join("|") + "|" + ((S.b.revision.simplify || {}).sig || "");
+  return [...it.simplify, ...(it.complete || []), ...it.issues, ...(it.additions || []), ...it.remarks].map((x) => x.id).join("|") + "|" + ((S.b.revision.simplify || {}).sig || "");
 }
 function initDecide() {
   const it = S.b.revision.items, prev = S.b.revision.decisions;
-  S.decide = { pid: S.pid, sig: decideSig(), simplify: {}, complete: {}, issues: {}, remarks: {} };
+  S.decide = { pid: S.pid, sig: decideSig(), simplify: {}, complete: {}, issues: {}, remarks: {}, additions: {} };
   if (prev && !prev.auto) {
     Object.assign(S.decide.simplify, prev.simplify || {});
     for (const [k, v] of Object.entries(prev.complete || {})) S.decide.complete[k] = { choice: v.choice, note: v.note || "", text: v.text || "" };
@@ -2806,9 +2996,10 @@ function initDecide() {
   }
   try {
     const d = JSON.parse(localStorage.getItem("scriptavera-decide-" + S.pid) || "null");
-    if (d && d.sig === S.decide.sig) { Object.assign(S.decide.simplify, d.simplify || {}); Object.assign(S.decide.complete, d.complete || {}); Object.assign(S.decide.issues, d.issues || {}); Object.assign(S.decide.remarks, d.remarks || {}); S.decide.read = d.read || {}; }
+    if (d && d.sig === S.decide.sig) { Object.assign(S.decide.simplify, d.simplify || {}); Object.assign(S.decide.complete, d.complete || {}); Object.assign(S.decide.issues, d.issues || {}); Object.assign(S.decide.remarks, d.remarks || {}); Object.assign(S.decide.additions, d.additions || {}); S.decide.read = d.read || {}; }
   } catch (e) { /* no saved draft */ }
   for (const pr of it.simplify) if (!(pr.id in S.decide.simplify)) S.decide.simplify[pr.id] = "";
+  S.decide.additions = Object.assign({}, (prev || {}).additions || {}, S.decide.additions || {});
 }
 function saveDecide() { try { localStorage.setItem("scriptavera-decide-" + S.pid, JSON.stringify(S.decide)); } catch (e) { /* storage unavailable */ } }
 function decideCounts() {
@@ -2816,7 +3007,8 @@ function decideCounts() {
   const sim = it.simplify.filter((p) => ["accept", "reject"].includes(D.simplify[p.id])).length;
   const cmp = (it.complete || []).filter((c) => compSettled(D.complete[c.id])).length;
   const iss = it.issues.filter((c) => { const m = D.issues[c.id] || {}; return m.choice === "keep" || (m.choice === "fix" && c.correction) || (m.choice === "instruct" && (m.note || "").trim()); }).length;
-  return { need: it.simplify.length + (it.complete || []).length + it.issues.length, done: sim + cmp + iss };
+  const add = (it.additions || []).filter((a) => ["accept", "reject"].includes((D.additions || {})[a.id])).length;
+  return { need: it.simplify.length + (it.complete || []).length + it.issues.length + (it.additions || []).length, done: sim + cmp + iss + add };
 }
 function compSettled(m) {
   m = m || {};
@@ -2826,13 +3018,14 @@ function decideQueue() {
   /* Every item in the order it is decided: proposals and problems first (each needs an answer), remarks last (optional). */
   const it = S.b.revision.items;
   return [...it.simplify.map((x) => ({ x, kind: "simplify", need: true })), ...(it.complete || []).map((x) => ({ x, kind: "complete", need: true })),
-    ...it.issues.map((x) => ({ x, kind: "issue", need: true })),
+    ...it.issues.map((x) => ({ x, kind: "issue", need: true })), ...(it.additions || []).map((x) => ({ x, kind: "addition", need: true })),
     ...it.remarks.map((x) => ({ x, kind: "remark", need: false }))];
 }
 function settledAs(q) {
   /* What the author decided for an item, in words, or "" while it is open. */
   const D = S.decide, x = q.x;
   if (q.kind === "simplify") return { accept: "Accepted", reject: "Rejected" }[D.simplify[x.id]] || "";
+  if (q.kind === "addition") return { accept: "Added to the paper", reject: "Not added" }[(D.additions || {})[x.id]] || "";
   if (q.kind === "complete") {
     const m = D.complete[x.id] || {};
     if (!compSettled(m)) return "";
@@ -2853,11 +3046,12 @@ function queueTitle(q) {
   if (q.kind === "issue") return `${x.name}: ${(SEVERITY[x.severity] || SEVERITY.gap)[0].toLowerCase()}`;
   if (q.kind === "simplify") return `Shorter proof of ${x.affects.map((l) => x.names[l] || l).join(", ")}`;
   if (q.kind === "complete") return `Completed proof of ${x.name}`;
+  if (q.kind === "addition") return `Suggested ${x.kind} after ${x.name}`;
   const where = x.where ? (labelName(x.where) || named(x.where)) : "";
   return `Remark${where ? " on " + where : x.source === "first reading of your notes" ? " on your notes" : ""}`;
 }
 function queueText(q) {
-  const x = q.x, t = q.kind === "issue" ? x.problem : q.kind === "simplify" ? x.idea : q.kind === "complete"
+  const x = q.x, t = q.kind === "issue" ? x.problem : q.kind === "simplify" ? x.idea : q.kind === "addition" ? x.why : q.kind === "complete"
     ? `Your sketch, completed by its own steps (${plural((x.parts || []).filter((p) => p.added).length, "step")} filled in)` : x.comment;
   return inner(latexLite(named(String(t || "").slice(0, 160) + (String(t || "").length > 160 ? " …" : ""))));
 }
@@ -2906,7 +3100,7 @@ function remarkCard(r) {
 }
 function decideDetail(q) {
   const Q = decideQueue(), k = Q.findIndex((r) => r.x.id === q.x.id), done = settledAs(q);
-  const card = q.kind === "simplify" ? proposalCard(q.x, true) : q.kind === "complete" ? completeCard(q.x) : q.kind === "issue" ? issueCard(q.x, true) : remarkCard(q.x);
+  const card = q.kind === "addition" ? additionCard(q.x) : q.kind === "simplify" ? proposalCard(q.x, true) : q.kind === "complete" ? completeCard(q.x) : q.kind === "issue" ? issueCard(q.x, true) : remarkCard(q.x);
   return `<div class="dq-top"><span class="muted small">Item ${k + 1} of ${Q.length}</span>
       <span class="tb-space"></span>
       <button class="btn small" data-act="decstep" data-d="-1" ${k <= 0 ? "disabled" : ""}>Previous</button>
@@ -2920,7 +3114,7 @@ function viewDecide() {
   const R = S.b.revision || {}, x = st("decide");
   if (!R.referee && x.status !== "done") return `<div class="wrap"><div class="empty"><strong>Not reached yet</strong>This step opens once the first draft has been re-read: for shorter arguments, for the correctness of every proof, and as a referee would read it.</div></div>`;
   const it = R.items;
-  if (!it.simplify.length && !(it.complete || []).length && !it.issues.length && !it.remarks.length) {
+  if (!it.simplify.length && !(it.complete || []).length && !it.issues.length && !it.remarks.length && !(it.additions || []).length) {
     return `<div class="wrap"><div class="head"><h1>Your decisions</h1><p>The three readings of the first draft found nothing mathematical that needs your decision, so this step was passed. Language, tone and typography are corrected in the final version without asking you.</p></div>
       <div class="sheet"><div class="sec"><div class="row"><button class="btn" data-act="view" data-view="simplify">Shorter arguments</button><button class="btn" data-act="view" data-view="verify">Proof check</button>
         <button class="btn" data-act="view" data-view="referee">Referee's report</button></div></div></div></div>`;
@@ -3568,6 +3762,11 @@ function askConfirm({ title, body, yes, danger = true }) {
   });
 }
 
+/* The paper itself is on the screen: at the copy-edited paper (before the title is chosen) or at the final version. */
+function onPaper() {
+  return !!(S.b && S.b.paper) && (S.view === "assemble" || (S.view === "build" && st("build").status === "done"));
+}
+
 /* ---------------------------------------------------------------- render */
 function render() {
   if (!S.meta) return;
@@ -3588,9 +3787,11 @@ function render() {
   else if (S.view === "scope") h = viewStatements();
   else if (S.view === "outline") h = viewOutline();
   else if (S.view === "proofcheck") h = viewProofReview();
+  else if (S.view === "reshapecheck") h = viewShape();
+  else if (S.view === "reproofcheck") h = viewNewProofs();
   else if (S.view === "draftcheck") h = viewDraftReview();
   else if (S.view === "finish") h = viewFinish();
-  else if (S.view === "assemble" && S.b.paper) h = viewPaper();
+  else if (onPaper()) h = viewPaper();
   else h = viewStage(S.view);
   h = testBanner() + h;
   const keep = main.scrollTop, same = main.dataset.view === S.view + "|" + S.pid + "|" + S.tab;
@@ -3608,7 +3809,7 @@ function render() {
   renderMath(main);
   drawLog();
   if (S.view === "new" && S.form && S.form.files && S.form.files.length) renderUploadPreview();
-  if (S.view === "assemble" && S.tab === "latex" && S.b && S.b.paper) loadTex();
+  if (onPaper() && S.tab === "latex") loadTex();
   if (S.edit) { const el = $(`.paper [data-block="${S.edit.target}"], .paper [data-part="${S.edit.target}"]`); if (el) el.classList.add("on"); }
 }
 function zoomHand(d) {
@@ -3812,7 +4013,7 @@ const ACT = {
     const p = (S.projects || []).find((x) => x.id === id) || {};
     const m = here ? S.b.state.meta : {};
     const name = (here ? nameHtml((S.b.paper && S.b.paper.title) || m.title, m.name) : nameHtml(p.title, p.name)) || "this paper";
-    const done = here ? st("finish").status === "done" : p.completed;
+    const done = here ? st("build").status === "done" : p.completed;
     const working = here ? running() : p.running;
     const imported = here ? !!m.imported : p.imported;
     const record = here ? !(S.b.proof || {}).missing : p.record;
@@ -4196,8 +4397,8 @@ const ACT = {
     S.busy = "ffinish"; render();
     try {
       await api(`/api/projects/${S.pid}/finish`, { method: "POST", body: { action: "finish", title: R.title.trim(), intro: R.dirty ? R.intro : undefined } });
-      S.fin = null; S.view = "assemble"; S.tab = "paper"; S.follow = false; history.replaceState(null, "", `#p/${S.pid}/assemble`);
-      await refresh(); toast("Finished. Every file carries your title and introduction.");
+      S.fin = null; S.tab = "paper"; S.follow = true; history.replaceState(null, "", `#p/${S.pid}`);
+      await refresh(); toast("The final version is being built with your title and introduction. It is the last step.");
     } catch (e) { toast(e.message, true); }
     S.busy = ""; render();
   },
@@ -4262,6 +4463,10 @@ const ACT = {
     catch (e) { toast(e.message, true); }
     S.busy = ""; render();
   },
+  decadd(el) {
+    const D = S.decide, id = el.dataset.id; D.additions[id] = D.additions[id] === el.dataset.v ? "" : el.dataset.v; saveDecide();
+    if (D.additions[id]) { advanceDecide(id); toast("Settled. The next item is shown."); } else render();
+  },
   decsim(el) {
     const D = S.decide, id = el.dataset.id; D.simplify[id] = D.simplify[id] === el.dataset.v ? "" : el.dataset.v; saveDecide();
     if (D.simplify[id]) { advanceDecide(id); toast("Settled. The next item is shown."); }
@@ -4294,13 +4499,13 @@ const ACT = {
     }
     S.busy = "decide"; render();
     try {
-      await api(`/api/projects/${S.pid}/decisions`, { method: "POST", body: { simplify: D.simplify, complete: D.complete, issues: D.issues, remarks: D.remarks } });
+      await api(`/api/projects/${S.pid}/decisions`, { method: "POST", body: { simplify: D.simplify, complete: D.complete, issues: D.issues, remarks: D.remarks, additions: D.additions || {} } });
       try { localStorage.removeItem("scriptavera-decide-" + S.pid); } catch (x) { /* ignore */ }
       S.follow = true; S.decide = null; S.tab = "paper"; history.replaceState(null, "", `#p/${S.pid}`); toast("Decisions saved. Writing the final version."); await refresh();
     } catch (e) { toast(e.message, true); }
     S.busy = ""; render();
   },
-  journal() { if (S.b.paper && S.view === "assemble") { S.tab = "journal"; S.edit = null; render(); } else { S.jr = S.jr || newJr(); showDialog(journalDialog()); } },
+  journal() { if (onPaper()) { S.tab = "journal"; S.edit = null; render(); } else { S.jr = S.jr || newJr(); showDialog(journalDialog()); } },
   async proof() {
     S.proofCheck = null; S.recNow = null;
     S.proofData = { proof: S.b.proof || {} };

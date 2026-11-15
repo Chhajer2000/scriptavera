@@ -87,21 +87,22 @@ if t.state["stages"]["confirm"]["status"] == "waiting":
 pipeline.start(t); wait(t, "review", seconds=900)
 survey_calls = [c for c in t.calls(1000) if c.get("label", "").startswith("Survey page")]
 assert survey_calls, "the notation is catalogued"
-figs = [f for f in (t.load("figures") or {}).get("items", []) if f.get("choice") not in ("tikz", "orig", "none", "explain")]
-if figs:                                                    # a figure for the paper: the step stops, for the figures only
+figs = [f for f in (t.load("figures") or {}).get("items", []) if not f.get("dup")]
+if figs:                                                    # a drawing: the step stops once, for the drawings only
+    assert all(f.get("auto") and f["choice"] == pipeline.assumed_choice(f) for f in figs), "the app's answer is selected for each"
     assert t.state["stages"]["review"]["status"] == "waiting" and "review" not in store.hidden_stages(t.state, t.dir)
-    for f in figs:
-        pipeline.set_figure(t, f["id"], choice="orig")
-    t.set_stage("review", status="pending")
-pipeline.start(t); wait(t, "review", seconds=900)
-assert t.state["stages"]["review"]["status"] == "done" and t.state["stages"]["review"].get("skipped") and t.load("approved")
-assert "review" in store.hidden_stages(t.state, t.dir), "with no figure to decide, the step is not shown"
-print(f"3. a PDF made on a computer: words from the file, {'a figure asked about, then ' if figs else ''}the transcript approved without stopping")
+    pipeline.submit_review(t, {})                           # the author leaves the app's answers as they are
+    assert t.state["stages"]["review"]["status"] == "done" and t.load("approved")
+    assert all(f.get("seen") for f in t.load("figures")["items"] if f.get("auto"))
+else:
+    assert t.state["stages"]["review"]["status"] == "done" and t.state["stages"]["review"].get("skipped") and t.load("approved")
+    assert "review" in store.hidden_stages(t.state, t.dir), "with no drawing to look at, the step is not shown"
+print(f"3. a PDF made on a computer: words from the file, {'the drawings shown once with the answers of the app, then ' if figs else ''}the transcript approved")
 
 # ---- the kind follows every page: one handwritten page makes the whole upload handwritten
 st = json.loads(json.dumps(t.state)); st["pages"].append({"n": 99, "skip": False})
 assert store.source_kind(st, t.dir) == "handwritten"
 summary = next(x for x in store.list_projects() if x["id"] == t.id)
-assert summary["total"] == len(store.STAGE_IDS) - 1 and summary["hidden"] == ["review"], summary
+assert summary["hidden"] == ([] if figs else ["review"]) and summary["total"] == len(store.STAGE_IDS) - (0 if figs else 1), summary
 print("4. one page read from an image makes the upload handwritten; the list of papers counts only the steps shown")
 print("source kinds ok")

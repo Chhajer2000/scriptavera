@@ -279,7 +279,7 @@ from scriptavera import paper as paperlib
 (folder / "out" / "main.tex").write_text("\\documentclass{amsart}\\author{Carol Cauchy}\\email{carol@example.org}\\begin{document}$x^2$\\end{document}")
 (folder / "out" / "paper.zip").write_bytes(paperlib.make_zip({"main.tex": "x", "README.txt": "y"}))
 p.save("transcript", {"pages": {"1": {"text": "Lemma (Carol Cauchy). $a^2+b^2$"}}})
-p.update_state(lambda s: s["stages"]["finish"].update(status="done"))
+p.update_state(lambda s: [s["stages"][x].update(status="done") for x in ("finish", "build")])
 z = zipfile.ZipFile(io.BytesIO(c.req("GET", f"/api/projects/{p2}/download/paper.zip").content))
 assert {"main.tex", "proof/record.json", "proof/tsa-freetsa.org_tsr.tsr", "proof/SHA256SUMS.txt", "proof/certificate.html"} <= set(z.namelist())
 arch = zipfile.ZipFile(io.BytesIO(c.req("GET", f"/api/projects/{p2}/archive").content))
@@ -310,7 +310,7 @@ q = store.get(p3)
 (f3 / "out" / "main.tex").write_text("\\documentclass{amsart}\\title{T}\\author{Bob Builder}\\address{ETH Zurich}\\email{bob@example.edu}"
                                      "\\begin{document}\\maketitle $\\int f$ \\section*{Acknowledgements} Thanks to Bob. \\end{document}")
 q.save("transcript", {"pages": {"1": {"text": "Write to bob@example.edu. $\\sum a_n$"}}})
-q.update_state(lambda s: s["stages"]["finish"].update(status="done"))
+q.update_state(lambda s: [s["stages"][x].update(status="done") for x in ("finish", "build")])
 hosted.forget_paper(p3)
 hosted.tidy_once()
 ds = [n for n in bucket.objects if n.startswith("dataset/")]

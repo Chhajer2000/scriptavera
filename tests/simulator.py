@@ -477,6 +477,111 @@ page 5 || Does the last display of the proof end with $\log n$ or with $\log(n+1
                 "<changes>\none line width for every line\nlabels set in type\n</changes>\n<corrections>\n"
                 + ("a fourth rectangle is drawn || the drawing shows three || the notes count four rectangles on page 3\n" if fix else "none\n")
                 + "</corrections>")
+    if label.startswith("Outline the argument of"):
+        return ("claim: a bound for a partial sum of reciprocal powers\nhypotheses: an integer $n \\ge 1$\n"
+                "method: comparison of a sum with an integral of a decreasing function\nsteps:\n1. bound each term by the integral "
+                "over a unit interval next to it\n2. add these integrals\n3. evaluate the integral\nuses: none\n"
+                "specific: the exponent, and on which side of each term the unit interval lies\nshorter: none")
+    if label.startswith("Plan the revision"):
+        # most first drafts keep their shape; SCRIPTAVERA_MOCK_SHAPE names what the reader proposes (test_reshape)
+        mode = os.environ.get("SCRIPTAVERA_MOCK_SHAPE", "")
+        out = []
+        if "merge" in mode:
+            out.append("<proposal>\nkind: merge\naffects: R2, R4\nidea: R2 bounds the harmonic sum from above and R4 from below, for the "
+                       "same $n$ and with the same comparison: they are the two parts of one statement, R2 as part (i) and R4 as part (ii).\n"
+                       "why: The reader sees the two-sided bound at once, and the corollary quotes one theorem.\n</proposal>")
+        if "argument" in mode:
+            out.append("<proposal>\nkind: argument\naffects: R1\nidea: A telescoping sum gives the bound of R1 in two lines, without the "
+                       "integral.\nwhy: The proof becomes shorter and needs no calculus.\n</proposal>")
+        if "similar" in mode:
+            out.append("<proposal>\nkind: similar\naffects: R3\nidea: The proof of R3 repeats that of R1 with $s$ in place of $2$.\n"
+                       "why: One argument is read once.\n</proposal>")
+        if "method" in mode:
+            out.append("<proposal>\nkind: method\naffects: R1, R3\nidea: The proofs of R1 and R3 compare a sum with an integral of a "
+                       "positive decreasing function in the same way. The comparison is stated once, as a lemma for a positive "
+                       "decreasing function; each proof applies it to its own function.\nwhy: The argument is read once.\n</proposal>")
+        if "shorten" in mode:
+            out.append("<proposal>\nkind: shorten\naffects: R5\nidea: The proof of R5 repeats the two bounds before it combines them; "
+                       "it only has to quote R2 and R4.\nwhy: The corollary is one line.\n</proposal>")
+        if "sections" in mode:
+            out.append("<proposal>\nkind: sections\naffects: none\nidea: All bounds from above in one section, the bound from below "
+                       "and the corollary in the next.\nwhy: Each section is one part of the argument.\n</proposal>")
+        return "\n".join(out) or "<none/>"
+    if re.match(r"Plan H\d+: merge", label):
+        return ("<merged>\nkind: theorem\nname: none\nstatement: For every integer $n \\ge 1$ the following hold.\n\\begin{enumerate}\n"
+                "\\item[\\textup{(i)}] $H_n^{(1)} \\le 1 + \\log n$;\n\\item[\\textup{(ii)}] $H_n^{(1)} \\ge \\log(n+1)$.\n\\end{enumerate}\n"
+                "parts: R2 = i, R4 = ii\n</merged>\n<outline id=\"R2\">\nThe comparison of $1/k$ with the integral of $1/x$ is set up once. "
+                "Part (i) takes the unit interval to the left of each term, part (ii) the one to its right.\n</outline>")
+    if re.match(r"Plan H\d+: method", label):
+        return ("<new>\nkind: lemma\nname: none\nstatement: Let $f$ be a positive decreasing function on $[1, \\infty)$. Then for every integer $n \\ge 1$ we have\n\\[ \\sum_{k=2}^{n} f(k) \\le \\int_{1}^{n} f(x)\\,dx. \\]\n</new>\n"
+                "<outline id=\"NEW\">\nOn each interval $[k-1, k]$ the value $f(k)$ is the smallest, so it is at most the integral over "
+                "that interval; these integrals are added. This is the first step of both proofs, done once.\n</outline>\n"
+                "<outline id=\"R1\">\nLemma~\\ref{res:NEW} with $f(x) = x^{-2}$; the integral is evaluated and the term $k = 1$ added.\n</outline>\n"
+                "<outline id=\"R3\">\nLemma~\\ref{res:NEW} with $f(x) = x^{-s}$; the integral is evaluated and the term $k = 1$ added.\n</outline>")
+    if re.match(r"Write out H\d+: method", label):
+        return ("<new>\nkind: lemma\nname: none\nstatement: Let $f$ be a positive decreasing function on $[1, \\infty)$. Then for every integer $n \\ge 1$ we have\n\\[ \\sum_{k=2}^{n} f(k) \\le \\int_{1}^{n} f(x)\\,dx. \\]\n</new>\n"
+                "<proof id=\"NEW\">\nLet $k \\ge 2$. Since $f$ is decreasing on $[k-1, k]$, we have $f(k) \\le \\int_{k-1}^{k} f(x)\\,dx$. "
+                "Summing over $k = 2, \\dots, n$ gives the claim.\n</proof>\n"
+                "<proof id=\"R1\">\nBy Lemma~\\ref{res:NEW} with $f(x) = x^{-2}$,\n"
+                "\\[ \\sum_{k=2}^{n} \\frac{1}{k^2} \\le \\int_{1}^{n} \\frac{dx}{x^2} = 1 - \\frac{1}{n}. \\]\n"
+                "Adding the term $k = 1$, which is $1$, gives the claim.\n</proof>\n"
+                "<proof id=\"R3\">\nBy Lemma~\\ref{res:NEW} with $f(x) = x^{-s}$,\n"
+                "\\[ \\sum_{k=2}^{n} \\frac{1}{k^s} \\le \\int_{1}^{n} \\frac{dx}{x^s} = \\frac{1 - n^{1-s}}{s-1} \\le \\frac{1}{s-1}. \\]\n"
+                "Adding the term $k = 1$ gives $H_n^{(s)} \\le 1 + \\frac{1}{s-1} = \\frac{s}{s-1}$. Letting $n \\to \\infty$ gives the bound "
+                "for $\\zeta(s)$.\n</proof>")
+    if re.match(r"Plan H\d+: argument", label):
+        return ("<outline id=\"R1\">\nFor $k \\ge 2$ bound $1/k^2$ by $1/(k(k-1))$, which is a difference of two reciprocals. "
+                "The sum telescopes; the term $k = 1$ is added.\n</outline>")
+    if re.match(r"Plan H\d+: similar", label):
+        return ("<outline id=\"R3\">\nThe proof of Lemma~\\ref{res:R1} is run with $s$ in place of $2$. No step differs.\n</outline>")
+    if re.match(r"Plan H\d+: shorten", label):
+        return ("<outline id=\"R5\">\nThe two bounds are quoted from the results before it and combined; the computation that "
+                "repeats them goes.\n</outline>")
+    if label.startswith("Check the plan H"):
+        if "kind: similar" in user and "unsound" in os.environ.get("SCRIPTAVERA_MOCK_SHAPE", ""):
+            return ("<verdict>unsound</verdict>\n<reason>The model proof uses an identity that has no counterpart for a general "
+                    "exponent, so the substitution does not go through in its second step.</reason>")
+        return ("<verdict>sound</verdict>\n<reason>The statements are the ones the paper has, and every step the outlines keep "
+                "is in the present proofs.</reason>")
+    if re.match(r"Write out H\d+: shorten", label):
+        got = dict(re.findall(r"(?s)\[(R\d+)\] [^\n]*\nProof:\n(.*?)(?=\n\n\[|\n\nOTHER RESULTS|\Z)", user.split("AS THEY STAND\n", 1)[1]))
+        refs = list(dict.fromkeys(re.findall(r"(?:Theorem|Lemma|Proposition)~\\ref\{res:R\d+\}(?:\\,\\textup\{\([iv]+\)\})?", got["R5"])))
+        return "<proof id=\"R5\">\nCombine " + " and ".join(refs or ["the two bounds"]) + ".\n</proof>"
+    if re.match(r"Write out H\d+: merge", label):
+        got = dict(re.findall(r"(?s)\[(R\d+)\] [^\n]*\nProof:\n(.*?)(?=\n\n\[|\n\nOTHER RESULTS|\Z)", user.split("AS THEY STAND\n", 1)[1]))
+        return ("<merged>\nkind: theorem\nname: none\nstatement: For every integer $n \\ge 1$ the following hold.\n\\begin{enumerate}\n"
+                "\\item[\\textup{(i)}] $H_n^{(1)} \\le 1 + \\log n$;\n\\item[\\textup{(ii)}] $H_n^{(1)} \\ge \\log(n+1)$.\n\\end{enumerate}\n"
+                "parts: R2 = i, R4 = ii\n</merged>\n<proof id=\"R2\">\n\\emph{Proof of (i).} " + got["R2"].strip()
+                + "\n\n\\emph{Proof of (ii).} " + got["R4"].strip() + "\n</proof>")
+    if re.match(r"Write out H\d+: argument", label):
+        return ("<proof id=\"R1\">\nFor $k \\ge 2$ we have $\\frac{1}{k^2} \\le \\frac{1}{k(k-1)} = \\frac{1}{k-1} - \\frac{1}{k}$. "
+                "Adding these for $k = 2, \\dots, n$, the sum telescopes, and with the term $k = 1$ we get "
+                "$H_n^{(2)} \\le 1 + 1 - \\frac{1}{n} = 2 - \\frac{1}{n}$.\n</proof>")
+    if re.match(r"Write out H\d+: similar", label):
+        return ("<proof id=\"R3\">\nThe proof is the same as that of Lemma~\\ref{res:R1}, with $s$ in place of $2$: every step "
+                "of that proof holds for each exponent greater than one.\n</proof>")
+    if re.match(r"Plan H\d+: sections", label):
+        ids = re.findall(r"(?m)^\d+\. [^:\n]*: ([^\n]*)$", user.split("THE SECTIONS AS THEY ARE\n", 1)[1].split("\nEach statement uses", 1)[0])
+        flat = [i.strip() for line in ids for i in line.split(",") if i.strip()]
+        cut = max(1, len(flat) - 2)
+        return (f"<section>\ntitle: Bounds from above\nitems: {', '.join(flat[:cut])}\n</section>\n"
+                f"<section>\ntitle: The bound from below and the two-sided estimate\nitems: {', '.join(flat[cut:])}\n</section>")
+    if label.startswith("Check H"):
+        if "kind: similar" in user:
+            return ("<verdict>invalid</verdict>\n<reason>The model proof uses the identity $\\frac{1}{k(k-1)} = \\frac{1}{k-1} - "
+                    "\\frac{1}{k}$, which has no counterpart for a general exponent, so the substitution does not go through.</reason>")
+        return ("<verdict>valid</verdict>\n<reason>Each part is the result it replaces, under the same hypothesis, and each proof "
+                "reaches its statement using only what stands before it.</reason>")
+    if label.startswith("Check the proposed"):
+        return "<verdict>correct</verdict>\n<summary>Every step follows; the telescoping sum was redone and agrees.</summary>"
+    if label.startswith("Suggest figures and tables"):
+        # most papers need none; SCRIPTAVERA_MOCK_ADDITION=1 makes the editor propose a table of the bounds
+        if os.environ.get("SCRIPTAVERA_MOCK_ADDITION") != "1":
+            return "<none/>"
+        return ("<addition>\nkind: table\nafter: res:R5\nwhy: The three bounds are stated in three places; side by side the reader sees "
+                "at once which sum each one controls.\nfrom: res:R1, res:R3, res:R5\ncaption: The bounds proved in this paper.\n"
+                "mention: Table (REF) collects the bounds proved above.\n<code>\n\\begin{tabular}{l|l}\n\\hline\nSum & Bound \\\\\n\\hline\n"
+                "$H_n^{(2)}$ & $2 - 1/n$ \\\\\n$H_n^{(1)}$ & $1 + \\log n$ \\\\\n\\hline\n\\end{tabular}\n</code>\n</addition>")
     if label.startswith("Bring the understanding up to date"):
         # a changed page that says "now: R2 states ..." changes that result; anything else changes nothing
         now = "\n".join(re.findall(r"AS IT IS NOW:\n(.*?)(?=\n%%% page|\n\nTHE NOTES AS THEY ARE NOW|\Z)", user, flags=re.S))
@@ -595,10 +700,13 @@ page: 1
     if re.match(r"Rewrite R\d+ with your answer", label):
         return "<statement>For all $n \\ge 1$ we have $H_n^{(1)} \\ge \\log(n+1)$.</statement>\n<question>none</question>"
     if label.startswith("Plan the structure"):
-        return ("<section>\ntitle: Preliminaries\nitems: D1, R2\npurpose: The partial sums and the known upper bound.\n</section>\n"
-                "<section>\ntitle: Upper bounds\nitems: R1, R3\npurpose: The bounds for the exponent two and the main theorem.\n</section>\n"
-                "<section>\ntitle: The harmonic sums\nitems: " + ("R4, R5" if "again" in label else "R5, R4")   # asked again, it puts R4 first
-                + "\npurpose: The lower bound and the two-sided estimate.\n</section>")
+        # a statement the author left out is not among those to place (it is named nowhere in the request)
+        here = lambda ids: ", ".join(i for i in ids if re.search(rf"\b{i}\b", user))          # noqa: E731
+        secs = [("Preliminaries", ["D1", "R2"], "The partial sums and the known upper bound."),
+                ("Upper bounds", ["R1", "R3"], "The bounds for the exponent two and the main theorem."),
+                ("The harmonic sums", ["R4", "R5"] if "again" in label else ["R5", "R4"],          # asked again, it puts R4 first
+                 "The lower bound and the two-sided estimate.")]
+        return "\n".join(f"<section>\ntitle: {t}\nitems: {here(ids)}\npurpose: {why}\n</section>" for t, ids, why in secs if here(ids))
     if label.startswith("Write the proof of"):
         rid = re.search(r"\((R\d+)\)", label).group(1)
         page = {"R1": 2, "R2": 3, "R3": 4, "R4": 5}.get(rid)
@@ -634,6 +742,16 @@ page: 1
                     "<statement>holds</statement>\n<verdict>review</verdict>\n<fix>none</fix>")
         return ("<follows>yes</follows>\n<departures>none</departures>\n<added>none</added>\n<author>complete</author>\n"
                 "<proof>correct</proof>\n<statement>holds</statement>\n<verdict>accept</verdict>\n<fix>none</fix>")
+    if label.startswith("Judge your reason for leaving out"):
+        reply = user.split("THE AUTHOR'S REPLY\n", 1)[1]
+        if "another argument" in reply:
+            return ("<verdict>avoided</verdict>\n<reply>Your argument works: the comparison can be made directly, so the proof does not need it.</reply>\n"
+                    "<instruction>Prove it without the lemma, by comparing each term directly with the integral.</instruction>")
+        if "only in a remark" in reply:
+            return ("<verdict>not_used</verdict>\n<reply>You are right: the notes mention it after the argument is complete, and no step rests on it.</reply>\n"
+                    "<instruction>none</instruction>")
+        return ("<verdict>needed</verdict>\n<reply>The notes use it in the last step, and your reply does not replace that step. Give the argument "
+                "for that step, keep the statement, or leave the one that uses it out as well.</reply>\n<instruction>none</instruction>")
     if label.startswith("Judge your reply about"):
         reply = user.split("THE AUTHOR'S REPLY\n", 1)[1]
         if "another argument" in reply:

@@ -64,21 +64,37 @@ STAGES: list[dict] = [
      "desc": "The text that joins the results, then the introduction and the abstract, written from the finished paper"},
     {"id": "draftcheck", "phase": "write", "name": "Your first draft",
      "desc": "You read the first draft with its introduction and abstract", "gate": True},
-    {"id": "simplify", "phase": "revise", "name": "Shorter arguments",
-     "desc": "The draft re-read for arguments used twice and proofs that can be shortened"},
+    {"id": "reshape", "phase": "revise", "name": "Plan of the revision",
+     "desc": "The first draft read as a whole: every proof reduced to its method, then all results and arguments looked "
+             "at together. A plan is made: results to state as one, an argument to state once, proofs to shorten, "
+             "the order and the sections. New statements are written in full, new proofs only in outline"},
+    {"id": "reshapecheck", "phase": "revise", "name": "Your plan",
+     "desc": "The plan beside the first draft, every change with its reason and how its proof will go: you accept or "
+             "reject each one", "gate": True},
+    {"id": "reproofs", "phase": "revise", "name": "New proofs",
+     "desc": "The proofs your plan changes written in full, together, from your own proofs, and each checked line by "
+             "line. A change whose proof does not pass is dropped: the first draft's version stands"},
+    {"id": "reproofcheck", "phase": "revise", "name": "Your review of the new proofs",
+     "desc": "Each new proof beside the one it replaces: you accept it or keep the old one", "gate": True},
+    {"id": "redraft", "phase": "revise", "name": "Second draft",
+     "desc": "The first draft rewritten only where you accepted a change: the joining text, the introduction and the "
+             "abstract brought up to date. The first draft is kept"},
     {"id": "verify", "phase": "revise", "name": "Proof check",
      "desc": "Every proof examined step by step; each suspected problem checked a second time"},
     {"id": "referee", "phase": "revise", "name": "Referee's read",
      "desc": "The whole paper read the way a journal referee reads it"},
     {"id": "decide", "phase": "revise", "name": "Your decisions",
      "desc": "You accept or reject each proposed change to the mathematics", "gate": True},
-    {"id": "assemble", "phase": "final", "name": "Final version",
+    {"id": "assemble", "phase": "final", "name": "Corrections and copy-edit",
      "desc": "Your decisions applied; language, tone and typography corrected; abstract, title suggestions, journal format"},
     {"id": "finish", "phase": "final", "name": "Title, introduction, citations",
      "desc": "You choose the title from the suggestions, approve the introduction and choose the papers it cites", "gate": True},
+    {"id": "build", "phase": "final", "name": "Final version",
+     "desc": "The files of the paper built with your title and your citations, and checked one last time: every "
+             "reference and every citation resolves. Nothing is changed after this step"},
 ]
 STAGE_IDS = [s["id"] for s in STAGES]
-LAYOUT = 9                      # bumped whenever the list of stages, or what a stage makes, changes
+LAYOUT = 11                     # bumped whenever the list of stages, or what a stage makes, changes
 
 # What each stage writes. Redoing a stage removes its own files and those of every later stage.
 ARTIFACTS: dict[str, list[str]] = {
@@ -99,13 +115,18 @@ ARTIFACTS: dict[str, list[str]] = {
     "proofs": ["proofs"],
     "proofcheck": ["proofs_ok"],
     "draft": ["plan", "body", "audit", "intro", "abstract_draft", "structure_partial", "connect_partial"],
-    "draftcheck": ["draft_ok"],
-    "simplify": ["simplify"],
+    "draftcheck": ["draft_ok", "draft_first"],
+    "reshape": ["reshape"],
+    "reshapecheck": [],
+    "reproofs": [],
+    "reproofcheck": [],
+    "redraft": [],
     "verify": ["verify"],
-    "referee": ["referee"],
+    "referee": ["referee", "additions"],
     "decide": ["decisions"],
     "assemble": ["front", "paper", "final_partial", "revision", "citations"],
     "finish": ["finished"],
+    "build": ["built"],
 }
 
 
@@ -383,6 +404,7 @@ def migrate(p: Project) -> None:
         if not st or st.get("layout") == LAYOUT:
             return
         before = st.get("layout") or 0
+        added: list[str] = []                   # the steps this version adds to the project
 
         def f(s):
             # the first draft used to be written section by section from the pages, in the steps "intro" and
@@ -398,6 +420,7 @@ def migrate(p: Project) -> None:
                 if sid not in STAGE_IDS:
                     s["stages"].pop(sid)                  # a step that no longer exists
             new = [sid for sid in STAGE_IDS if sid not in s["stages"]]
+            added.extend(new)
             for sid in STAGE_IDS:
                 s["stages"].setdefault(sid, {"status": "pending"})
             for sid in new:                               # a new stop for the author, placed before work already done:
@@ -410,14 +433,51 @@ def migrate(p: Project) -> None:
         st = p.update_state(f)
         if before < 9:
             _figures_v9(p)
+        if before < 11:
+            # the revision as it is from version 11: after the first draft come the plan of the revision, the author's
+            # decision on it, the new proofs, the author's review of them and the second draft; the final version is
+            # built last. A finished paper is not touched (Redo runs a step); a paper on its way gets the steps, and
+            # their stops ask the author only when something is proposed
+            new_ids = ("reshape", "reshapecheck", "reproofs", "reproofcheck", "redraft", "build")
+            early = before == 10 and st["stages"]["reshape"].get("status") not in (None, "pending")
+
+            def g(s):
+                if s["stages"]["finish"].get("status") == "done":
+                    for sid in new_ids:
+                        if s["stages"][sid].get("status") in (None, "pending") or s["stages"][sid].get("migrated"):
+                            s["stages"][sid] = {"status": "done", "finished": time.time(), "migrated": True, "skipped": True}
+                    return
+                for sid in ("reshapecheck", "reproofcheck"):
+                    if s["stages"][sid].get("migrated"):
+                        s["stages"][sid] = {"status": "pending"}
+                if early:                                 # version 10 looked at the shape before the first draft
+                    for sid in ("reshape", "reshapecheck"):
+                        s["stages"][sid] = {"status": "pending"}
+            st = p.update_state(g)
+            if st["stages"]["finish"].get("status") != "done":
+                p.remove("simplify")                      # its work is now part of the plan of the revision
+                if early:
+                    p.remove("reshape")
+                    if st["stages"]["draft"].get("status") not in (None, "pending"):
+                        p.update_from("draft", "the revision is now planned from the first draft, not before it")
+                        st = p.state
         first = next((i for i, sid in enumerate(STAGE_IDS) if st["stages"][sid].get("status") != "done"), None)
         if first is not None and before < 9 and STAGE_IDS[first] == "figdesign" \
                 and st["stages"]["figdesign"].get("status") == "pending":
             # the one new step, after the structure: everything made is kept, the figures for print are drawn, and
             # the steps after it are brought up to date (nothing in them changes unless a figure does)
             p.update_from("figdesign", "a new step: the figures the paper prints are drawn for print")
-        elif first is not None and first + 1 < len(STAGE_IDS) \
+        elif first is not None and before < 11 and STAGE_IDS[first] == "reshape" \
+                and st["stages"]["reshape"].get("status") == "pending":
+            # the new steps after the first draft: everything made is kept; the revision is planned from the first
+            # draft, and what follows is brought up to date only where the author accepts a change
+            if any(st["stages"][sid].get("status") not in (None, "pending") for sid in STAGE_IDS[first + 1:]):
+                p.update_from("reshape", "new steps: the revision is planned from the first draft")
+        elif first is not None and first + 1 < len(STAGE_IDS) and STAGE_IDS[first] in added \
                 and any(st["stages"][sid].get("status") not in (None, "pending") for sid in STAGE_IDS[first + 1:]):
+            # a new step with work already done after it (and no way to bring that work up to date): done again from
+            # there. Only a NEW step causes this: a stop the author is at, or steps being brought up to date after a
+            # change, with later steps that keep what they made, is how the paper normally stands
             out = p.dir / "out"
             if out.exists() and any(out.iterdir()):       # the paper built by the earlier version is kept aside
                 keep = p.dir / "out_before_update"
@@ -575,7 +635,7 @@ def list_projects() -> list[dict]:
                     "first_page": first, "record": (d / "proof" / "record.json").exists(),
                     "current": now, "current_name": next((x["name"] for x in STAGES if x["id"] == now), "") if now not in hidden
                     else next((x["name"] for x in STAGES if x["id"] not in hidden and st["stages"].get(x["id"], {}).get("status") != "done"), ""),
-                    "completed": st["stages"].get("finish", {}).get("status") == "done",
+                    "completed": st["stages"].get(STAGE_IDS[-1], {}).get("status") == "done",
                     "stopped": next((s.get("error") for s in st["stages"].values() if s.get("status") == "error"), None),
                     "paused": paused, "id": st["id"], "name": st.get("meta", {}).get("name") or "Untitled notes",
                     "domains": st.get("meta", {}).get("domains", []), "pages": len(st.get("pages", [])),

@@ -62,12 +62,10 @@ assert len(figs) == 1 and figs[0]["page"] == 1 and b[0] <= 280 and b[1] <= 138 a
 assert pipeline.figure_file(p, "f1", "orig").exists()
 drawn = bool(figs[0]["tikz_ok"])
 assert drawn == bool(paperlib.find_engine()) and pipeline.figure_file(p, "f1", "tikz").exists() == drawn, figs[0]
-try:
-    pipeline.submit_review(p, {}); raise SystemExit("the gate must ask about the figure")
-except ValueError as e:
-    assert "each drawing" in str(e), e
+rec = next(f for f in p.load("figures")["items"] if f["id"] == "f1")
+assert rec["auto"] and rec["choice"] == pipeline.assumed_choice(rec), "the app's answer for the drawing is selected"
 rec = pipeline.redraw_figure(p, "f1", "The rectangles should start at 1.")
-assert rec["redrawn"] == 1 and rec["choice"] == ""
+assert rec["redrawn"] == 1 and rec["auto"] and rec["choice"] == pipeline.assumed_choice(rec)
 pipeline.set_figure(p, "f1", caption="Rectangles under the graph of a decreasing function.")
 pipeline.submit_review(p, {"figures": {"f1": "tikz" if drawn else "orig"}})
 print("2. transcript approved; figure:", "redrawn" if drawn else "the author's own drawing")
@@ -106,7 +104,7 @@ assert p.state["stages"]["scope"]["status"] == "waiting" and p.state["stages"]["
 try:
     writing.submit_scope(p, {"kind": "article", "results": {"R2": "omit"}}); raise SystemExit("a result others use cannot be left out alone")
 except ValueError as e:
-    assert "R5 uses R2" in str(e), e
+    assert "(R5) uses" in str(e) and "(R2)" in str(e) and isinstance(e, drafting.Dispute), e
 drafting.edit_statement(p, "R1", {"kind": "proposition"})
 drafting.edit_statement(p, "R1", {"kind": "lemma"})                      # the author may switch a kind, and back
 writing.submit_scope(p, {"kind": "article", "results": {"R4": "keep", "R2": "credit"}})
@@ -151,14 +149,27 @@ assert "Example2015Simulated" in (r2.get("title") or "") + (r2.get("text") or ""
 assert sum(1 for b in body["blocks"] if b["type"] == "proof") == 4 and p.load("abstract_draft")["abstract"]
 assert any("In this section we treat" in (b.get("text") or "") for b in body["blocks"]), "the text between results is written"
 drafting.submit_draft(p, {"abstract": p.load("abstract_draft")["abstract"] + " "})
+# the revision is planned from the first draft: an argument two proofs share is stated once, as a lemma
+import os
+from scriptavera import reshape
+os.environ["SCRIPTAVERA_MOCK_SHAPE"] = "method"
+pipeline.start(p); wait(p, "reshapecheck")
+plan_ = reshape.view(p)
+assert [x["kind"] for x in plan_["proposals"]] == ["method"] and plan_["proposals"][0]["outline"] and plan_["written"] == [], plan_["dropped"]
+H = plan_["proposals"][0]["id"]
+reshape.submit(p, {H: "accept"})
+pipeline.start(p); wait(p, "reproofcheck")
+sim = reshape.view(p)
+assert [x["id"] for x in sim["written"]] == [H] and sim["written"][0]["saved"] > 0 and not sim["failed"], sim["failed"]
+reshape.submit_proofs(p, {H: "accept"})
 pipeline.start(p); wait(p, "decide")
+os.environ["SCRIPTAVERA_MOCK_SHAPE"] = ""
+assert p.load("body")["shape"]["applied"] == [H] and "res:X1" in [b.get("label") for b in p.load("body")["blocks"]]
 d = p.load("dossier")
 assert [r["id"] for r in d["results"]] == ["R1", "R2", "R3", "R4", "R5"] and d["source"] == "Example2015Simulated" and d["concerns"]
 assert any("R6 is a step in the proof of R3" in x for x in d["checked"]) and d["results"][2]["contains"][0]["id"] == "R6"   # a step is not a lemma
 a = p.load("audit")
-sim = p.load("simplify")
-assert [x["id"] for x in sim["proposals"]] == ["S1"] and sim["proposals"][0]["new"]["label"] == "res:S1" and sim["proposals"][0]["saved"] > 0
-assert [x["id"] for x in sim["dropped"]] == ["S2"] and "independent check" in sim["dropped"][0]["reason"], sim["dropped"]
+assert p.load("simplify") is None, "shortening is part of the plan of the revision, not a step of its own"
 ver = p.load("verify")["results"]
 assert ver["res:R4"]["verdict"] == "problems" and ver["res:R4"]["issues"][0]["status"] == "upheld"
 assert ver["res:R3"]["verdict"] == "correct" and ver["res:R3"]["issues"][0]["status"] == "dismissed"
@@ -166,16 +177,16 @@ assert ver["res:R1"]["verdict"] == "correct" and not ver["res:R1"]["issues"]
 ref = p.load("referee")
 assert ref["recommendation"] == "minor revision" and [x["route"] for x in ref["points"]] == ["author", "auto", "auto", "author"]
 items = revision.decision_items(p)
-assert [x["id"] for x in items["simplify"]] == ["S1"] and len(items["issues"]) == 1 and [r["id"] for r in items["remarks"]] == ["P1", "P4", "N1"], items["remarks"]
+assert items["simplify"] == [] and len(items["issues"]) == 1 and [r["id"] for r in items["remarks"]] == ["P1", "P4", "N1"], items["remarks"]
 issue = items["issues"][0]
 try:
-    revision.submit_decisions(p, {"simplify": {"S1": "accept"}}); raise SystemExit("the gate must want every decision")
+    revision.submit_decisions(p, {"simplify": {}}); raise SystemExit("the gate must want every decision")
 except ValueError as e:
     assert "1 item(s) still need" in str(e)
-revision.submit_decisions(p, {"simplify": {"S1": "accept"}, "issues": {issue["id"]: {"choice": "fix"}},
+revision.submit_decisions(p, {"simplify": {}, "issues": {issue["id"]: {"choice": "fix"}},
                               "remarks": {"P1": "Say in the theorem what $\\zeta(s)$ is."}})
-print("3. draft:", a["preserved"], "of", a["total"], "formulas; proposals", len(sim["proposals"]), "kept,", len(sim["dropped"]),
-      "set aside; proof issues upheld 1, dismissed 1; referee points", len(ref["points"]))
+print("3. draft:", a["preserved"], "of", a["total"], "formulas; the plan of the revision:", len(sim["written"]), "change written and accepted;",
+      "proof issues upheld 1, dismissed 1; referee points", len(ref["points"]))
 
 # ---------------------------------------------------------------- the final version
 pipeline.start(p); wait(p, "assemble", ("done",))
@@ -183,13 +194,13 @@ assert p.state["stages"]["finish"]["status"] == "waiting", "the author chooses t
 P = p.load("paper")
 by = {b.get("label"): b for b in P["blocks"] if b.get("label")}
 order = [b.get("label") for b in P["blocks"] if b["type"] == "env"]
-assert order == ["def:D1", "res:R2", "res:S1", "res:R1", "res:R3", "res:R4", "res:R5"], order       # the new lemma stands before its first use
+assert order == ["def:D1", "res:R2", "res:X1", "res:R1", "res:R3", "res:R4", "res:R5"], order       # the new lemma stands before its first use
 proofs = {u["label"]: u["proof"] for u in revision.result_units(P["blocks"])}
-assert all("\\ref{res:S1}" in proofs[l] for l in ("res:R1", "res:R3")) and not proofs.get("res:R2"), proofs["res:R1"]   # R2 is credited
+assert all("\\ref{res:X1}" in proofs[l] for l in ("res:R1", "res:R3")) and not proofs.get("res:R2"), proofs["res:R1"]   # R2 is credited
 assert "\\log(n+1)" in proofs["res:R4"] and "= \\log n" not in proofs["res:R4"]                       # the slip is corrected
 assert "denotes the limit" in by["res:R3"]["text"]                                                   # the author's instruction was carried out
 r = P["revision"]
-assert len(r["simplified"]) == 1 and r["simplified"][0]["new"] == "res:S1" and len(r["corrected"]) == 1 and len(r["remarks"]) == 1 and not r["unapplied"], r
+assert len(r["simplified"]) == 0 and len(r["corrected"]) == 1 and len(r["remarks"]) == 1 and not r["unapplied"], r
 results = [x["result"] for x in r["polish"]]
 assert results.count("edited") >= 2 and any(x.startswith("kept as written") for x in results), r["polish"]
 assert "yields the claim" in proofs["res:R1"] and "H_n^{(2)} < 2" not in paperlib.blocks_to_latex(P["blocks"])   # wording changed, formula not
@@ -236,6 +247,9 @@ except ValueError:
     pass
 P = final.finish(p, {"title": "A short note on harmonic sums"})
 assert p.state["stages"]["finish"]["status"] == "done" and P["title_source"] == "chosen by you"
+assert store.STAGE_IDS[-1] == "build" and p.state["stages"]["build"]["status"] == "pending", "the final version is built last"
+pipeline.start(p); wait(p, "build", ("done",))
+assert p.load("built")["problems"] == [], p.load("built")
 assert "A short note on harmonic sums" in (p.dir / "out" / "main.tex").read_text() and p.state["meta"]["title"] == "", "a chosen suggestion is chosen again after a redo"
 P = final.finish(p, {"title": "My own title for $H_n^{(s)}$"})
 assert P["title_source"] == "author" and p.state["meta"]["title"] == "My own title for $H_n^{(s)}$", "the author's own title is kept"

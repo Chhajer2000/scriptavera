@@ -282,6 +282,9 @@ def figure_latex(fid: str, figs: dict) -> str:
         return ""
     inner = f["tikz"].strip() if f["mode"] == "tikz" else f"\\includegraphics[width=0.82\\textwidth]{{figures/{fid}.jpg}}"
     cap = clean_fragment(f.get("caption") or "")
+    if f.get("kind") == "table":               # a table: its caption above it, numbered with the tables
+        return ("\n\\begin{table}[ht]\n\\centering\n" + (f"\\caption{{{cap}}}" if cap else "") + f"\\label{{fig:{fid}}}\n"
+                + inner + "\n\\end{table}\n")
     return ("\n\\begin{figure}[ht]\n\\centering\n" + inner + "\n"
             + (f"\\caption{{{cap}}}" if cap else "") + f"\\label{{fig:{fid}}}\n\\end{{figure}}\n")
 
@@ -331,8 +334,11 @@ def number_blocks(paper: dict) -> dict:
     eq = [0]
     if paper.get("intro"):
         sec = 1
-    for n, fid in enumerate(figures_used(paper), 1):
-        labels[f"fig:{fid}"] = str(n)
+    counts = {"figure": 0, "table": 0}         # figures and tables are numbered apart, as LaTeX numbers them
+    for fid in figures_used(paper):
+        kind = "table" if (paper.get("figures") or {}).get(fid, {}).get("kind") == "table" else "figure"
+        counts[kind] += 1
+        labels[f"fig:{fid}"] = str(counts[kind])
     for b in paper.get("blocks", []):
         if b["type"] == "section":
             sec += 1
@@ -525,8 +531,9 @@ def tex_to_html(text: str, ctx: dict, inline: bool = False) -> str:
             if f and f.get("mode") in ("tikz", "orig") and ctx.get("fig_url"):
                 num = ctx.get("labels", {}).get("fig:" + fm.group(1), "")
                 cap = tex_to_html(f.get("caption") or "", ctx, inline=True)
-                out.append(f'<figure class="p-fig" id="lbl-fig:{fm.group(1)}"><img src="{html.escape(ctx["fig_url"](fm.group(1), f["mode"]), quote=True)}" alt="Figure {num}">'
-                           f'<figcaption><span class="fig-head">Figure {num}.</span> {cap}</figcaption></figure>')
+                word = "Table" if f.get("kind") == "table" else "Figure"
+                out.append(f'<figure class="p-fig" id="lbl-fig:{fm.group(1)}"><img src="{html.escape(ctx["fig_url"](fm.group(1), f["mode"]), quote=True)}" alt="{word} {num}">'
+                           f'<figcaption><span class="fig-head">{word} {num}.</span> {cap}</figcaption></figure>')
             continue
         if re.match(r"^<(ul|ol|div|blockquote)", p):
             out.append(restore(p))
@@ -710,7 +717,15 @@ def software_statement(paper: dict) -> str:
     from . import __version__
     n = len(paper.get("authors") or [])
     who, whose = ("the authors", "the authors'") if n > 1 else ("the author", "the author's")
-    did = ["to transcribe " + whose + " handwritten notes"]
+    use = paper.get("ai_use") or {}
+    did = ["to transcribe " + whose + " handwritten notes", "to write out the proofs in full from " + whose + " arguments"]
+    if use.get("completed"):
+        did.append("to fill in steps of proofs that the notes only sketched")
+    if use.get("shaped"):
+        did.append("to propose how the results and arguments are arranged")
+    if use.get("figures") or use.get("additions"):
+        did.append("to draw the figures from " + whose + " drawings" + (" and to propose a table or figure" if use.get("additions") else "")
+                   if use.get("figures") else "to propose a table or figure")
     if paper.get("abstract_source") == "generated":
         did.append("to draft the abstract")
     if str(paper.get("intro_source") or "").startswith(("generated", "rewritten")):
@@ -719,9 +734,24 @@ def software_statement(paper: dict) -> str:
         did.append("to propose the title")
     did.append("to edit the language and the layout of the text")
     listed = did[0] if len(did) == 1 else ", ".join(did[:-1]) + " and " + did[-1]
+    # an argument that the tool itself proposed and the author accepted is named: it is not in the author's notes
+    ai = set(use.get("ai_arguments") or [])
+    named = []
+    if ai:
+        temp = {"intro": paper.get("intro"), "blocks": [dict(b) for b in paper.get("blocks", [])], "figures": paper.get("figures") or {}}
+        number_blocks(temp)
+        named = [f"{THEOREM_ENVS.get(b.get('env'), 'Result')}~\\ref{{{b['label']}}}" for b in temp["blocks"]
+                 if b.get("type") == "env" and b.get("label") in ai]
+    s = "" if n > 1 else "s"
+    if named:
+        which = named[0] if len(named) == 1 else ", ".join(named[:-1]) + " and " + named[-1]
+        own = (f"The argument of the proof of {which} was proposed by the tool; {who} checked {'it' if len(named) == 1 else 'them'} "
+               f"line by line. The results, and every other argument, are {whose} own: ")
+    else:
+        own = f"The results and their arguments are {whose} own: "
     return (f"In preparing this paper, {who} used Scriptavera~\\cite{{{SOFTWARE_KEY}}} (Version {__version__}), "
-            f"which uses AI language models {listed}. The mathematics is {whose} own: every change to it was decided "
-            f"by {who}, who checked the whole text and take{'' if n > 1 else 's'} full responsibility for the content "
+            f"which uses AI language models {listed}. {own}every change to the mathematics was decided "
+            f"by {who}, who checked the whole text and take{s} full responsibility for the content "
             "of this paper.")
 
 

@@ -605,13 +605,20 @@ def stage_assemble(run: Run) -> None:
         title, source = "Untitled", "suggested"
         run.log("No acceptable title was proposed; write your own at the next step.", "warn")
 
+    shape, report = body.get("shape") or {}, state.get("report") or {}
     paper = {
         "title": title, "title_source": source, "title_candidates": front.get("title_candidates", []),
         "authors": meta.get("authors") or [], "abstract": front["abstract"], "abstract_source": "generated",
         "intro": intro, "intro_source": "generated", "keywords": front.get("keywords", []), "msc": front.get("msc", []),
-        "blocks": blocks, "figures": body.get("figures") or {}, "cite_checks": checks, "cite_notes": notes,
+        "blocks": blocks, "figures": {**(body.get("figures") or {}), **revision.accepted_additions(p)},
+        "cite_checks": checks, "cite_notes": notes,
+        # what the tool did for the mathematics of this paper, for its declaration (paper.software_statement)
+        "ai_use": {"shaped": bool(shape.get("applied")) or bool(report.get("simplified")), "ai_arguments": shape.get("ai") or [],
+                   "completed": len(report.get("completed") or []), "figures": any(f.get("version") == "print" for f in (body.get("figures") or {}).values()),
+                   "additions": len(revision.accepted_additions(p))},
         "concerns": d.get("concerns", []), "plan": (p.load("plan") or {}).get("sections", []),
-        "waived": "\n".join(x for x in (state.get("waived", ""), left_out_text(p)) if x), "approved_text": state.get("approved", ""),
+        "waived": "\n".join(x for x in (state.get("waived", ""), left_out_text(p), shape.get("waived", "")) if x),
+        "approved_text": "\n".join(x for x in (state.get("approved", ""), shape.get("approved", "")) if x),
     }
 
     # 6. typography by rule, then the files; LaTeX that will not compile is repaired passage by passage
@@ -911,7 +918,8 @@ def finish_needed(p: Project) -> list[str]:
 
 
 def finish(p: Project, data: dict) -> dict:
-    """The author's last word: the title, the introduction as approved. The files are built once more."""
+    """The author's last word: the title, the introduction as approved. The final version is built from it in the
+    step that follows (stage_build), which is the last one."""
     paper = p.load("paper")
     if not paper:
         raise ValueError("The paper has not been assembled yet.")
@@ -927,12 +935,53 @@ def finish(p: Project, data: dict) -> dict:
     p.update_state(lambda st: st["meta"].update(title=title if own else ""))
     if isinstance(data.get("intro"), str) and data["intro"].strip() and data["intro"].strip() != paper.get("intro", "").strip():
         paper["intro"], paper["intro_source"] = data["intro"].strip(), "author"
-    paper = build_outputs(p, paper)
+    p.save("paper", paper)
     p.save("finished", {"at": time.time(), "title": title})
     p.set_stage("finish", status="done", finished=time.time())
     return paper
 
 
-__all__ = ["build_outputs", "stage_assemble", "revise_block", "set_journal", "read_guide", "good_title", "draft_html",
+def last_checks(paper: dict) -> list[str]:
+    """The last look at the built paper, by the program: every reference points at something the paper has, every
+    citation at an entry of its reference list, and the LaTeX file compiles."""
+    texts = [paper.get("intro", ""), paper.get("abstract", "")] + [(b.get("text") or "") + " " + (b.get("title") or "")
+                                                                   for b in paper.get("blocks", [])]
+    whole = "\n".join(texts)
+    labels = {b["label"] for b in paper.get("blocks", []) if b.get("label")} | set(re.findall(r"\\label\{([^{}]+)\}", whole))
+    labels |= {f"fig:{k}" for k in (paper.get("figures") or {})}
+    out = []
+    missing = sorted({r for r in re.findall(r"\\(?:eq|c|C|auto)?ref\{([^{}]+)\}", whole) if r not in labels})
+    if missing:
+        out.append(f"{len(missing)} reference(s) point at nothing in the paper: " + ", ".join(missing[:6]) + ".")
+    keys = {x.get("key") for x in paper.get("refs", [])}
+    uncited = sorted({k for k in cited_keys(texts) if k not in keys})
+    if uncited:
+        out.append(f"{len(uncited)} citation(s) have no entry in the reference list: " + ", ".join(uncited[:6]) + ".")
+    comp = paper.get("compile") or {}
+    if comp.get("engine") and not comp.get("ok"):
+        out.append("The LaTeX file does not compile.")
+    return out
+
+
+def stage_build(run: Run) -> None:
+    """The final version: the files of the paper built with the author's title, introduction and citations, and
+    looked at one last time by the program. It is the last step: nothing is changed after it."""
+    p = run.p
+    paper = p.load("paper")
+    if not paper:
+        raise ValueError("The paper has not been assembled yet.")
+    run.progress(0, 2, "building the files of the paper")
+    paper = build_outputs(p, paper)
+    run.progress(1, 2, "checking references and citations")
+    problems = last_checks(paper)
+    p.save("built", {"at": time.time(), "title": paper.get("title", ""), "problems": problems})
+    for x in problems:
+        run.log(x, "warn")
+    run.progress(2, 2, "final version ready")
+    run.log("Final version: the files of the paper are built"
+            + (". Every reference and every citation resolves." if not problems else f"; {len(problems)} point(s) need a look (above)."))
+
+
+__all__ = ["build_outputs", "stage_assemble", "stage_build", "last_checks", "revise_block", "set_journal", "read_guide", "good_title", "draft_html",
            "math_bag", "config", "related_papers", "open_items", "finish_info", "more_titles", "cite_intro", "finish",
            "finish_needed"]

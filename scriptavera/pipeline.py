@@ -226,11 +226,12 @@ def _stage_func(sid: str):
     import this one, so they are looked up when needed rather than when this module loads."""
     if sid in STAGE_FUNCS:
         return STAGE_FUNCS[sid]
-    from . import drafting, figpro, final, revision, writing
+    from . import drafting, figpro, final, reshape, revision, writing
     return {"understand": writing.stage_understand, "assess": writing.stage_assess, "figdesign": figpro.stage_figdesign,
             "proofs": drafting.stage_proofs, "draft": drafting.stage_draft,
-            "simplify": revision.stage_simplify, "verify": revision.stage_verify, "referee": revision.stage_referee,
-            "assemble": final.stage_assemble}[sid]
+            "reshape": reshape.stage_reshape, "reproofs": reshape.stage_reproofs, "redraft": drafting.stage_redraft,
+            "verify": revision.stage_verify, "referee": revision.stage_referee,
+            "assemble": final.stage_assemble, "build": final.stage_build}[sid]
 
 
 def _review_not_needed(p: Project) -> str:
@@ -243,9 +244,10 @@ def _review_not_needed(p: Project) -> str:
     if kind == "typed":
         return "Your notes are typed: their text is the transcript, so there was nothing to read from an image or to check."
     present = {(f["page"], f["k"]) for f in transcript_figures(p)}
-    if any((f["page"], f["k"]) in present and f.get("choice") not in ("tikz", "orig", "none")
+    if any((f["page"], f["k"]) in present and (f.get("choice") not in ("tikz", "orig", "none") or (f.get("auto") and not f.get("dup")
+                                                                                                and not f.get("seen")))
            for f in (p.load("figures") or {}).get("items", [])):
-        return ""
+        return ""                                  # a drawing without an answer, or with the app's answer not yet seen
     return ("The words of your PDF were taken from the file, and no figure needed your decision, so the transcript "
             "was approved without stopping.")
 
@@ -262,6 +264,9 @@ def _gate_prepare(sid: str):
 def _gate_is_empty(p: Project, sid: str) -> bool:
     """A gate with nothing for the author to decide is passed without stopping. The statements and the structure
     always stop: what the paper claims, and in what order, is the author's to confirm."""
+    if sid in ("reshapecheck", "reproofcheck"):
+        from . import reshape
+        return reshape.nothing_to_decide(p) if sid == "reshapecheck" else reshape.nothing_to_review(p)
     if sid != "decide":
         return False
     from . import revision
@@ -270,6 +275,8 @@ def _gate_is_empty(p: Project, sid: str) -> bool:
 
 GATE_PASSED = {
     "decide": "Nothing mathematical needed your decision, so this step was passed.",
+    "reshapecheck": "No change is proposed for the revision that you have not decided, so this step was passed.",
+    "reproofcheck": "No new proof is waiting for your review, so this step was passed.",
 }
 
 
@@ -290,6 +297,9 @@ def _gate_needs(p: Project, sid: str) -> list[str]:
         return notation_changed(p)
     if sid == "review":
         return transcript_changed(p)
+    if sid in ("reshapecheck", "reproofcheck"):
+        from . import reshape
+        return reshape.needed(p) if sid == "reshapecheck" else reshape.needed2(p)
     if sid == "scope":
         return drafting.statements_changed(p)
     if sid == "outline":
@@ -310,8 +320,8 @@ def _pass_again(p: Project, sid: str) -> None:
     from . import drafting, final, revision
     if sid == "review":
         submit_review(p, {})
-    elif sid == "confirm":
-        pass                                   # the notation confirmed stands as it is
+    elif sid in ("confirm", "reshapecheck", "reproofcheck"):
+        pass                                   # the notation confirmed, the decisions on the revision: they stand as they are
     elif sid == "scope":
         S = p.load("statements") or {}
         drafting.submit_statements(p, {"kind": S.get("kind"), "note": S.get("note", "")})
@@ -2492,6 +2502,7 @@ def stage_figures(run: Run) -> None:
     def draw(rec: dict) -> None:                 # each drawing is redrawn from its own page alone
         run.check()
         _draw_figure(p, rec, run.ask, conf)
+        default_choice(rec)
         with lock:
             drawn[0] += 1
             _save_figures(p, items)
@@ -2641,6 +2652,7 @@ def redraw_figure(p: Project, fid: str, instruction: str) -> dict:
         return router.chat(role, system, user, hooks=hooks, **kw)
     with _keeping_place(p, rec):
         _draw_figure(p, rec, ask, p.load("confirmed", {}), instruction.strip())
+    default_choice(rec)                            # a new copy: the app selects its answer for it
     rec["redrawn"] = rec.get("redrawn", 0) + 1
     with p._lock:
         cur = p.load("figures") or {"items": []}
@@ -2665,6 +2677,7 @@ def print_figure(p: Project, fid: str) -> dict:
             return router.chat(role, system, user, hooks=hooks, **kw)
         with _keeping_place(p, rec):
             _draw_figure(p, rec, ask, p.load("confirmed", {}))
+    default_choice(rec)
     with p._lock:
         cur = p.load("figures") or {"items": []}
         cur["items"] = [rec if f["id"] == fid else f for f in cur["items"]]
@@ -2991,11 +3004,19 @@ def submit_topic(p: Project, data: dict) -> str:
 
 
 def assumed_choice(f: dict) -> str:
-    """The most likely answer for a drawing the author did not answer in step 9: the copy drawn again when it was
-    drawn and its check found no difference from the drawing, else the author's own drawing, cut from the page."""
+    """The most likely answer for a drawing in step 9: the copy drawn again when it was drawn and its check found no
+    difference from the drawing, else the author's own drawing, cut from the page."""
     if f.get("tikz_ok") and (f.get("check") or {}).get("same") is not False:
         return "tikz"
     return "orig"
+
+
+def default_choice(rec: dict) -> None:
+    """The app's answer for a drawing that was copied, selected in step 9 until the author changes it (assumed_choice).
+    An answer the author gave stays. A new copy is a new question (drawing it again clears the answer), and the app
+    selects its answer for the new copy."""
+    if rec.get("drawn") and not rec.get("dup") and (rec.get("auto") or rec.get("choice") not in ("tikz", "orig", "none")):
+        rec["choice"], rec["auto"] = assumed_choice(rec), True
 
 
 def _assume_reading(text: str) -> str:
@@ -3042,6 +3063,13 @@ def submit_review(p: Project, data: dict) -> None:
     if open_figs:
         raise ValueError("Please say for each drawing whether the copy is what you drew (still open: page "
                          + ", ".join(str(f["page"]) for f in open_figs[:8]) + ").")
+    with p._lock:                                  # the answers the app selected were on the screen when the author approved
+        figs = p.load("figures") or {"items": []}
+        if any(f.get("auto") and not f.get("seen") for f in figs["items"]):
+            for f in figs["items"]:
+                if f.get("auto"):
+                    f["seen"] = True
+            p.save("figures", figs)
     corrections = {int(n): [{k: c[k] for k in ("comment", "changes", "reply")} for c in v.get("corrections", [])]
                    for n, v in tr["pages"].items() if v.get("corrections")}
     prev = p.load("approved") or {}
