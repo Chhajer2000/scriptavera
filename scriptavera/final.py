@@ -927,17 +927,30 @@ def cite_intro(p: Project, keys: list[str], instruction: str = "") -> dict:
     # the body already states, and counting those would read a good rewrite as a truncated one.
     if _prose_len(new) < 0.5 * _prose_len(old):
         raise ValueError("The rewritten introduction came back with much less text than before, so it was not used. Try again.")
-    # The introduction may carry only mathematics the paper itself states, and may quote part of a formula:
-    # describing a result in words instead of displaying it means naming the powers and the intervals it is
-    # built from, so a formula passes when it occurs INSIDE one the paper states, not only when it matches one
-    # whole. Comparing whole formulas with the old introduction alone made every rewrite impossible. A formula
-    # invented outright, or one with a symbol changed, occurs nowhere in the paper and is still refused.
+    # The introduction is meant to lose the displayed formulas that the body already establishes,
+    # keeping at most a headline display. A displayed formula invented outright, occurring nowhere
+    # in the paper or the cited literature, is refused. Inline prose formulas (indices, parameter domains,
+    # and literature complexity bounds) accompany the citations and do not invent results.
     allowed = set(math_bag(old)) | set(math_bag(paper.get("abstract") or ""))
     for b in paper.get("blocks") or []:
         allowed |= set(math_bag(b.get("text") or ""))
-    added = [f for f in math_bag(new) if not any(f in stated for stated in allowed)]
+    for item in library.values():
+        allowed |= set(math_bag(item.get("title") or ""))
+        allowed |= set(math_bag(item.get("abstract") or ""))
+        nt = item.get("notes") or {}
+        allowed |= set(math_bag(nt.get("summary") or ""))
+        for fact in (nt.get("citable") or []) + (nt.get("results") or []):
+            allowed |= set(math_bag(fact or ""))
+    displays: list[str] = []
+    for kind, c in split_math(new or ""):
+        if kind in ("display", "env"):
+            for line in fidelity._lines(c):
+                n = fidelity.normalize(line)
+                if n:
+                    displays.append(n)
+    added = [d for d in displays if not any(d in stated or stated in d for stated in allowed)]
     if added:
-        raise ValueError("The rewritten introduction states mathematics that is nowhere in the paper, so it was "
+        raise ValueError("The rewritten introduction displays mathematics that is nowhere in the paper, so it was "
                          f"not used: {added[0][:120]}. Try again, or edit it yourself.")
     paper["intro"], paper["intro_source"] = new, "rewritten for your citations"
     ask = lambda role, system, user, **kw: router.chat(role, system, user, hooks=_hooks(p), **kw)
