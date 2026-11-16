@@ -190,8 +190,20 @@ def parse_body(latex: str) -> list[dict]:
             lab = re.match(r"\\label\{([^{}]+)\}", rest)
             if lab:
                 rest = rest[lab.end():].strip()
-            blocks.append({"type": "section" if sm.group(1) == "section" else "subsection",
-                           "title": title.strip(), "label": lab.group(1) if lab else "", "page": page[0]})
+            from .util import section_labels
+            sec_type = "section" if sm.group(1) == "section" else "subsection"
+            if lab:
+                sec_label = lab.group(1)
+            elif sec_type == "section":
+                # Give every body section a label, so the introduction's roadmap can
+                # cite it with \ref instead of a typed number. Derived from the same
+                # ordered titles as writing.organisation(), so the two always agree.
+                prior = [b["title"] for b in blocks if b.get("type") == "section"]
+                sec_label = section_labels(prior + [title.strip()])[-1]
+            else:
+                sec_label = ""
+            blocks.append({"type": sec_type,
+                           "title": title.strip(), "label": sec_label, "page": page[0]})
             if rest:
                 buf.append(rest)
             i += 1

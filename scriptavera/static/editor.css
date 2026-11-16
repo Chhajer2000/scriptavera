@@ -90,6 +90,11 @@ a:hover { text-decoration: underline; }
 .tree { padding: 0 6px 6px; }
 .tree .row { display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: 0; color: var(--chalk); text-align: left; padding: 4px 8px; border-radius: 6px; cursor: pointer; position: relative; }
 .tree .row:hover { background: var(--slate-2); }
+/* The side panel scrolls, and the pointer does not move with it: without this each row passing under the
+   cursor would light up and show its buttons in turn. Muted until the pointer moves again (editor.js). */
+body.scrolling .tree .row:hover { background: transparent; }
+body.scrolling .tree .row:hover .acts { display: none; }
+body.scrolling .outline .o:hover { background: transparent; }
 .tree .row.on { background: var(--slate-3); }
 .tree .row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .tree .row .ic { width: 14px; flex: none; color: var(--chalk-dim); font-size: 11px; text-align: center; }

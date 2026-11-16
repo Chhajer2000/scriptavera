@@ -22,7 +22,7 @@ from .pipeline import (Run, _PAGE_MARK, _json, _room, _topic_text, audit_pages, 
                        page_gaps, page_marks, passing, strip_explanations, writing_pages)
 from .store import Project, reuse_ok
 from .texutil import check_balance, clean_fragment, find_group, leaks, split_math
-from .util import parse_rows, est_tokens, extract_tag, fit, parse_lines
+from .util import parse_rows, est_tokens, extract_tag, fit, parse_lines, section_labels
 
 RESULT_KINDS = ("lemma", "proposition", "theorem", "corollary")
 # parts of the notes that are not statements: kept as such, and the last three (what the argument is built on) printed
@@ -1033,12 +1033,50 @@ def normalise_plan(raw: list[dict], pages: list[dict], d: dict) -> list[dict]:
     return secs
 
 
+_SEC_NUM = re.compile(r"(Sections?)[~\s]+(\d+)(?![\d.])")
+_REF_NUM = re.compile(r"(\\ref\{sec:[^{}]*\}(?:,|\s|and)+)(\d+)(?![\d.])")
+_SEC_LEFT = re.compile(r"(?:Sections?|§)[~\s]*\d")
+
+
 def organisation(text: str, secs: list[dict]) -> str:
+    """The roadmap paragraph of the introduction, carrying no section number.
+
+    The writer is asked for "Section~2, Section~3, ..." because that is the
+    natural way to write the paragraph; every such number is turned here into
+    \\ref of that section's label. The paragraph then stays correct when a
+    section is added, removed, renamed or reordered, and whether or not the
+    introduction itself is numbered. A number we cannot resolve is not shipped:
+    the paragraph is rebuilt from the section list instead.
+    """
     text = clean_fragment(text or "")
-    nums = [int(n) for n in re.findall(r"Section[~\s]+(\d+)", text)]
-    if text and nums and max(nums) <= len(secs) + 1 and len(text) < 1500:
-        return text
-    parts = [f"Section~{i} ({s['title']})" for i, s in enumerate(secs, 2)]
+    labels = section_labels([s.get("title") or "" for s in secs])
+
+    def ref(n: int) -> str:
+        i = n - 2                                    # the introduction is Section 1
+        return f"\\ref{{{labels[i]}}}" if 0 <= i < len(labels) else ""
+
+    if text and len(text) < 1500:
+        def named(m: re.Match) -> str:
+            r = ref(int(m.group(2)))
+            return f"{m.group(1)}~{r}" if r else m.group(0)
+
+        def listed(m: re.Match) -> str:              # "Sections 2, 3 and 4"
+            r = ref(int(m.group(2)))
+            return f"{m.group(1)}{r}" if r else m.group(0)
+
+        fixed = _SEC_NUM.sub(named, text)
+        for _ in range(len(labels) + 1):
+            after = _REF_NUM.sub(listed, fixed)
+            if after == fixed:
+                break
+            fixed = after
+        # Only a leftover SECTION number sends us to the fallback: a digit in
+        # the prose itself ($O(h^3)$, "a two-step method") is none of our business.
+        if not _SEC_LEFT.search(fixed) and not _REF_NUM.search(fixed):
+            return fixed
+    parts = [f"Section~\\ref{{{labels[i]}}} ({s['title']})" for i, s in enumerate(secs)]
+    if not parts:
+        return ""
     if len(parts) == 1:
         return f"The rest of the paper consists of {parts[0]}."
     return "The paper is organised as follows: " + ", ".join(parts[:-1]) + " and " + parts[-1] + "."

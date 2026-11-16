@@ -413,12 +413,24 @@ details.more[open] > summary { margin-bottom: 12px; }
 .ref-link { white-space: nowrap; margin-left: .25rem; }
 .sc { font-variant: small-caps; }
 .center { text-align: center; }
-.paper [data-block], .paper [data-part] { cursor: pointer; border-radius: 2px; transition: background .12s; }
-.paper [data-block]:hover, .paper [data-part]:hover { background: #f1f4fd; box-shadow: -10px 0 0 #f1f4fd, 10px 0 0 #f1f4fd; }
-.paper [data-block].on, .paper [data-part].on { background: var(--blue-soft); box-shadow: -10px 0 0 var(--blue-soft), 10px 0 0 var(--blue-soft); }
-.paper .p-title { cursor: pointer; }
-.paper .p-title:hover { background: #f1f4fd; }
+/* The paper reads as a paper: a passage is never painted over, and the text behaves as text, so it can be
+   picked out with the mouse like anywhere else. The passage open in the editor is marked by a bar in the
+   margin instead -- a block filled with colour reads as a selection the author did not make. */
+.paper [data-block], .paper [data-part], .paper .p-title { cursor: text; border-radius: 2px; }
+.paper [data-block].on, .paper [data-part].on { position: relative; }
+.paper [data-block].on::before, .paper [data-part].on::before {
+  content: ""; position: absolute; left: -14px; top: 0; bottom: 0; width: 3px; border-radius: 2px; background: var(--blue);
+}
 .paper .katex-error { color: var(--red) !important; font: 13px var(--mono); }
+
+/* ----------------------------------------------- hover while a list scrolls
+   Wherever a list scrolls, the pointer stands still and the items move under it, so one item after another
+   would light up as though it were being pointed at. Hover is muted from the first scroll until the pointer
+   moves again (app.js sets body.scrolling). The chosen item (.on) keeps its highlight: that one is meant to
+   be seen. The paper's passages need no rule here -- they are never painted at all. */
+body.scrolling .dq-item:hover { background: none; }
+body.scrolling .step:hover { background: transparent; }
+body.scrolling .jr-item:hover { background: var(--paper); border-color: var(--rule); }
 
 .editor h3 { display: flex; justify-content: space-between; align-items: center; }
 .editor textarea { font: 12.5px/1.5 var(--mono); min-height: 190px; }

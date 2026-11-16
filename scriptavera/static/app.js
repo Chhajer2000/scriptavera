@@ -81,23 +81,47 @@ function macros() {
 }
 /* A displayed formula wider than its column is scaled down to fit, never given a scrollbar: the PDF's text is
    wider than the preview's column, so a formula that fits on the page is shown whole here too. */
+/* Writes and reads are kept in separate passes. Clearing a font size invalidates layout and reading
+   clientWidth forces it to be computed again, so doing both per formula costs one reflow per formula
+   and a long paper then takes seconds to lay out. Here every size is cleared first, every width is
+   read next (one reflow for the whole page), and the new sizes are written last. */
 function fitMath(root) {
-  $$(".math.display", root).forEach((el) => {
-    el.style.fontSize = "";
+  const els = $$(".math.display", root);
+  if (!els.length) return;
+  for (const el of els) el.style.fontSize = "";
+  const sizes = els.map((el) => {
     const w = el.clientWidth;
-    if (!w) return;                                   // hidden: fitted when shown
+    if (!w) return null;                              // hidden: fitted when shown
     const k = el.firstElementChild;
     const need = k ? k.scrollWidth : el.scrollWidth;
     /* the notes as read keep one size of letters: a formula wider than the column is made a little smaller at most,
        and can be scrolled sideways beyond that */
-    if (need > w + 1) el.style.fontSize = Math.max(el.closest(".rd") ? 0.85 : 0.45, (w - 2) / need).toFixed(3) + "em";
+    return need > w + 1 ? Math.max(el.closest(".rd") ? 0.85 : 0.45, (w - 2) / need).toFixed(3) + "em" : null;
   });
+  els.forEach((el, i) => { if (sizes[i]) el.style.fontSize = sizes[i]; });
 }
 let fitTimer = null;
 const refit = (ms) => { clearTimeout(fitTimer); fitTimer = setTimeout(() => fitMath(document), ms); };
 window.addEventListener("resize", () => refit(150));
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => refit(0));       // widths change once KaTeX's fonts load
-new MutationObserver((ms) => { if (ms.some((m) => m.addedNodes.length)) refit(60); }).observe(document.documentElement, { childList: true, subtree: true });
+/* Only a formula that was added needs fitting: menus, toasts and dialogs must not refit the whole paper. */
+new MutationObserver((ms) => {
+  for (const m of ms) {
+    for (const n of m.addedNodes) {
+      if (n.nodeType !== 1) continue;
+      if ((n.matches && n.matches(".math.display")) || (n.querySelector && n.querySelector(".math.display"))) return refit(60);
+    }
+  }
+}).observe(document.documentElement, { childList: true, subtree: true });
+/* While the page scrolls the pointer stands still but the text moves under it, so every paragraph in
+   turn would light up as though it had been selected. Hover is muted until the pointer moves again. */
+let hoverMuted = false;
+document.addEventListener("scroll", () => {
+  if (!hoverMuted) { hoverMuted = true; document.body.classList.add("scrolling"); }
+}, { capture: true, passive: true });
+document.addEventListener("pointermove", () => {
+  if (hoverMuted) { hoverMuted = false; document.body.classList.remove("scrolling"); }
+}, { passive: true });
 function tex(src, display) {
   try { return katex.renderToString(String(src || ""), { displayMode: !!display, throwOnError: false, strict: "ignore", output: "html", macros: macros() }); }
   catch (e) { return `<code>${esc(src)}</code>`; }
@@ -2369,6 +2393,9 @@ function statementCard(x) {
           ${x.edited ? '<span class="chip">edited by you</span>' : ""}</div>`}
     ${(x.changed || []).length ? `<div class="flag small">These formulas of your notes are not in the statement as written. Check that nothing changed:
         ${x.changed.map((f) => `<span class="math">${tex(f)}</span>`).join(" · ")}</div>` : ""}
+    ${x.meaning === "differs" ? `<div class="flag small"><b>This may not say the same mathematics as your notes.</b>
+        ${x.meaning_note ? " " + inner(latexLite(x.meaning_note)) : ""}
+        The wording written for the paper is kept: read it against your own above, and edit it if it is wrong.</div>` : ""}
     ${x.cut && x.treatment === "omit" ? `<div class="flag small"><b>Suggested to leave out:</b> ${esc(x.cut)}</div>` : ""}
     ${open ? `<div class="askbox"><div class="dlabel">A question about this statement</div><div>${inner(latexLite(x.question))}</div>
         <textarea rows="2" data-sanswer="${esc(x.id)}" placeholder="Your answer, in a sentence">${esc((S.wAns || {})[x.id] || "")}</textarea>
@@ -3860,12 +3887,51 @@ async function saveTranscript(n, text, keepLines) {
   }
   catch (e) { toast(e.message, true); }
 }
-function openEditor(target) {
+/* The words at the point clicked, read off the page, for finding the same place in the LaTeX behind it.
+   A click inside a formula gives nothing: the symbols KaTeX drew are not what the source says. */
+function phraseAt(ev, el) {
+  let node = null, off = 0;
+  if (document.caretPositionFromPoint) {
+    const c = document.caretPositionFromPoint(ev.clientX, ev.clientY);
+    if (c) { node = c.offsetNode; off = c.offset; }
+  } else if (document.caretRangeFromPoint) {
+    const r = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+    if (r) { node = r.startContainer; off = r.startOffset; }
+  }
+  if (!node || !el.contains(node)) return "";
+  if (node.parentElement && node.parentElement.closest(".katex")) return "";
+  const text = node.nodeType === 3 ? node.nodeValue || "" : node.textContent || "";
+  let s = Math.min(off, text.length);
+  while (s > 0 && /\S/.test(text[s - 1])) s--;                 // back to the start of the word clicked
+  return text.slice(s, s + 80).replace(/\s+/g, " ").trim();
+}
+/* Where those words stand in the source. Prose reaches the page as it is written, so they are looked for as
+   they are and then with fewer of them; a match counts only if it is the only one, because a caret put in the
+   wrong place is worse than a caret left at the top. */
+function sourceOffset(src, phrase) {
+  const words = String(phrase || "").trim().split(/\s+/).filter((w) => w.length > 1);
+  for (let n = Math.min(5, words.length); n >= 2; n--) {
+    const probe = words.slice(0, n).join(" "), first = src.indexOf(probe);
+    if (first >= 0 && src.indexOf(probe, first + 1) < 0) return first;
+  }
+  const w = words.find((x) => x.length > 3);
+  if (w) { const first = src.indexOf(w); if (first >= 0 && src.indexOf(w, first + 1) < 0) return first; }
+  return -1;
+}
+function openEditor(target, at) {
   const P = S.b.paper; let text = "", canDelete = false;
   if (target === "title" || target === "abstract" || target === "intro") text = P[target] || "";
   else { const b = P.blocks.find((x) => x.id === target); if (!b) return; text = (b.type === "section" || b.type === "subsection") ? b.title : b.text; canDelete = true; }
   S.edit = { target, text, canDelete }; S.tab = "paper"; render();
-  const t = $("#edtext"); if (t) t.focus();
+  const t = $("#edtext"); if (!t) return;
+  t.focus();
+  /* The page shows the passage set in type; the box holds its LaTeX. The click landed on a word, so the caret
+     goes to that word in the source: the author edits where they pointed, not at the top of the passage. */
+  const i = at ? sourceOffset(text, at) : -1;
+  if (i < 0) return;
+  t.setSelectionRange(i, i);
+  const line = (text.slice(0, i).match(/\n/g) || []).length;
+  t.scrollTop = Math.max(0, line * (parseFloat(getComputedStyle(t).lineHeight) || 18) - t.clientHeight / 2);
 }
 async function savePaper(body) {
   S.busy = "save"; render();
@@ -4657,7 +4723,10 @@ document.addEventListener("click", (ev) => {
   const host = ev.target.closest("#paperHost");
   if (host && !running()) {
     const el = ev.target.closest("[data-block],[data-part],.p-title");
-    if (el) openEditor(el.dataset.block || el.dataset.part || "title");
+    // Text picked out with the mouse stays picked out: the author was reading, not choosing a passage to edit.
+    if (el && !String(window.getSelection ? window.getSelection() : "").trim()) {
+      openEditor(el.dataset.block || el.dataset.part || "title", phraseAt(ev, el));
+    }
   }
 });
 document.addEventListener("input", (ev) => {

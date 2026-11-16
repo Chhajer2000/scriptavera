@@ -1270,3 +1270,13 @@ document.addEventListener("drop", (ev) => { if (ev.target.closest("#side")) { ev
   if (E.build && E.build.has_pdf) loadPdf(E.build.build);
   else if (E.info.engine) compile();
 })();
+
+/* While a panel scrolls the pointer stands still but its rows move under it, so row after row would light up
+   as though it were being pointed at. Hover is muted until the pointer moves again. */
+let hoverMuted = false;
+document.addEventListener("scroll", () => {
+  if (!hoverMuted) { hoverMuted = true; document.body.classList.add("scrolling"); }
+}, { capture: true, passive: true });
+document.addEventListener("pointermove", () => {
+  if (hoverMuted) { hoverMuted = false; document.body.classList.remove("scrolling"); }
+}, { passive: true });

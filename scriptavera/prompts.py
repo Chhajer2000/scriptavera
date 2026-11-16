@@ -1311,6 +1311,25 @@ Answer in exactly this format:
 <statement>the statement in LaTeX, without environment, label or number</statement>
 <question>a further question only if the answer leaves the statement genuinely unclear; otherwise none</question>"""
 
+STATEMENT_CHECK = """You are an independent reader. A statement of a mathematics paper was written from a colleague's handwritten notes: the wording is new, the mathematics is meant to be exactly the author's. Decide one thing only, and nothing else: do the two versions state the same mathematics?
+
+You wrote neither version and you owe neither of them anything. You are not refereeing the mathematics: a statement may be false, and that is the author's affair, not yours. You are not judging the writing either. Better English, standard terminology, a named object in place of a description, hypotheses in a cleaner order, the same formula in different LaTeX: all of these are what the new version is for, and none of them is a change to the mathematics.
+
+Report a change when the new version, read literally by a mathematician, is a different claim. The ones that happen:
+- a quantifier moved, so that its order or its scope changed ("for every x there is a y" against "there is a y such that for every x")
+- a hypothesis added, dropped, strengthened or weakened: non-decreasing against increasing, "for some" against "for all", a condition that the new version leaves unsaid
+- a conclusion strengthened or weakened: "if" against "if and only if", an inequality made strict or non-strict, a bound that now holds in more cases than were proved
+- a constant, an index, a bound or a range altered, including one the new version leaves the reader to infer
+- an object that is now a different object: another space, another norm, another mesh, another variable bound
+
+Say they agree when every hypothesis of each is a hypothesis of the other and the two conclusions claim the same thing, however differently the words run.
+
+When you are unsure, say they differ, and say what you are unsure about. A false alarm costs the author one glance; a change that goes unreported reaches the paper.
+
+Answer in exactly this format:
+<verdict>same or differs</verdict>
+<what>if they differ: what the new version claims that the author's does not, or no longer claims, in one or two sentences, naming the hypothesis or the conclusion concerned. Empty if they are the same.</what>"""
+
 OUTLINE = """You decide the structure of a mathematics paper whose statements are fixed. The introduction is written last and is not part of your plan.
 
 You receive every statement of the paper with its id, kind, placement and the statements it uses.
@@ -1450,7 +1469,9 @@ INTRO_FINAL = """You write the Introduction of a finished mathematics paper. You
 Rules
 - Open with the objects of study and why they are of interest. Then say what is known, citing as you go. Then state the problem this paper addresses and where it comes from, with its citation. Then state what this paper proves.
 - Every statement about earlier work must be supported by the reading notes of the paper cited for it and must carry \\cite{{KEY}}. Use only KEYs from the list. A claim with no source is left out.
-- State the main results exactly as they are stated in the paper: the same hypotheses, the same formulas, the same notation, and refer to them by label, as in Theorem~\\ref{{res:R3}}. Do not strengthen them. A main result may be displayed with \\[ ... \\].
+- State the main results exactly as the paper states them: the same hypotheses, the same notation, referred to by label, as in Theorem~\\ref{{res:R3}}. Do not strengthen them.
+- Do not reproduce the paper's displayed formulas. The reader meets them in the body, where their notation is already defined; in the introduction they cost the reader a page before the paper has begun, and they leave two copies of one formula to keep in step. Say instead, in prose, what each main result establishes: what kind of object it gives, in terms of what, and why that matters. Where a result has several formulas, give their shape and their count, as in "closed-form expressions for the two linear and three quadratic basis integrals, each a rational function of the node spacing". Display at most one formula, and only when a single short formula is the headline of the whole paper; never two.
+- Use the paper's own notation, exactly as its statements write it: the same names for the initial and terminal points, for the interval and for the mesh. If the statements write $u(t_0) = u_0$ and $\\int_{{t_0}}^{{t_n}}$, the introduction does not write $u(0) = u_0$ or $\\int_0^t$, not even in its opening sentences. Introduce no symbol that the paper does not use.
 - Follow the kind of paper: for a research article, say what is new and what is known; for a paper on partial results, say exactly what is proved and what remains open; for an expository note, claim nothing as new and credit each result.
 - 350 to 650 words, in complete, fluent, professional mathematical English. Paragraphs only: no \\section, no lists, no theorem environments. No promotional words and no rhetorical questions.
 
@@ -1468,7 +1489,9 @@ You receive the introduction as it stands, what changed in the paper, the statem
 Rules
 - Change only what the changes make wrong or incomplete: a result now stated differently, a result added or removed, a section added, renamed or moved, a citation of a paper that may no longer be cited. Every other sentence stays word for word.
 - Statements are referred to by label (Theorem~\\ref{{res:R3}}), so a statement that only moved needs no change.
-- What the introduction says about the results must agree with the statements as they are now: the same hypotheses, the same formulas; never stronger.
+- What the introduction says about the results must agree with the statements as they are now: the same hypotheses, the same notation; never stronger.
+- Add no displayed formula copied from the body. Where the introduction as it stands displays a formula that the body also displays, replace it with a prose description of what that result establishes, referred to by its label.
+- Keep the paper's own notation, as its statements write it: if they write $u(t_0) = u_0$ and $\\int_{{t_0}}^{{t_n}}$, the introduction does not write $u(0) = u_0$ or $\\int_0^t$.
 - Every statement about earlier work keeps its \\cite{{KEY}}, from the list only. A claim with no source is left out.
 - Paragraphs only: no \\section, no lists, no theorem environments.
 

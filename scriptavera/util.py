@@ -251,6 +251,25 @@ def slug(s: str, max_len: int = 40) -> str:
     return s[:max_len] or "untitled"
 
 
+def section_labels(titles: list[str]) -> list[str]:
+    """The \\label names of the body sections, in order, from their titles.
+
+    The \\section lines of the body and the roadmap paragraph of the
+    introduction are produced in different places and at different times.
+    Both derive their labels here, from the same ordered list of titles, so a
+    reference in the roadmap can never point at the wrong section and no
+    section number is ever written as a digit.
+    """
+    out: list[str] = []
+    seen: dict[str, int] = {}
+    for t in titles:
+        base = slug(t or "", 32)
+        n = seen.get(base, 0) + 1
+        seen[base] = n
+        out.append(f"sec:{base}" + (f"-{n}" if n > 1 else ""))
+    return out
+
+
 def norm_title(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", ascii_fold(s).lower())
 

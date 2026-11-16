@@ -103,6 +103,61 @@ def changed_formulas(original: str, statement: str) -> list[str]:
     return [x["source"] for x in rep["missing"] + rep["altered"]][:6]
 
 
+def meaning_check_needed(x: dict) -> bool:
+    """Whether one statement's wording is ours to answer for.
+
+    changed_formulas compares formulas as strings, so a rewrite that leaves every formula alone and changes the
+    mathematics in the words around them -- a quantifier moved, "if" made "if and only if", non-decreasing made
+    increasing -- passes it in silence. Those are exactly what writing a statement again produces, so a second
+    reader looks at the wording too. Not at the author's own edit, which is theirs, and not at a statement left
+    out of the paper.
+    """
+    if x.get("edited") or x.get("treatment") == "omit":
+        return False
+    o, s = (x.get("original") or "").strip(), (x.get("statement") or "").strip()
+    if not o or not s:
+        return False
+    return re.sub(r"\s+", " ", o) != re.sub(r"\s+", " ", s)
+
+
+def meaning_of(run: Run, x: dict) -> dict:
+    """One statement before an independent reader: does it say what the author's notes say?
+
+    The wording written for the paper is kept whatever comes back -- the verdict is shown to the author at their
+    statements, where they can edit it. A reader that fails to answer leaves no verdict rather than a false one.
+    """
+    user = (f"THE AUTHOR'S VERSION, AS READ FROM THE NOTES\n{x['original']}\n\n"
+            f"THE VERSION WRITTEN FOR THE PAPER\n{x['statement']}")
+    try:
+        res = run.ask("reason", prompts.STATEMENT_CHECK, user, max_out=700, effort="high",
+                      label=f"Check that {x['id']} says the same")
+    except LLMError:
+        return {"meaning": "", "meaning_note": ""}
+    verdict = (extract_tag(res.text, "verdict") or "").strip().lower()
+    if verdict.startswith("same"):
+        return {"meaning": "same", "meaning_note": ""}
+    note = clean_fragment(_none(extract_tag(res.text, "what")) or "").strip()
+    if verdict.startswith("differ"):
+        return {"meaning": "differs", "meaning_note": note[:600]}
+    return {"meaning": "", "meaning_note": ""}
+
+
+def meaning_check(run: Run, items: list[dict], fresh: set[str] | None = None) -> None:
+    """The second reader over every statement written anew, several at a time, its verdict stored on the item."""
+    todo = [x for x in items
+            if (fresh is None or x["id"] in fresh or "meaning" not in x) and meaning_check_needed(x)]
+    if not todo:
+        return
+    run.progress(0, 1, "checking that every statement says what your notes say")
+    for x, got in zip(todo, _side_by_side(run, "reason", False, todo, lambda y: meaning_of(run, y))):
+        x.update(got or {"meaning": "", "meaning_note": ""})
+    off = [x["id"] for x in todo if x.get("meaning") == "differs"]
+    if off:
+        run.log(f"{'This statement may not say' if len(off) == 1 else 'These statements may not say'} what your notes "
+                f"say: {', '.join(off)}. The wording written for the paper is kept; read it beside your own at your "
+                f"statements and edit it if it is wrong.", "warn")
+
+
 def parse_items(text: str) -> dict[str, dict]:
     out = {}
     for r in fields(text, "item", ("id", "kind", "name", "placement", "needed", "statement", "question")):
@@ -259,6 +314,7 @@ def prepare_statements(run: Run) -> None:
         run.log(("Statements brought up to date: " + ", ".join(x["id"] for x in todo) + " written"
                  if todo else "Statements brought up to date: nothing in them changed") +
                 (f"; {', '.join(removed)} no longer in your notes" if removed else "") + ". The others are kept as you confirmed them.")
+    meaning_check(run, merged, set(got))
     S = {"sig": sig, "items": merged, "model": model, "unused": unused_pages(merged, pages),
          "kind": S.get("kind") if update and S.get("kind") else default_kind(a, {x["id"] for x in merged if x.get("role") == "main"}),
          "note": S.get("note", "") if update else "", **({"removed": removed} if removed else {})}
@@ -300,6 +356,7 @@ def edit_statement(p: Project, iid: str, data: dict) -> dict:
         if isinstance(data.get("statement"), str) and data["statement"].strip() and data["statement"].strip() != x["statement"]:
             x["statement"], x["edited"] = data["statement"].strip(), True
             x["changed"] = changed_formulas(x["original"], x["statement"])
+            x["meaning"], x["meaning_note"] = "", ""      # the author's own wording: ours to report on no longer
         if data.get("dismiss"):                      # the question needs no answer: the statement stays as it is
             x["settled"] = True
     return _save_item(p, iid, change)
@@ -326,12 +383,16 @@ def answer_statement(p: Project, iid: str, answer: str) -> dict:
     if not new:
         raise ValueError("The statement could not be rewritten this time. Try again, or edit it yourself.")
     again = _none(extract_tag(res.text, "question"))
+    # The answer is the author's, but the wording around it is ours again: the second reader looks at it too.
+    said = meaning_of(run, {**x, "statement": new}) if meaning_check_needed({**x, "statement": new}) else \
+        {"meaning": "", "meaning_note": ""}
 
     def change(y: dict, S: dict) -> None:
         y.setdefault("asked", []).append({"question": y["question"], "answer": answer})
         y["statement"], y["answer"] = new, answer
         y["question"], y["settled"] = (again, False) if again else ("", True)
         y["changed"] = changed_formulas(y["original"], new)
+        y.update(said)
     return _save_item(p, iid, change)
 
 
