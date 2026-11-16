@@ -269,6 +269,11 @@ def math_bag(text: str) -> list[str]:
     return sorted(bag)
 
 
+def _prose_len(text: str) -> int:
+    """The length of the words alone, with every formula left out."""
+    return sum(len(c) for kind, c in split_math(text or "") if kind == "text")
+
+
 def _formulas_intact(old: str, new: str) -> bool:
     """The edit left the mathematics alone: the same formulas, each the same number of times. Only the
     punctuation that closes a displayed formula may differ."""
@@ -918,12 +923,22 @@ def cite_intro(p: Project, keys: list[str], instruction: str = "") -> dict:
     new = fix_keys(new, {k: library[k] for k in keys}, notes, fuzzy=False)        # then exactly the papers chosen
     new = re.sub(r"\\section\*?\{[^{}]*\}\s*", "", new).strip()
     new = _ref_sections(new, paper.get("blocks") or [])
-    if len(new) < 0.4 * len(old):
-        raise ValueError("The rewritten introduction came back much shorter than before, so it was not used. Try again.")
-    old_bag = math_bag(old)
-    added = [f for f in math_bag(new) if f not in old_bag]
+    # Measured on the prose, not on the whole text: the introduction is meant to lose the displayed formulas
+    # the body already states, and counting those would read a good rewrite as a truncated one.
+    if _prose_len(new) < 0.5 * _prose_len(old):
+        raise ValueError("The rewritten introduction came back with much less text than before, so it was not used. Try again.")
+    # The introduction may carry only mathematics the paper itself states, and may quote part of a formula:
+    # describing a result in words instead of displaying it means naming the powers and the intervals it is
+    # built from, so a formula passes when it occurs INSIDE one the paper states, not only when it matches one
+    # whole. Comparing whole formulas with the old introduction alone made every rewrite impossible. A formula
+    # invented outright, or one with a symbol changed, occurs nowhere in the paper and is still refused.
+    allowed = set(math_bag(old)) | set(math_bag(paper.get("abstract") or ""))
+    for b in paper.get("blocks") or []:
+        allowed |= set(math_bag(b.get("text") or ""))
+    added = [f for f in math_bag(new) if not any(f in stated for stated in allowed)]
     if added:
-        raise ValueError("The rewritten introduction changed or added formulas, so it was not used. Try again, or edit it yourself.")
+        raise ValueError("The rewritten introduction states mathematics that is nowhere in the paper, so it was "
+                         f"not used: {added[0][:120]}. Try again, or edit it yourself.")
     paper["intro"], paper["intro_source"] = new, "rewritten for your citations"
     ask = lambda role, system, user, **kw: router.chat(role, system, user, hooks=_hooks(p), **kw)
     paper["cite_checks"] = [c for c in paper.get("cite_checks", []) if c.get("where") != "Introduction"] \
