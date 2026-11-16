@@ -202,8 +202,15 @@ function labelNumber(label) {
   return n ? n.split(" ").pop() : (/^res:S\d+$/.test(label) ? "(the new one)" : "?");
 }
 function named(text, inPaper) {
-  /* Labels such as res:R3 are for the machine; a reader is shown "Theorem 3.3". */
-  return String(text || "").replace(/\b(?:res|def):[A-Za-z0-9_.\-]*[A-Za-z0-9]/g, (l) => labelName(l, inPaper) || (/^res:S\d+$/.test(l) ? "the new lemma" : l));
+  /* Labels such as res:R3 are for the machine; a reader is shown "Theorem 3.3". A label inside \ref, \eqref,
+     \label or \cite is that command's argument and not prose: renamed there, the command would point at a
+     name no label carries, and latexLite would print "?" where the number belongs. Those are set aside first. */
+  const held = [];
+  let s = String(text || "").replace(
+    /\\(?:eq)?ref\s*\{[^{}]*\}|\\label\s*\{[^{}]*\}|\\cite[a-zA-Z]*\s*(?:\[[^\]]*\])?\s*\{[^{}]*\}/g,
+    (m) => { held.push(m); return "\u0000" + (held.length - 1) + "\u0000"; });
+  s = s.replace(/\b(?:res|def):[A-Za-z0-9_.\-]*[A-Za-z0-9]/g, (l) => labelName(l, inPaper) || (/^res:S\d+$/.test(l) ? "the new lemma" : l));
+  return s.replace(/\u0000(\d+)\u0000/g, (m0, i) => held[+i]);
 }
 function citeRef(key) {
   /* How a reader sees a citation before the paper is set: the authors and the year, linked to the paper. */

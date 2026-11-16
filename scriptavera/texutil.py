@@ -8,8 +8,18 @@ from __future__ import annotations
 import re
 import unicodedata
 
+# Anything here is recognised as mathematics and handed to KaTeX. Anything NOT here, met on its own, falls
+# through as prose and reaches the page as its own source text -- which is how a \begin{multlined} block once
+# got printed verbatim in an introduction. So the inner environments are listed too: they belong inside a
+# display and a writer who leaves one bare has written doubtful LaTeX, but the reader should see mathematics
+# or a marked error, never the source. Nesting is unaffected: \[ ... \] is matched before any name, so an
+# environment inside a display is still part of that display.
+# Not listed on purpose: "subequations" (it contains whole equations of its own) and "tabular" (not
+# mathematics, and handled where figures and tables are).
 DISPLAY_ENVS = ("equation", "equation*", "align", "align*", "gather", "gather*", "multline", "multline*",
-                "eqnarray", "eqnarray*", "flalign", "flalign*", "alignat", "alignat*", "displaymath")
+                "eqnarray", "eqnarray*", "flalign", "flalign*", "alignat", "alignat*", "displaymath",
+                "multlined", "aligned", "alignedat", "gathered", "split", "cases", "dcases", "rcases",
+                "array", "matrix", "pmatrix", "bmatrix", "vmatrix", "Vmatrix", "Bmatrix", "smallmatrix")
 
 _ENV_ALT = "|".join(re.escape(e) for e in sorted(DISPLAY_ENVS, key=len, reverse=True))
 _MATH_RE = re.compile(

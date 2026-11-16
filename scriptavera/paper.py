@@ -521,6 +521,9 @@ def tex_to_html(text: str, ctx: dict, inline: bool = False) -> str:
     assembled = []
     figs = ctx.get("figs") or {}
     text = _FIG_RE.sub(lambda m: "" if inline else f"\n\n\x00F{m.group(1)}\x00\n\n", text or "")
+    # "subequations" only groups equations so LaTeX can number them a.b; nothing here numbers that way, and left
+    # in place the wrapper itself is not mathematics, so it would reach the page as its own source text.
+    text = re.sub(r"\\(?:begin|end)\{subequations\}[ \t]*\n?", "", text)
     for kind, c in split_math(text or ""):
         if kind == "text":
             assembled.append(c)

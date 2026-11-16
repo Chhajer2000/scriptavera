@@ -872,6 +872,27 @@ def more_titles(p: Project) -> dict:
     return paper
 
 
+_SEC_NUM = re.compile(r"(Sections?)[~\s]+(\d+)(?![\d.])")
+
+
+def _ref_sections(text: str, blocks: list[dict]) -> str:
+    """A section number typed into the introduction, turned into a reference to that section.
+
+    A typed number is right only until a section is added, removed or reordered, and nothing warns when it
+    stops being right. The sections carry labels, so the number is left for LaTeX to work out. A number that
+    matches no section is left alone rather than pointed somewhere wrong.
+    """
+    by_num = {b["num"]: b["label"] for b in blocks
+              if b.get("type") == "section" and b.get("num") and b.get("label")}
+    if not by_num:
+        return text
+
+    def repl(m: "re.Match") -> str:
+        lab = by_num.get(m.group(2))
+        return f"{m.group(1)}~\\ref{{{lab}}}" if lab else m.group(0)
+    return _SEC_NUM.sub(repl, text)
+
+
 def cite_intro(p: Project, keys: list[str], instruction: str = "") -> dict:
     """Rewrite the introduction so that it cites exactly the papers the author ticked. Facts about a paper come only
     from what was read of it; the paper's own results and every formula stay as they are."""
@@ -896,6 +917,7 @@ def cite_intro(p: Project, keys: list[str], instruction: str = "") -> dict:
     new = fix_keys(clean_fragment(res.text), library, notes)                      # near-miss keys of real papers
     new = fix_keys(new, {k: library[k] for k in keys}, notes, fuzzy=False)        # then exactly the papers chosen
     new = re.sub(r"\\section\*?\{[^{}]*\}\s*", "", new).strip()
+    new = _ref_sections(new, paper.get("blocks") or [])
     if len(new) < 0.4 * len(old):
         raise ValueError("The rewritten introduction came back much shorter than before, so it was not used. Try again.")
     old_bag = math_bag(old)

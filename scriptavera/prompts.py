@@ -1131,7 +1131,9 @@ You are given the introduction, the papers to cite (each with its citation KEY a
 Rules
 - Cite every chosen paper where it belongs, with \\cite{{KEY}}, in a sentence that says accurately what that paper does. Use only what its reading notes support. Add no claim about a paper that its notes do not support.
 - Remove every citation of a paper that is not among the chosen ones. Where a sentence was only about such a paper, remove the sentence; otherwise keep the sentence without the citation only if it is still true without it.
-- Keep everything else as it is: the statements of the paper's own results, every formula, the notation and the order of the argument.
+- Keep the mathematics exactly: never alter a formula, a hypothesis, a constant or a claim of the paper's own results, and never add one. Keep the order of the argument.
+- Where the introduction displays a formula that the body of the paper also states, replace the display with prose saying what that result establishes, named by its label, as in Proposition~\\ref{{res:R3}}. The reader meets the formula in the body, where its notation is already defined; printed in both places it also leaves two copies of one formula to keep in step. Where a result has several formulas, give their shape and their count, as in "closed-form expressions for the two linear and three quadratic basis integrals, each a rational function of the node spacing". Leave at most one display standing, and only a short one that is the headline of the whole paper.
+- Use the paper's own notation, as its statements write it: if they write $u(t_0) = u_0$ and $\\int_{{t_0}}^{{t_n}}$, the introduction does not write $u(0) = u_0$ or $\\int_0^t$, not even in its opening sentences.
 - If the author gives an instruction, follow it within these rules.
 - Professional mathematical English. Paragraphs only.
 
