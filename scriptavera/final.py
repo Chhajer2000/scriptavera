@@ -125,7 +125,7 @@ def build_outputs(p: Project, paper: dict, compile_now: bool = True) -> dict:
         marked = paperlib.build_tex(paper, refs, prof, markers=True)
         res = paperlib.compile_pdf(marked, files=extra)
         if res["pdf"] and res.get("overfull"):        # formulas wider than the page: broken over lines, the standard way
-            for _ in range(3):
+            for _ in range(6):            # one line is broken per formula per round; a very wide one needs several
                 if not paperlib.break_overfull(paper, marked, res["overfull"]):
                     break
                 marked = paperlib.build_tex(paper, refs, prof, markers=True)

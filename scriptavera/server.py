@@ -2097,8 +2097,18 @@ async def index(request: Request):
     return _page("index.html")
 
 
+async def privacy(request: Request):
+    return _page("privacy.html")
+
+
+async def terms(request: Request):
+    return _page("terms.html")
+
+
 routes = [
     Route("/", index),
+    Route("/privacy", privacy),
+    Route("/terms", terms),
     Route("/api/meta", api_meta),
     Route("/api/source", api_source),
     Route("/api/shutdown", api_shutdown, methods=["POST"]),
