@@ -50,13 +50,54 @@ function when(t) {
   if (d.toDateString() === y.toDateString()) return `yesterday ${hm}`;
   return d.toLocaleDateString([], { day: "numeric", month: "short", year: d.getFullYear() === now.getFullYear() ? undefined : "numeric" }) + " " + hm;
 }
+/* Icons for the file tree and its tools: drawn, not characters, so they read as icons and not as stray dots. */
+const ICON = (() => {
+  const s = (d) => `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${d}</svg>`;
+  return {
+    file: s('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/>'),
+    image: s('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/>'),
+    folder: s('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'),
+    chev: s('<path d="M9 6l6 6-6 6"/>'),
+    newfile: s('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M12 11v6M9 14h6"/>'),
+    newfolder: s('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10v6M9 13h6"/>'),
+    upload: s('<path d="M12 15V4M7 9l5-5 5 5"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>'),
+  };
+})();
 function mathText(t) {             /* a title with $...$: the mathematics typeset by KaTeX, the rest as text */
   return String(t || "").split(/(\$[^$]+\$)/).map((part) => {
     if (/^\$[^$]+\$$/.test(part) && window.katex) {
       try { return katex.renderToString(part.slice(1, -1), { throwOnError: false, strict: "ignore", output: "html" }); } catch (e) { /* as text */ }
     }
-    return esc(part);
+    return esc(part).replace(/---/g, "\u2014").replace(/--/g, "\u2013").replace(/~/g, "\u00a0");
   }).join("");
+}
+/* The opening of a statement, for the outline. Its mathematics is typeset as in the titles -- stripping the
+   commands made "Let $n \\ge 2$" read "Let n 2" -- and it is never cut in the middle of a formula. Displayed
+   formulas, labels and line breaks have no place in a one-line list and are left out. */
+function preview(s, room = 84) {
+  let t = String(s || "")
+    .replace(/\\\[[\s\S]*?\\\]|\$\$[\s\S]*?\$\$/g, " \u2026 ")
+    .replace(/\\begin\{(equation|align|gather|multline|multlined|aligned|split|eqnarray|flalign|alignat)\*?\}[\s\S]*?\\end\{\1\*?\}/g, " \u2026 ")
+    .replace(/\\(?:label|ref|eqref|cite[a-z]*)\{[^{}]*\}/g, "")
+    .replace(/\\\\/g, " ")
+    .replace(/\s+/g, " ").trim();
+  /* outside its formulas a statement is prose: \emph{x} reads as x, and any other command is dropped rather
+     than shown as source -- the formulas themselves are left whole, to be typeset */
+  t = t.split(/(\$[^$]+\$)/).map((part) => /^\$[^$]+\$$/.test(part) ? part
+    : part.replace(/\\(?:emph|textbf|textit|textrm|text|mathrm)\s*\{([^{}]*)\}/g, "$1").replace(/\\[A-Za-z]+\*?\s*/g, "").replace(/[{}]/g, "")).join("").replace(/\s+/g, " ").trim();
+  if (t.length > room) {
+    let cut = room, open = false;
+    for (let i = 0; i < cut; i++) if (t[i] === "$" && t[i - 1] !== "\\") open = !open;
+    if (open) {                                     // the cut falls inside a formula: end after it, or before it
+      const close = t.indexOf("$", cut);
+      cut = close >= 0 && close - room < 50 ? close + 1 : t.lastIndexOf("$", cut - 1);
+    } else {
+      const sp = t.lastIndexOf(" ", cut);
+      if (sp > room - 24) cut = sp;
+    }
+    t = t.slice(0, Math.max(0, cut)).trimEnd() + "\u2026";
+  }
+  return mathText(t);
 }
 const isText = (p) => /\.(tex|bib|sty|cls|bst|bbx|cbx|cfg|def|clo|ltx|txt|md|csv|dat|tikz)$/i.test(p);
 
@@ -202,11 +243,11 @@ function drawTree() {
     if (it.kind === "dir") {
       const shut = E.folded.has(it.path);
       rows.push(`<div class="row dir" role="treeitem" aria-expanded="${!shut}" tabindex="0" data-act="fold" data-path="${esc(it.path)}" style="padding-left:${pad}px">
-        <span class="ic">${shut ? "▸" : "▾"}</span><span class="nm">${esc(name)}</span>
+        <span class="chev ${shut ? "" : "open"}">${ICON.chev}</span><span class="ic">${ICON.folder}</span><span class="nm">${esc(name)}</span>
         <span class="acts"><span data-act="rename" data-path="${esc(it.path)}" title="Rename">rename</span><span data-act="delete" data-path="${esc(it.path)}" title="Delete">delete</span></span></div>`);
     } else {
       rows.push(`<div class="row ${E.current === it.path ? "on" : ""}" role="treeitem" tabindex="0" data-act="open" data-path="${esc(it.path)}" style="padding-left:${pad}px">
-        <span class="ic">${it.kind === "binary" ? "▫" : "·"}</span><span class="nm">${esc(name)}</span>${dirty ? '<span class="dot" title="Not saved yet"></span>' : ""}
+        <span class="chev"></span><span class="ic">${it.kind === "binary" ? ICON.image : ICON.file}</span><span class="nm">${esc(name)}</span>${dirty ? '<span class="dot" title="Not saved yet"></span>' : ""}
         <span class="acts">${it.path === "main.tex" ? "" : `<span data-act="rename" data-path="${esc(it.path)}" title="Rename">rename</span><span data-act="delete" data-path="${esc(it.path)}" title="Delete">delete</span>`}</span></div>`);
     }
   }
@@ -666,7 +707,7 @@ function drawOutline() {
   $("#outline").innerHTML = items.map((x) => {
     const sec = x.kind === "section", sub = x.kind === "subsection" || x.kind === "subsubsection";
     const label = sec || sub ? (x.number || "") : `${esc(abbrev(x.name || x.env || ""))} ${esc(x.number || "")}`;
-    const text = sec || sub ? mathText(x.title) : (x.title ? mathText(x.title) : `<em>${esc(plain(x.snippet || "").slice(0, 70))}</em>`);
+    const text = sec || sub ? mathText(x.title) : (x.title ? mathText(x.title) : `<em>${preview(x.snippet || "")}</em>`);
     return `<button class="o ${sec ? "sec" : sub ? "sub" : ""}" data-act="goto" data-path="${esc(x.path)}" data-line="${x.line}" title="${esc((x.name || x.kind) + " " + (x.number || ""))}${x.label ? " (" + esc(x.label) + ")" : ""}">
       <span class="n">${label}</span><span class="t">${text}</span></button>`;
   }).join("") || `<div class="empty-o">Sections and statements appear here.</div>`;
@@ -1271,12 +1312,25 @@ document.addEventListener("drop", (ev) => { if (ev.target.closest("#side")) { ev
   else if (E.info.engine) compile();
 })();
 
+for (const [act, icon] of [["newfile", "newfile"], ["newfolder", "newfolder"], ["upload", "upload"]]) {
+  const b = document.querySelector(`.side-tools [data-act="${act}"]`);
+  if (b && !b.innerHTML.trim()) b.innerHTML = ICON[icon];
+}
+
 /* While a panel scrolls the pointer stands still but its rows move under it, so row after row would light up
    as though it were being pointed at. Hover is muted until the pointer moves again. */
+/* Only the author's own scrolling counts -- the wheel, a finger, the scrolling keys. Listening for "scroll" also
+   caught the page scrolling itself (a file opened, a view restored), which left hover muted with no hand on the
+   mouse, and the muting then hid the highlight of the item the author had just chosen. */
 let hoverMuted = false;
-document.addEventListener("scroll", () => {
-  if (!hoverMuted) { hoverMuted = true; document.body.classList.add("scrolling"); }
-}, { capture: true, passive: true });
+const muteHover = () => { if (!hoverMuted) { hoverMuted = true; document.body.classList.add("scrolling"); } };
+document.addEventListener("wheel", muteHover, { capture: true, passive: true });
+document.addEventListener("touchmove", muteHover, { capture: true, passive: true });
+document.addEventListener("keydown", (ev) => {
+  if (!/^(PageUp|PageDown|Home|End| )$/.test(ev.key)) return;
+  if (ev.target.closest && ev.target.closest("input, textarea, select, [contenteditable], .CodeMirror")) return;
+  muteHover();
+}, true);
 document.addEventListener("pointermove", () => {
   if (hoverMuted) { hoverMuted = false; document.body.classList.remove("scrolling"); }
 }, { passive: true });

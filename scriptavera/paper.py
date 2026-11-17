@@ -1466,6 +1466,62 @@ def break_overfull(paper: dict, marked: str, overfull: list[dict]) -> bool:
     return changed
 
 
+# LaTeX source that reached the page as text. A typeset PDF has no backslash commands in its text: TeX turns every
+# command into what it means. One a reader can see is a command TeX printed instead of running -- after an error it
+# recovered from, or in a passage it took for plain text. "[theorem]" is what a \newtheorem that failed leaves behind.
+_PRINTED_LATEX = re.compile(r"\\(?:begin|end)\s*\{[A-Za-z*]+\}|\\[A-Za-z]{2,}|\[\s*theorem\s*\]")
+
+
+def pdf_leaks(pdf: bytes) -> list[dict]:
+    """Every place where the PDF shows LaTeX source as text: [{page, token, text}]. Empty when it cannot be read."""
+    out: list[dict] = []
+    try:
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(pdf)
+    except Exception:  # noqa: BLE001 - no reader, no check: never a false alarm
+        return out
+    try:
+        for i in range(len(doc)):
+            tp = doc[i].get_textpage()
+            text = tp.get_text_range()
+            tp.close()
+            for m in _PRINTED_LATEX.finditer(text):
+                around = text[max(0, m.start() - 10):m.end() + 40]
+                out.append({"page": i + 1, "token": m.group(0), "text": " ".join(around.split())})
+    finally:
+        doc.close()
+    return out[:20]
+
+
+def display_core(tex: str) -> str:
+    """A displayed formula with everything taken away that only says where its lines break: the environments that
+    hold the lines, line ends, alignment points, the spaces after them, the invisible brackets a break needs and
+    the sizes of brackets. Two formulas with the same core are the same mathematics broken differently."""
+    t = re.sub(r"\\(?:begin|end)\{(?:aligned|alignedat|split|multlined|gathered|align|flalign|alignat|gather|multline|"
+               r"equation|eqnarray)\*?\}(?:\{\d+\})?", "", tex or "")
+    t = re.sub(r"\\(?:notag|nonumber|displaystyle)(?![A-Za-z])", "", t)
+    t = re.sub(r"\\(?:left|right|[bB]igg?[lrm]?)\s*\.", "", t)
+    t = re.sub(r"\\(?:left|right|[bB]igg?[lrm]?)(?![A-Za-z])", "", t)
+    t = re.sub(r"\\\\(?:\[[^\]]*\])?|&|\\(?:quad|qquad)(?![A-Za-z])|\\[,;:! ]|~|\s+", "", t)
+    return t
+
+
+def only_breaks_changed(old: str, new: str) -> bool:
+    """The passage says exactly what it said: the same words, the same inline formulas, and every displayed formula
+    the same mathematics, wherever its lines now break."""
+    def parts(t: str) -> tuple:
+        prose, inline, shown = [], [], []
+        for kind, c in split_math(t or ""):
+            if kind == "text":
+                prose.append(c)
+            elif kind == "inline":
+                inline.append(re.sub(r"\s+", "", c))
+            else:
+                shown.append(display_core(c))
+        return " ".join(" ".join(prose).split()), inline, shown
+    return parts(old) == parts(new)
+
+
 def block_at_line(tex: str, line: int) -> str | None:
     """Which block produced a given line of the marked-up LaTeX file."""
     current = None

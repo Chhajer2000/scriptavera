@@ -1139,6 +1139,14 @@ Rules
 
 Output only the LaTeX text of the revised introduction: no commentary, no code fences."""
 
+DISPLAY_BREAK = """A passage of a mathematics paper has displayed formulas too wide for the page: they run into the margin of a text column about 4.5 inches (32 em) wide. Break each of them over lines the way a careful author does by hand, and change nothing else.
+
+- Break at a relation (=, \\le, and so on) or before a binary + or -, never inside a fraction, a root, a subscript or a pair of brackets that is not split with \\left and \\right. Inside \\[ ... \\] use \\begin{aligned} ... \\end{aligned}; in an align* or multline* that the passage already has, add the line breaks there. Align continued lines at the relation, with & and \\quad, as usual.
+- Where a break falls between a \\left( and its \\right), end the line with \\right. and begin the next with \\left.; or give the brackets a fixed size with \\bigl, \\Bigl, \\biggl and \\bigr, \\Bigr, \\biggr instead.
+- Do not change one symbol of the mathematics: the same terms, in the same order, with the same signs, indices, exponents and labels. Do not change a word of the prose around the formulas.
+
+Return the complete passage in LaTeX, with no commentary and no code fences."""
+
 LATEX_FIX = """The LaTeX fragment below fails to compile. Fix the syntax only. Do not change any wording or any mathematics: only repair what the error message points to (an unbalanced brace or dollar sign, an environment that is not closed, a misspelled command, a stray special character). Return the complete corrected fragment and nothing else: no commentary, no code fences."""
 
 REVISE = """You revise one passage of a mathematics paper at the author's request. Apply the author's instruction and nothing more. Unless the instruction says otherwise, keep every formula exactly as it is and keep all \\cite, \\label and \\ref commands. Return only the revised LaTeX for this passage: no commentary, no code fences."""

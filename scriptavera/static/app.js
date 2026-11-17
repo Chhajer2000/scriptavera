@@ -85,13 +85,15 @@ function macros() {
    clientWidth forces it to be computed again, so doing both per formula costs one reflow per formula
    and a long paper then takes seconds to lay out. Here every size is cleared first, every width is
    read next (one reflow for the whole page), and the new sizes are written last. */
-function fitMath(root) {
-  const els = $$(".math.display", root);
+function fitMath(root, only) {
+  const els = only || $$(".math.display", root);
   if (!els.length) return;
   for (const el of els) el.style.fontSize = "";
   const sizes = els.map((el) => {
     const w = el.clientWidth;
-    if (!w) return null;                              // hidden: fitted when shown
+    if (!w) { el.dataset.unfit = "1"; return null; }  // hidden: fitted when shown
+    delete el.dataset.unfit;
+    el.dataset.fitw = String(w);
     const k = el.firstElementChild;
     const need = k ? k.scrollWidth : el.scrollWidth;
     /* the notes as read keep one size of letters: a formula wider than the column is made a little smaller at most,
@@ -105,20 +107,55 @@ const refit = (ms) => { clearTimeout(fitTimer); fitTimer = setTimeout(() => fitM
 window.addEventListener("resize", () => refit(150));
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => refit(0));       // widths change once KaTeX's fonts load
 /* Only a formula that was added needs fitting: menus, toasts and dialogs must not refit the whole paper. */
+/* Only a formula added and never fitted is fitted here. Every redraw used to refit every formula on the page, and a
+   paper kept as it was across a redraw (see render) would otherwise be measured again in full each time. */
+let fitPending = new Set(), fitAddTimer = null;
 new MutationObserver((ms) => {
   for (const m of ms) {
     for (const n of m.addedNodes) {
-      if (n.nodeType !== 1) continue;
-      if ((n.matches && n.matches(".math.display")) || (n.querySelector && n.querySelector(".math.display"))) return refit(60);
+      if (n.nodeType !== 1 || !n.isConnected) continue;
+      const found = n.matches && n.matches(".math.display") ? [n] : (n.querySelectorAll ? n.querySelectorAll(".math.display") : []);
+      for (const el of found) if (!el.dataset.fitw) fitPending.add(el);
     }
   }
+  if (!fitPending.size) return;
+  clearTimeout(fitAddTimer);
+  fitAddTimer = setTimeout(() => {
+    const els = [...fitPending].filter((e) => e.isConnected && !e.dataset.fitw);
+    fitPending = new Set();
+    if (els.length) fitMath(document, els);
+  }, 60);
 }).observe(document.documentElement, { childList: true, subtree: true });
+/* a formula inside a closed <details> could not be measured; it is fitted when it is opened */
+document.addEventListener("toggle", (ev) => {
+  if (!ev.target.open) return;
+  const els = $$(".math.display[data-unfit]", ev.target);
+  if (els.length) fitMath(ev.target, els);
+}, true);
+/* A signature of a long string: tells a redraw whether the paper it would show is the one already on the page. */
+let sigMemo = ["", "0"];
+function sigOf(s) {
+  s = String(s || "");
+  if (s === sigMemo[0]) return sigMemo[1];
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  sigMemo = [s, (h >>> 0).toString(36) + "." + s.length];
+  return sigMemo[1];
+}
 /* While the page scrolls the pointer stands still but the text moves under it, so every paragraph in
    turn would light up as though it had been selected. Hover is muted until the pointer moves again. */
+/* Only the author's own scrolling counts -- the wheel, a finger, the scrolling keys. Listening for "scroll" also
+   caught the page scrolling itself (a file opened, a view restored), which left hover muted with no hand on the
+   mouse, and the muting then hid the highlight of the item the author had just chosen. */
 let hoverMuted = false;
-document.addEventListener("scroll", () => {
-  if (!hoverMuted) { hoverMuted = true; document.body.classList.add("scrolling"); }
-}, { capture: true, passive: true });
+const muteHover = () => { if (!hoverMuted) { hoverMuted = true; document.body.classList.add("scrolling"); } };
+document.addEventListener("wheel", muteHover, { capture: true, passive: true });
+document.addEventListener("touchmove", muteHover, { capture: true, passive: true });
+document.addEventListener("keydown", (ev) => {
+  if (!/^(PageUp|PageDown|Home|End| )$/.test(ev.key)) return;
+  if (ev.target.closest && ev.target.closest("input, textarea, select, [contenteditable], .CodeMirror")) return;
+  muteHover();
+}, true);
 document.addEventListener("pointermove", () => {
   if (hoverMuted) { hoverMuted = false; document.body.classList.remove("scrolling"); }
 }, { passive: true });
@@ -127,13 +164,18 @@ function tex(src, display) {
   catch (e) { return `<code>${esc(src)}</code>`; }
 }
 function renderMath(root) {
+  const fresh = [];
   $$(".math[data-tex]", root).forEach((el) => {
     if (el.dataset.done) return;
     try { katex.render(el.dataset.tex, el, { displayMode: el.classList.contains("display"), throwOnError: false, strict: "ignore", output: "html", macros: macros() }); }
     catch (e) { el.textContent = el.dataset.tex; }
     el.dataset.done = "1";
+    if (el.classList.contains("display")) fresh.push(el);
   });
-  fitMath(root);
+  /* only what was typeset just now, and what was hidden when last measured: a formula kept from before is already
+     the right size, and measuring all of a long paper on every redraw is what made scrolling stall */
+  const els = fresh.concat($$(".math.display[data-unfit]", root).filter((e) => !fresh.includes(e)));
+  if (els.length) fitMath(root, els);
 }
 const squash = (s) => String(s || "").replace(/\$/g, "").replace(/\s+/g, "");
 
@@ -2726,7 +2768,7 @@ function viewDraftReview() {
         <div class="row" style="margin-top:6px"><button class="btn primary small" data-act="dsave" data-v="intro" ${S.busy ? "disabled" : ""}>Save</button><button class="btn small" data-act="dcancel">Cancel</button></div>`
       : `<div class="tex-block serif">${latexLite(numRefs(it.text || ""))}</div><button class="btn small" data-act="dedit" data-v="intro" style="margin-top:6px">Edit the introduction</button>`}
         ${(it.notes || []).map((n) => `<div class="flag small">${rich(n)}</div>`).join("")}</div>
-      <div class="sec"><h2>The whole draft</h2><details class="more" open><summary>Read the first draft</summary><div id="draftHost">${dr.html}</div></details></div></div></div>
+      <div class="sec"><h2>The whole draft</h2><details class="more" open><summary>Read the first draft</summary><div id="draftHost" data-sig="${sigOf(dr.html)}">${dr.html}</div></details></div></div></div>
     <div class="gatebar"><span class="tb-space"></span>
       <button class="btn primary big" data-act="dapprove" ${S.busy || running() || S.dEdit ? "disabled" : ""}>${S.busy === "dapprove" ? "Saving…" : "Approve the first draft"}</button></div>`;
 }
@@ -2739,7 +2781,7 @@ function writingStageBody(id) {
   if (id === "draft" && S.b.draft) {
     return `<div class="sec"><h2>First draft</h2><p>Your statements and proofs, joined by short passages, with the introduction and the abstract written from the finished paper.</p>
       ${w.abstract ? `<div class="dlabel">Abstract</div><div class="tex-block serif">${latexLite(w.abstract)}</div>` : ""}
-      <details class="more" style="margin-top:14px"><summary>Read the first draft</summary><div id="draftHost">${S.b.draft.html}</div></details></div>`;
+      <details class="more" style="margin-top:14px"><summary>Read the first draft</summary><div id="draftHost" data-sig="${sigOf(S.b.draft.html)}">${S.b.draft.html}</div></details></div>`;
   }
   return "";
 }
@@ -3200,7 +3242,7 @@ function viewDecide() {
     </aside>
     <section class="dq-detail" id="dqdetail">
       ${x.status === "done" ? `<div class="banner blue" style="margin-bottom:12px"><div class="grow">You decided this already. Deciding again makes the final version again; edits made in the paper view since then are lost.</div></div>` : ""}
-      ${cur ? decideDetail(cur) : `<h2 class="dq-title">The first draft</h2><div class="sheet"><div class="sec"><div id="draftHost">${S.b.draft ? S.b.draft.html : ""}</div></div></div>`}
+      ${cur ? decideDetail(cur) : `<h2 class="dq-title">The first draft</h2><div class="sheet"><div class="sec"><div id="draftHost" data-sig="${sigOf(S.b.draft ? S.b.draft.html : "")}">${S.b.draft ? S.b.draft.html : ""}</div></div></div>`}
     </section></div>
     <div class="gatebar"><span id="deccount">${c.done} of ${c.need} decided</span><span class="muted small" style="margin-left:10px">${c.need - c.done ? "Remarks are optional." : ""}</span><span class="tb-space"></span>
       <button class="btn primary big" data-act="decide" ${S.busy || running() ? "disabled" : ""}>${S.busy === "decide" ? "Saving…" : "Write the final version"}</button></div>`;
@@ -3435,7 +3477,7 @@ function viewPaper() {
     ["journal", "Journal", openReq], ["latex", "LaTeX", texIssues], ["activity", "Who did what", 0]];
   let body = "";
   if (S.tab === "paper") {
-    body = `<div class="pv"><div id="paperHost">${P.html}</div><div class="pv-side">${S.edit ? editorPanel() : sidePanel(P, a, auditIssues, badCites, texIssues, openReq)}</div></div>`;
+    body = `<div class="pv"><div id="paperHost" data-sig="${sigOf(P.html)}">${P.html}</div><div class="pv-side">${S.edit ? editorPanel() : sidePanel(P, a, auditIssues, badCites, texIssues, openReq)}</div></div>`;
   } else if (S.tab === "revision") {
     body = revisionTab(P, rv);
   } else if (S.tab === "checks") {
@@ -3817,6 +3859,27 @@ function onPaper() {
 }
 
 /* ---------------------------------------------------------------- render */
+/* Make `live` show what `next` holds while `keep` -- the typeset paper, inside `live` -- stays exactly where it
+   is: everything around it is replaced, it is never taken out. Taking it out even for a moment made the browser
+   lay out all its formulas again (about a tenth of a second for a paper of 260 formulas, on every redraw).
+   `twin` is the place in `next` where it belongs. False, with nothing changed, if the two do not line up. */
+function buildAround(live, next, keep, twin) {
+  const up = (el, top) => { const a = []; for (let n = el; n && n !== top; n = n.parentNode) a.unshift(n); return a; };
+  const lp = up(keep, live), np = up(twin, next);
+  if (lp.length !== np.length || lp.some((n, i) => n.nodeName !== np[i].nodeName)) return false;
+  for (let d = 0; d < lp.length; d++) {
+    const L = d ? lp[d - 1] : live, N = d ? np[d - 1] : next, lc = lp[d], nc = np[d];
+    const kids = [...N.childNodes], at = kids.indexOf(nc);
+    for (const k of [...L.childNodes]) if (k !== lc) L.removeChild(k);
+    for (const k of kids.slice(0, at)) L.insertBefore(k, lc);
+    for (const k of kids.slice(at + 1)) L.appendChild(k);
+    if (d < lp.length - 1) {                        // the elements around the paper take their new attributes
+      for (const a of [...lc.attributes]) if (!nc.hasAttribute(a.name)) lc.removeAttribute(a.name);
+      for (const a of [...nc.attributes]) if (lc.getAttribute(a.name) !== a.value) lc.setAttribute(a.name, a.value);
+    }
+  }
+  return true;
+}
 function render() {
   if (!S.meta) return;
   if (S.b && S.view !== "home" && !stageInfo(S.view)) S.view = autoView();       // an address of a step that does not exist
@@ -3847,7 +3910,18 @@ function render() {
   const cols = ["rvpanel", "rvtext", "rvhand"].map((id) => { const e = document.getElementById(id); return [id, e ? e.scrollTop : 0]; });
   const act = document.activeElement, focusId = act && act.id && main.contains(act) && /^(TEXTAREA|INPUT)$/.test(act.tagName) ? act.id : "";
   const sel = focusId ? [act.selectionStart, act.selectionEnd] : null;
-  main.innerHTML = h;
+  /* A paper on the page that the redraw would show unchanged is kept, already typeset. Every redraw -- and the
+     server asks for one each time anything in the background moves on -- used to throw the whole paper away and
+     typeset every formula again, which froze the page for as long as that took, while the author was scrolling. */
+  const kept = $("#paperHost[data-sig], #draftHost[data-sig]", main);
+  let merged = false;
+  if (kept) {
+    const next = document.createElement("div");
+    next.innerHTML = h;
+    const twin = next.querySelector("#" + kept.id);
+    if (twin && twin.dataset.sig === kept.dataset.sig) merged = buildAround(main, next, kept, twin);
+  }
+  if (!merged) main.innerHTML = h;
   main.dataset.view = S.view + "|" + S.pid + "|" + S.tab;
   main.scrollTop = same ? keep : 0;
   if (same) cols.forEach(([id, y]) => { const e = document.getElementById(id); if (e) e.scrollTop = y; });
@@ -3859,6 +3933,7 @@ function render() {
   drawLog();
   if (S.view === "new" && S.form && S.form.files && S.form.files.length) renderUploadPreview();
   if (onPaper() && S.tab === "latex") loadTex();
+  $$(".paper [data-block].on, .paper [data-part].on", main).forEach((e) => e.classList.remove("on"));
   if (S.edit) { const el = $(`.paper [data-block="${S.edit.target}"], .paper [data-part="${S.edit.target}"]`); if (el) el.classList.add("on"); }
 }
 function zoomHand(d) {

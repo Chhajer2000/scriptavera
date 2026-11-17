@@ -495,6 +495,159 @@ def title_brief(d: dict, abstract: str) -> str:
             + f"\n\nTHE PROBLEM ADDRESSED (this is not a title)\n{d.get('problem', '')}")
 
 
+_KIND_ORDER = {"error": 0, "leak": 1, "wide": 2}
+
+
+def _passage(paper: dict, bid: str) -> tuple[str, dict | None]:
+    """The LaTeX of one passage and the block holding it (None for the introduction and the abstract)."""
+    if bid in ("intro", "abstract"):
+        return paper.get(bid) or "", None
+    blk = next((b for b in paper.get("blocks", []) if b.get("id") == bid), None)
+    return (blk.get("text") or "", blk) if blk else ("", None)
+
+
+def passage_name(paper: dict, bid: str) -> str:
+    """What a reader calls a passage: "Proposition 3.3", "the proof of Proposition 3.3", "Section 2"."""
+    if bid in ("intro", "abstract"):
+        return {"intro": "the introduction", "abstract": "the abstract"}[bid]
+    blocks = paper.get("blocks", [])
+    i = next((k for k, b in enumerate(blocks) if b.get("id") == bid), None)
+    if i is None:
+        return "a passage of the paper"
+    b = blocks[i]
+    named = lambda x: f"{paperlib.THEOREM_ENVS.get(x.get('env'), (x.get('env') or 'Result').capitalize())} {x['num']}"
+    if b["type"] == "env" and b.get("num"):
+        return named(b)
+    if b["type"] == "proof":
+        prev = next((x for x in reversed(blocks[:i]) if x["type"] == "env" and x.get("num")), None)
+        return f"the proof of {named(prev)}" if prev else "a proof"
+    sec = next((x for x in reversed(blocks[:i + 1]) if x["type"] == "section" and x.get("num")), None)
+    return f"the text of Section {sec['num']}" if sec else "the text before the first section"
+
+
+def _block_with(paper: dict, token: str) -> str:
+    """Which passage has `token` in its prose, outside its formulas: that is where printed LaTeX comes from."""
+    for bid in ["intro", "abstract"] + [b.get("id") for b in paper.get("blocks", []) if b.get("id")]:
+        text, _ = _passage(paper, bid)
+        if any(kind == "text" and token in c for kind, c in split_math(text)):
+            return bid
+    return ""
+
+
+def latex_problems(p: Project, paper: dict) -> list[dict]:
+    """Everything LaTeX found wrong with the built paper, each tied to the passage it comes from where it can be:
+    errors TeX stopped on, formulas still wider than the page after the rule-based breaking, and LaTeX source
+    printed into the PDF as text. "block" is empty for what no passage can repair (the preamble, a missing file)."""
+    c = paper.get("compile") or {}
+    if not c.get("engine"):
+        return []
+    known = {"intro", "abstract"} | {b.get("id") for b in paper.get("blocks", []) if b.get("id")}
+    out: list[dict] = []
+    for e in c.get("errors") or []:
+        out.append({"kind": "error", "block": e.get("block") if e.get("block") in known else "", "message": e["message"]})
+    if not c.get("ok"):
+        for item in paper.get("lint") or []:
+            if item.get("block") in known and "marker" not in item["message"]:
+                out.append({"kind": "error", "block": item["block"], "message": item["message"]})
+    for n in c.get("notes") or []:
+        if n.get("line"):
+            out.append({"kind": "wide", "block": n.get("block") if n.get("block") in known else "", "message": n["message"]})
+    pdf = p.dir / "out" / "paper.pdf"
+    if pdf.exists():
+        for leak in paperlib.pdf_leaks(pdf.read_bytes()):
+            out.append({"kind": "leak", "block": _block_with(paper, leak["token"]),
+                        "message": f"LaTeX printed as text on page {leak['page']} instead of being typeset: “{leak['text']}”"})
+    seen, uniq = set(), []
+    for x in sorted(out, key=lambda x: _KIND_ORDER.get(x["kind"], 9)):
+        key = (x["kind"], x["block"], x["message"][:80])
+        if key not in seen:
+            seen.add(key)
+            uniq.append(x)
+    return uniq
+
+
+def _repair_passage(run: Run, paper: dict, item: dict) -> bool:
+    """One passage given to the model with what is wrong in it. The answer is kept only if it changed nothing but
+    what it was asked to: the syntax, or where a formula breaks over lines."""
+    bid = item["block"]
+    src, blk = _passage(paper, bid)
+    if not src.strip():
+        return False
+    if item["kind"] == "wide":
+        system, user = prompts.DISPLAY_BREAK, f"WHAT IS WRONG\n{item['message']}\n\nPASSAGE\n{src}"
+        keep = lambda new: paperlib.only_breaks_changed(src, new)
+        effort = "medium"
+    else:
+        system, user = prompts.LATEX_FIX.format(), f"ERROR: {item['message']}\n\nFRAGMENT:\n{src}"
+        keep = lambda new: len(check_balance(new)) <= len(check_balance(src)) and _same_but_syntax(src, new)
+        effort = "low"
+    try:
+        res = run.ask("reason", system, user, max_out=int(est_tokens(src) * 1.4) + 500, paper=True, effort=effort,
+                      label=f"Fix the LaTeX of {bid}", temperature=0.0)
+    except LLMError as e:
+        if passing(e):
+            raise
+        return False
+    new = clean_fragment(res.text)
+    if not new or new.strip() == src.strip() or not keep(new):
+        return False
+    if blk is None:
+        paper[bid] = new
+    else:
+        blk["text"] = new
+    return True
+
+
+def settle_latex(run: Run, p: Project, paper: dict, rounds: int = 3) -> dict:
+    """Build the paper and repair what LaTeX finds wrong with it, before the author is shown it.
+
+    Each round builds, gathers every problem that belongs to a passage, and gives each such passage to the model
+    once, with what is wrong. What still stands after the last round -- or belongs to no passage, so no rewrite
+    can reach it -- is kept in paper["compile"]["unresolved"] and reported as an error at this step and the next.
+    Nothing is passed over in silence: a paper LaTeX complains about is never shown as if it were finished.
+    """
+    problems: list[dict] = []
+    for rnd in range(rounds + 1):
+        paper = build_outputs(p, paper)
+        problems = latex_problems(p, paper)
+        todo, done = [], set()
+        for x in problems:
+            if x["block"] and x["block"] not in done:
+                done.add(x["block"])
+                todo.append(x)
+        if not todo or rnd == rounds:
+            break
+        run.log(f"LaTeX check: {len(problems)} problem(s); repairing {len(todo)} passage(s), round {rnd + 1} of {rounds}.")
+        fixed = sum(1 for x in todo[:10] if _repair_passage(run, paper, x))
+        if not fixed:
+            break
+    report: list[dict] = []
+    wide: dict[str, list[float]] = {}
+    for x in problems:
+        if x["kind"] == "wide" and x["block"]:
+            m = re.search(r"([\d.]+)pt", x["message"])
+            wide.setdefault(x["block"], []).append(float(m.group(1)) if m else 0.0)
+        else:
+            where = passage_name(paper, x["block"]) if x["block"] else "outside any passage (in the program's own LaTeX)"
+            report.append({**x, "message": f"In {where}: {x['message']}"})
+    for bid, pts in wide.items():
+        n = len(pts)
+        report.append({"kind": "wide", "block": bid, "message":
+                       f"In {passage_name(paper, bid)}: {n} formula{'s' if n != 1 else ''} still run{'s' if n == 1 else ''} into "
+                       f"the margin (the widest by {max(pts):.0f}pt, about {max(pts) / 72:.1f} inch). Break "
+                       f"{'it' if n == 1 else 'them'} over lines in the editor, or ask for the passage to be rewritten."})
+    paper.setdefault("compile", {})["unresolved"] = report
+    p.save("paper", paper)
+    if report:
+        run.log(f"LaTeX check: {len(report)} problem(s) could not be repaired automatically. They are listed below and "
+                "in the paper view; the paper is not finished until they are put right.", "warn")
+        for x in report[:8]:
+            run.log(x["message"], "warn")
+    elif (paper.get("compile") or {}).get("engine"):
+        run.log("LaTeX check: the paper compiles with no errors, no formula wider than the page and no LaTeX printed as text.")
+    return paper
+
+
 def stage_assemble(run: Run) -> None:
     p = run.p
     body = p.load("body", {})
@@ -639,43 +792,8 @@ def stage_assemble(run: Run) -> None:
     }
     p.save("revision", paper["revision"])
     run.log("Typography: " + (", ".join(f"{v} {k}" for k, v in counts.items() if v) or "nothing to correct") + ".")
-    run.progress(5, 6, "building the files")
-    for rnd in range(2):
-        paper = build_outputs(p, paper)
-        targets: dict[str, str] = {}
-        for e in paper["compile"]["errors"]:
-            if e.get("block") and e["block"] != "refs":
-                targets.setdefault(e["block"], e["message"])
-        if not paper["compile"]["ok"]:
-            for item in paper["lint"]:
-                if item["block"] and "marker" not in item["message"]:
-                    targets.setdefault(item["block"], item["message"])
-        if not targets or rnd == 1:
-            break
-        run.log(f"Repairing LaTeX syntax in {len(targets)} place(s).")
-        system = prompts.LATEX_FIX.format()
-        for bid, msg in list(targets.items())[:8]:
-            if bid in ("intro", "abstract"):
-                src = paper[bid]
-            else:
-                blk = next((b for b in paper["blocks"] if b.get("id") == bid), None)
-                if not blk or not blk.get("text"):
-                    continue
-                src = blk["text"]
-            try:
-                res = run.ask("reason", system, f"ERROR: {msg}\n\nFRAGMENT:\n{src}", max_out=int(est_tokens(src) * 1.2) + 400, paper=True,
-                              effort="low", label=f"Fix LaTeX in {bid}", temperature=0.0)
-            except LLMError as e:
-                if passing(e):
-                    raise
-                continue
-            fixed = clean_fragment(res.text)
-            if not fixed or len(check_balance(fixed)) > len(check_balance(src)) or not _same_but_syntax(src, fixed):
-                continue
-            if bid in ("intro", "abstract"):
-                paper[bid] = fixed
-            else:
-                blk["text"] = fixed
+    run.progress(5, 6, "building the files and checking the LaTeX")
+    paper = settle_latex(run, p, paper)
     run.progress(6, 6, "final version ready")
     c = paper["compile"]
     if c["engine"] and c["ok"] and c.get("fallback"):
@@ -1010,6 +1128,8 @@ def last_checks(paper: dict) -> list[str]:
     comp = paper.get("compile") or {}
     if comp.get("engine") and not comp.get("ok"):
         out.append("The LaTeX file does not compile.")
+    for x in (comp.get("unresolved") or [])[:8]:
+        out.append("LaTeX: " + x["message"])
     return out
 
 
@@ -1020,8 +1140,8 @@ def stage_build(run: Run) -> None:
     paper = p.load("paper")
     if not paper:
         raise ValueError("The paper has not been assembled yet.")
-    run.progress(0, 2, "building the files of the paper")
-    paper = build_outputs(p, paper)
+    run.progress(0, 2, "building the files of the paper and checking the LaTeX")
+    paper = settle_latex(run, p, paper)            # your title, introduction and citations are new since the last check
     run.progress(1, 2, "checking references and citations")
     problems = last_checks(paper)
     p.save("built", {"at": time.time(), "title": paper.get("title", ""), "problems": problems})

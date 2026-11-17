@@ -955,12 +955,19 @@ def reading_order(ws: Path, main: str = "main.tex", texts: dict[str, str] | None
     return out
 
 
+from .texutil import DISPLAY_ENVS as _MATH_ENVS
+
+
 def theorem_kinds(lines: list[tuple[str, int, str]]) -> dict[str, dict]:
     """Environments declared with \\newtheorem: their printed name, the counter they use, and what resets it."""
     kinds: dict[str, dict] = {}
     for _, _, raw in lines:
         for m in _NEWTHM.finditer(strip_comment(raw)):
             star, env, shared, title, within = m.groups()
+            if env in _MATH_ENVS:
+                # a mathematics environment declared as a theorem -- an old build did this for mathtools'
+                # multlined -- is a formula, not a statement: listed as one, its formulas filled the outline
+                continue
             kinds[env] = {"name": title.strip() or env.capitalize(), "numbered": not star,
                           "counter": shared or env, "within": within or ""}
     for env, k in kinds.items():                   # a shared counter is reset by what resets its owner

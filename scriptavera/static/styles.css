@@ -428,8 +428,8 @@ details.more[open] > summary { margin-bottom: 12px; }
    would light up as though it were being pointed at. Hover is muted from the first scroll until the pointer
    moves again (app.js sets body.scrolling). The chosen item (.on) keeps its highlight: that one is meant to
    be seen. The paper's passages need no rule here -- they are never painted at all. */
-body.scrolling .dq-item:hover { background: none; }
-body.scrolling .step:hover { background: transparent; }
+body.scrolling .dq-item:not(.on):hover { background: none; }
+body.scrolling .step:not(.on):hover { background: transparent; }
 body.scrolling .jr-item:hover { background: var(--paper); border-color: var(--rule); }
 
 .editor h3 { display: flex; justify-content: space-between; align-items: center; }
