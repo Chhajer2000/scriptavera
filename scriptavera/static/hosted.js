@@ -84,9 +84,12 @@ const HOSTED = {
   },
   async refresh() {
     try { this.acct = await api("/api/account"); } catch (e) { this.acct = null; return; }
+    if (this.acct.admin) {
+      this.setLocalUsed(0);
+      return;
+    }
     if (!this.acct.signed_in) {                       // the browser's count, kept in step with the server's
-      const used = Math.max(this.localUsed(), this.acct.guest_used || 0);
-      this.setLocalUsed(used);
+      this.setLocalUsed(this.acct.guest_used || 0);
     }
   },
   localUsed() { try { return Math.max(0, parseInt(localStorage.getItem(FREE_KEY) || "0", 10) || 0); } catch (e) { return 0; } },
@@ -94,13 +97,13 @@ const HOSTED = {
   signedIn() { return !!(this.acct && this.acct.signed_in && this.acct.user); },
   admin() { return !this.on || !!(this.acct && this.acct.admin); },
   remaining() {
+    if (this.admin()) return Infinity;
     const A = this.acct || {}, limit = A.free_limit ?? 3;
-    if (this.signedIn()) return A.subscribed ? Infinity : Math.max(0, limit - (A.user_free_used || 0));
-    return Math.max(0, Math.min(limit - Math.max(this.localUsed(), A.guest_used || 0), (A.network_limit || 25) - (A.network_used || 0)));
+    if (this.signedIn()) return (A.subscribed || A.admin) ? Infinity : Math.max(0, limit - (A.user_free_used || 0));
+    return Math.max(0, Math.min(limit - (A.guest_used || 0), (A.network_limit || 25) - (A.network_used || 0)));
   },
-  counted() {                                         // a paper was started: the count moves at once
+  counted() {                                         // a paper was started: refresh account count
     if (!this.on) return;
-    if (!this.signedIn()) this.setLocalUsed(this.localUsed() + 1);
     this.refresh().then(() => render());
   },
 

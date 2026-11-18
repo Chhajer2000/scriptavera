@@ -202,6 +202,10 @@ BROWSER_LIMIT_MESSAGE = ("Free guest limit of three papers reached in this brows
 
 
 def usage(ident: dict) -> dict:
+    if ident.get("admin"):
+        return {"free_limit": 999999, "guest_used": 0, "network_used": 0, "network_limit": 999999,
+                "signed_in": bool(ident.get("uid")), "guest_remaining": 999999, "user_free_used": 0,
+                "subscribed": True, "user_free_remaining": 999999, "admin": True}
     d = accounts.db()
     limit = hosting.free_papers()
     browser = d.guest_browser_used(ident["guest"]) if ident.get("guest") else 0
@@ -227,6 +231,8 @@ def _paywall_message() -> str:
 def precheck(request: Request) -> JSONResponse | None:
     """Before anything is done with an upload: is there a free paper left (or a subscription)?"""
     ident = identity(request)
+    if ident.get("admin"):
+        return None
     d = accounts.db()
     if ident.get("uid"):
         u = user_row(ident["uid"], fresh=True)
@@ -256,6 +262,8 @@ def keys_ready() -> JSONResponse | None:
 def claim(request: Request):
     """Take one free paper (atomically). Returns (refusal or None, a function that gives it back)."""
     ident = identity(request)
+    if ident.get("admin"):
+        return None, (lambda: None)
     d = accounts.db()
     if ident.get("uid"):
         if accounts.subscribed(_subscription(ident["uid"])):
