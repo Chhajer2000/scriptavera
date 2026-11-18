@@ -33,8 +33,10 @@ opening that file therefore contacts jsDelivr.
 
 ### CodeMirror 5.65.1 (`scriptavera/static/vendor/codemirror/`)
 
-The text editor of the LaTeX editor page (`lib/codemirror.js` and `lib/codemirror.css`, minified). The LaTeX mode,
-search and completion are written for Scriptavera in `editor.js`. MIT licence, copyright (C) 2017 by Marijn
+The text editor of the LaTeX editor page (`lib/codemirror.js` and `lib/codemirror.css`, minified), with the addons
+matchbrackets, closebrackets, foldcode, foldgutter, searchcursor, dialog and the Emacs and Vim keymaps from the same
+release (`addons.min.js`, `addons.css`). The LaTeX mode, search, completion, folding and the code check are written
+for Scriptavera in `editor*.js`. MIT licence, copyright (C) 2017 by Marijn
 Haverbeke and others; the full text is in `scriptavera/static/vendor/codemirror/LICENSE`.
 
 ### PDF.js 6.2.108 (`scriptavera/static/vendor/pdfjs/`)

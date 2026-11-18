@@ -115,8 +115,12 @@ plan = writing.normalise_plan([{"title": "2. Introduction", "items": "", "from_p
                                {"title": "Duplicate", "items": "", "from_page": "2"}, {"title": "", "items": "R1", "from_page": "3"}], pages, dossier)
 assert [(s["title"], s["pages"], s["items"]) for s in plan] == [("Preliminaries", [1], ["D1"]), ("The limit", [5, 6, 7], ["R2"]), ("A bound", [2, 3], ["R1"])], plan
 assert writing.normalise_plan([], pages, dossier)[0]["pages"] == [1, 2, 3, 5, 6, 7]     # no usable plan: one section with everything
-assert writing.organisation("See Section~9.", plan).startswith("The paper is organised as follows: Section~2 (Preliminaries)")
-assert writing.organisation("Section~2 fixes notation; Section~4 has the bound.", plan) == "Section~2 fixes notation; Section~4 has the bound."
+# the roadmap carries no typed section number: each becomes \ref of that section's label, and a number that is no
+# section of the paper sends it back to a paragraph rebuilt from the section list
+assert writing.organisation("See Section~9.", plan).startswith(
+    "The paper is organised as follows: Section~\\ref{sec:preliminaries} (Preliminaries)")
+assert writing.organisation("Section~2 fixes notation; Section~4 has the bound.", plan) == \
+    "Section~\\ref{sec:preliminaries} fixes notation; Section~\\ref{sec:a-bound} has the bound."
 print("dossier and plan ok")
 
 # ---- citations: only papers from the databases survive, and an unsourced claim goes with its citation

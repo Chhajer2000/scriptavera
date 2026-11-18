@@ -204,7 +204,59 @@ assert any(v["label"].startswith("Before going back") for v in W.versions(p))
 objs = len(list((p.dir / W.HISTORY / "objects").iterdir()))
 W.snapshot(p, "same again", "manual", force=True)
 assert len(list((p.dir / W.HISTORY / "objects").iterdir())) == objs, "file contents are stored once"
-print("4. history: versions, comparison with now, going back (the present kept as a version), contents stored once")
+# as in Overleaf: each version lists the files it changed; any two versions compared, the changes marked in place word
+# by word; labels; one file restored (a deleted one too); a version downloaded as a .zip
+va = W.snapshot(p, "A", "manual", force=True)
+t0 = W.read_text(p, "main.tex")["text"]
+W.write_text(p, "main.tex", t0.replace("We bound", "We sharply bound"))
+W.write_text(p, "notes.tex", "a note\n")
+vb = W.snapshot(p, "B", "manual", force=True)
+top = next(x for x in W.history(p)["versions"] if x["id"] == vb["id"])
+assert {c["path"]: c["status"] for c in top["changes"]} == {"main.tex": "edited", "notes.tex": "added"}, top
+st = {f["path"]: f for f in W.compare(p, va["id"], vb["id"])["files"]}
+assert st["main.tex"]["status"] == "edited" and (st["main.tex"]["add"], st["main.tex"]["del"]) == (1, 1)
+assert st["notes.tex"]["status"] == "added" and any(f["status"] == "same" for f in st.values())
+seg = W.compare(p, va["id"], vb["id"], "main.tex")["segments"]
+assert "".join(s for k, s in seg if k == "+").strip() == "sharply" and not any(k == "-" for k, s in seg), seg
+assert "".join(s for k, s in seg if k != "-") == W.read_text(p, "main.tex")["text"] and "".join(s for k, s in seg if k != "+") == t0
+assert W.compare(p, vb["id"], "now", "notes.tex")["status"] == "same"
+W.delete(p, "notes.tex")
+assert {c["path"]: c["status"] for c in W.history(p)["pending"]} == {"notes.tex": "deleted"} or W.history(p)["versions"][0]["changes"]
+W.restore_file(p, vb["id"], "notes.tex")
+assert W.read_text(p, "notes.tex")["text"] == "a note\n", "a deleted file comes back"
+W.write_text(p, "main.tex", "broken")
+W.restore_file(p, va["id"], "main.tex")
+assert W.read_text(p, "main.tex")["text"] == t0
+assert "submitted" in W.label(p, va["id"], "submitted")["labels"]
+assert "submitted" in next(x for x in W.history(p)["versions"] if x["id"] == va["id"])["labels"]
+assert W.unlabel(p, va["id"], "submitted")["labels"] == []
+z = zipfile.ZipFile(io.BytesIO(W.zip_version(p, vb["id"])))
+assert "notes.tex" in z.namelist() and "sharply" in z.read("main.tex").decode()
+W.delete(p, "notes.tex")
+# Overleaf's project tools: search in the whole project, word count, the compile settings, and the commands and
+# environments LaTeX knows in this project (read from LaTeX, the class and the packages installed here)
+sr = W.search(p, "partial sums")
+assert any(m["path"] == "main.tex" and m["text"].count("Partial sums") for m in sr["matches"]), sr
+assert W.search(p, "Partial", case=True)["matches"] and not W.search(p, "PARTIAL", case=True)["matches"]
+assert W.search(p, r"H_n\^\{\(s\)\}", regex=True)["matches"] and not W.search(p, "boun", word=True)["matches"]
+wc = W.word_count(p)
+assert wc["words"] > 20 and wc["headers"] == 4 and wc["inline_math"] > 5 and wc["display_math"] == 1, wc
+st = W.settings(p)
+assert st["main"] == "main.tex" and st["mains"] == ["main.tex"] and not st["draft"] and not st["halt"]
+assert W.save_settings(p, {"draft": True})["draft"] and not W.save_settings(p, {"draft": False})["draft"]
+for bad in ({"main": "nope.tex"}, {"compiler": "word"}):
+    try:
+        W.save_settings(p, bad)
+        raise SystemExit(f"accepted {bad}")
+    except W.WorkspaceError:
+        pass
+kn = W.commands(p)
+assert {"theorem", "lemma", "definition"} <= set(kn["envs"]), kn["envs"][:20]
+if HAVE_TEX and shutil.which("kpsewhich"):
+    assert kn["complete"] and {"textbf", "mathbb", "eqref", "theoremstyle", "href"} <= set(kn["known"]) and "textbff" not in kn["known"]
+print("4. history: versions, comparison with now, going back (the present kept as a version), contents stored once; "
+      "Overleaf's history (changed files, any two versions compared word by word, labels, one file restored, a version "
+      "as a .zip); search in the project, word count, compile settings, the commands LaTeX knows here")
 
 # ---------------------------------------------------------------- 5. commands done by rule
 def run(cmd, **kw):
@@ -368,6 +420,16 @@ back = requests.post(E + "/history", json={"action": "restore", "id": h[1]["id"]
 assert back["ok"] and "def:sum" in requests.get(E + "/file", params={"path": "sections/02-notation.tex"}).json()["text"]
 sv = requests.post(E + "/history", json={"action": "save", "label": "for my co-author"}).json()
 assert sv["version"]["label"] == "for my co-author"
+cmp = requests.post(E + "/history", json={"action": "compare", "from": h[-1]["id"], "to": "now"}).json()
+assert cmp["ok"] and any(f["status"] != "same" for f in cmp["files"])
+one = requests.post(E + "/history", json={"action": "compare", "from": h[-1]["id"], "to": "now", "path": "main.tex"}).json()
+assert one["ok"] and one["segments"]
+zz = requests.get(E + "/history/zip", params={"id": h[-1]["id"]})
+assert zz.status_code == 200 and "main.tex" in zipfile.ZipFile(io.BytesIO(zz.content)).namelist()
+lb = requests.post(E + "/history", json={"action": "label", "id": "now", "label": "draft 1"}).json()
+assert lb["ok"] and "draft 1" in lb["labels"]
+rf = requests.post(E + "/history", json={"action": "restore_file", "id": h[-1]["id"], "path": "main.tex"}).json()
+assert rf["ok"] and rf["path"] == "main.tex"
 z = zipfile.ZipFile(io.BytesIO(requests.get(E + "/download").content))
 assert "main.tex" in z.namelist() and "sections/02-notation.tex" in z.namelist()
 # a change made by Scriptavera after the copy was made is said, and starting again keeps the copy in the history

@@ -42,7 +42,8 @@ BINARY_EXT = {".png", ".jpg", ".jpeg", ".pdf", ".eps"}
 MAX_TEXT = 4 * 1024 * 1024
 MAX_BINARY = 25 * 1024 * 1024
 MAX_FILES = 500
-KEEP_AUTO = 80                     # automatic versions kept; versions with a name are always kept
+KEEP_AUTO = 400                    # automatic versions kept; versions with a name or a label are always kept
+AUTO_EVERY = 120.0                 # while the author types, a version is kept at most every two minutes
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,80}$")
 _compile_locks: dict[str, threading.Lock] = {}
@@ -477,7 +478,7 @@ def snapshot(p: Project, label: str, kind: str = "auto", force: bool = False) ->
         v = {"id": (vs[-1]["id"] + 1) if vs else 1, "at": time.time(), "label": str(label)[:200], "kind": kind,
              "files": state}
         vs.append(v)
-        autos = [x for x in vs if x["kind"] == "auto"]
+        autos = [x for x in vs if x["kind"] == "auto" and not x.get("labels")]
         if len(autos) > KEEP_AUTO:
             drop = {x["id"] for x in autos[:len(autos) - KEEP_AUTO]}
             vs = [x for x in vs if x["id"] not in drop]
@@ -492,8 +493,9 @@ def snapshot(p: Project, label: str, kind: str = "auto", force: bool = False) ->
         return v
 
 
-def _maybe_autosnapshot(p: Project, every: float = 600.0) -> None:
-    """While the author types, a version is kept at most every ten minutes."""
+def _maybe_autosnapshot(p: Project, every: float = AUTO_EVERY) -> None:
+    """While the author types, a version is kept at most every two minutes, so the history can show what was
+    written when, the way Overleaf's does."""
     vs = versions(p)
     if not vs or time.time() - vs[-1]["at"] >= every:
         snapshot(p, "Edited", "auto")
@@ -547,6 +549,200 @@ def restore(p: Project, vid: int) -> dict:
     return {"ok": True}
 
 
+def _version(p: Project, vid: int) -> dict:
+    v = next((x for x in versions(p) if x["id"] == int(vid)), None)
+    if not v:
+        raise WorkspaceError("That version does not exist.")
+    return v
+
+
+def _changes(before: dict[str, str], after: dict[str, str]) -> list[dict]:
+    out = []
+    for rel in sorted(set(before) | set(after)):
+        a, b = before.get(rel), after.get(rel)
+        if a != b:
+            out.append({"path": rel, "status": "added" if not a else "deleted" if not b else "edited"})
+    return out
+
+
+def history(p: Project) -> dict:
+    """Every version, newest first, each with the files it changed since the version before it and its labels; and
+    what the files as they are now change since the newest version (shown as the current state)."""
+    vs = versions(p)
+    out, prev = [], {}
+    for v in vs:
+        out.append({"id": v["id"], "at": v["at"], "label": v["label"], "kind": v["kind"], "labels": v.get("labels", []),
+                    "files": len(v["files"]), "changes": _changes(prev, v["files"])})
+        prev = v["files"]
+    now = current_files(p) if root(p).exists() else {}
+    return {"versions": out[::-1], "pending": _changes(prev, now) if vs else []}
+
+
+def _state(p: Project, ref) -> dict[str, str]:
+    """The files of a version (`ref` its id), of nothing (0: before the first version), or as they are now ("now")."""
+    if ref in ("now", None, ""):
+        return current_files(p)
+    if str(ref) == "0":
+        return {}
+    return dict(_version(p, int(ref))["files"])
+
+
+def _text_at(p: Project, ref, rel: str, h: str | None) -> str:
+    if not h:
+        return ""
+    if ref in ("now", None, ""):
+        f = root(p) / rel
+        return f.read_bytes().decode("utf-8", "replace") if f.exists() else ""
+    blob = _hist(p) / "objects" / h
+    return blob.read_bytes().decode("utf-8", "replace") if blob.exists() else ""
+
+
+_TOKEN = re.compile(r"\s+|\\[A-Za-z@]+|\w+|[^\w\s]")
+
+
+def segments(old: str, new: str) -> list[list[str]]:
+    """The new text with the changes marked in place: a list of ["=", text], ["+", added], ["-", removed]. Lines
+    that changed are compared word by word, so a one-word change shows as that word, not as two whole lines."""
+    import difflib
+    out: list[list[str]] = []
+
+    def put(kind: str, s: str) -> None:
+        if not s:
+            return
+        if out and out[-1][0] == kind:
+            out[-1][1] += s
+        else:
+            out.append([kind, s])
+    a, b = old.splitlines(True), new.splitlines(True)
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal":
+            put("=", "".join(a[i1:i2]))
+        elif op == "delete":
+            put("-", "".join(a[i1:i2]))
+        elif op == "insert":
+            put("+", "".join(b[j1:j2]))
+        else:
+            x, y = "".join(a[i1:i2]), "".join(b[j1:j2])
+            if len(x) + len(y) > 40000:
+                put("-", x)
+                put("+", y)
+                continue
+            ta, tb = _TOKEN.findall(x), _TOKEN.findall(y)
+            for op2, k1, k2, l1, l2 in difflib.SequenceMatcher(None, ta, tb, autojunk=False).get_opcodes():
+                if op2 == "equal":
+                    put("=", "".join(ta[k1:k2]))
+                else:
+                    put("-", "".join(ta[k1:k2]))
+                    put("+", "".join(tb[l1:l2]))
+    return out
+
+
+def _line_counts(old: str, new: str) -> tuple[int, int]:
+    import difflib
+    add = rem = 0
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old.splitlines(), new.splitlines(), autojunk=False).get_opcodes():
+        if op != "equal":
+            rem += i2 - i1
+            add += j2 - j1
+    return add, rem
+
+
+def compare(p: Project, a, b, rel: str | None = None) -> dict:
+    """What changed from `a` to `b` (version ids; 0 is the empty project before the first version, "now" the files as
+    they are). Without a path: every file of either, with whether it was added, edited, deleted or left the same, and
+    how many lines were added and removed. With a path: that file with its changes marked in place (`segments`)."""
+    sa, sb = _state(p, a), _state(p, b)
+
+    def status(r: str) -> str:
+        ha, hb = sa.get(r), sb.get(r)
+        return "added" if not ha else "deleted" if not hb else "edited" if ha != hb else "same"
+    if rel is None:
+        out = []
+        for r in sorted(set(sa) | set(sb)):
+            st = status(r)
+            item = {"path": r, "status": st, "kind": _kind(r), "add": 0, "del": 0}
+            if st != "same" and _kind(r) == "text":
+                item["add"], item["del"] = _line_counts(_text_at(p, a, r, sa.get(r)), _text_at(p, b, r, sb.get(r)))
+            out.append(item)
+        return {"files": out}
+    rel = clean_path(rel)
+    if rel not in sa and rel not in sb:
+        raise WorkspaceError(f"{rel} is in neither version.")
+    st = status(rel)
+    if _kind(rel) != "text":
+        return {"path": rel, "status": st, "kind": _kind(rel), "segments": [], "add": 0, "del": 0}
+    old, new = _text_at(p, a, rel, sa.get(rel)), _text_at(p, b, rel, sb.get(rel))
+    add, rem = _line_counts(old, new)
+    return {"path": rel, "status": st, "kind": "text", "segments": segments(old, new), "add": add, "del": rem}
+
+
+def restore_file(p: Project, vid: int, rel: str) -> dict:
+    """One file back as it was in a version (a deleted file comes back too). The present is kept as a version first."""
+    v = _version(p, vid)
+    rel = clean_path(rel)
+    h = v["files"].get(rel)
+    if not h:
+        raise WorkspaceError(f"{rel} is not in that version.")
+    blob = _hist(p) / "objects" / h
+    if not blob.exists():
+        raise WorkspaceError("That version of the file is no longer kept.")
+    f = resolve(p, rel, new=True)
+    with p._lock:
+        if not f.exists() and len(files(p)) >= MAX_FILES:
+            raise WorkspaceError("The project has too many files.")
+        snapshot(p, f"Before restoring {rel}", "restore")
+        f.parent.mkdir(parents=True, exist_ok=True)
+        _write_atomic(f, blob.read_bytes())
+        snapshot(p, f"Restored {rel} as it was in version {v['id']}", "restore", force=True)
+    return {"ok": True, "path": rel}
+
+
+def label(p: Project, vid, text: str) -> dict:
+    """Give a version a label (a version can have several; a labelled version is never dropped). `vid` "now" labels
+    the files as they are: they are kept as a version first if they changed since the newest one."""
+    text = " ".join(str(text or "").split())[:120]
+    if not text:
+        raise WorkspaceError("Write the label first.")
+    with p._lock:
+        if vid in ("now", None, ""):
+            v = snapshot(p, text, "manual") or (versions(p) or [None])[-1]
+            if not v:
+                raise WorkspaceError("There is no version to label yet.")
+            vid = v["id"]
+        vs = versions(p)
+        v = next((x for x in vs if x["id"] == int(vid)), None)
+        if not v:
+            raise WorkspaceError("That version does not exist.")
+        labs = v.setdefault("labels", [])
+        if text not in labs:
+            labs.append(text)
+        _save_versions(p, vs)
+    return {"ok": True, "id": v["id"], "labels": labs}
+
+
+def unlabel(p: Project, vid: int, text: str) -> dict:
+    with p._lock:
+        vs = versions(p)
+        v = next((x for x in vs if x["id"] == int(vid)), None)
+        if not v:
+            raise WorkspaceError("That version does not exist.")
+        v["labels"] = [x for x in v.get("labels", []) if x != text]
+        _save_versions(p, vs)
+    return {"ok": True, "labels": v["labels"]}
+
+
+def zip_version(p: Project, vid: int) -> bytes:
+    """The project as it was in a version, as a .zip."""
+    v = _version(p, vid)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for rel, h in sorted(v["files"].items()):
+            blob = _hist(p) / "objects" / h
+            if blob.exists():
+                z.writestr(rel, blob.read_bytes())
+    return buf.getvalue()
+
+
 # ----------------------------------------------------------------- compile
 
 # Recorded on every run: each counter LaTeX steps (sections, theorem-like environments, equations, figures), with
@@ -594,7 +790,125 @@ def compile_project(p: Project, timeout: int = 240) -> dict:
     """Compile with the LaTeX installed here. Runs LaTeX as often as cross-references need (and BibTeX or Biber
     when the project uses them), always to the end, so that a PDF appears even when there are errors."""
     with _lock(p.id):
-        return _compile(p, timeout)
+        res = _compile(p, timeout)
+    try:
+        _learn_commands(p, res)
+    except Exception:  # noqa: BLE001 -- what the editor knows about commands is a help, never a reason to fail a compile
+        pass
+    return res
+
+
+ENGINES = ("pdflatex", "xelatex", "lualatex")
+
+
+def engines() -> list[str]:
+    """The LaTeX programs installed here that the author can choose between."""
+    return [e for e in ENGINES if shutil.which(e)]
+
+
+def engine_for(p: Project) -> str | None:
+    want = meta(p).get("compiler")
+    if want in ENGINES and shutil.which(want):
+        return want
+    return paperlib.find_engine()
+
+
+def settings(p: Project) -> dict:
+    """The compile settings of the project, as in Overleaf's menu: the program, the main document, fast draft mode
+    (images left out) and stopping at the first error; and what can be chosen."""
+    m = meta(p)
+    mains = [rel for rel in files(p) if rel.endswith(".tex") and "\\documentclass" in (root(p) / rel).read_text(encoding="utf-8", errors="replace")[:20000]]
+    return {"compiler": engine_for(p), "engines": engines(), "main": main_file(p), "mains": mains or [main_file(p)],
+            "draft": bool(m.get("draft")), "halt": bool(m.get("halt"))}
+
+
+def save_settings(p: Project, body: dict) -> dict:
+    m = meta(p)
+    if "compiler" in body:
+        if body["compiler"] not in ENGINES or not shutil.which(body["compiler"]):
+            raise WorkspaceError("That LaTeX program is not installed on this computer.")
+        m["compiler"] = body["compiler"]
+    if "main" in body:
+        rel = clean_path(str(body["main"]))
+        if not rel.endswith(".tex") or not (root(p) / rel).is_file():
+            raise WorkspaceError("The main document must be a .tex file of the project.")
+        m["main"] = rel
+    for k in ("draft", "halt"):
+        if k in body:
+            m[k] = bool(body[k])
+    p.save("editor", m)
+    return settings(p)
+
+
+def clear_cache(p: Project) -> None:
+    """Recompile from scratch: what earlier runs left behind (.aux, .toc, .bbl ...) is deleted."""
+    out = build_dir(p)
+    with _lock(p.id):
+        if out.exists():
+            for f in out.rglob("*"):
+                if f.is_file() and f.name != "result.json":
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
+
+
+def search(p: Project, q: str, case: bool = False, regex: bool = False, word: bool = False, limit: int = 500) -> dict:
+    """Every place in the project's text files that matches, as Overleaf's search in the whole project."""
+    if not q:
+        return {"matches": [], "more": False}
+    pat = q if regex else re.escape(q)
+    if word:
+        pat = rf"(?<![A-Za-z0-9_])(?:{pat})(?![A-Za-z0-9_])"
+    try:
+        rx = re.compile(pat, 0 if case else re.I)
+    except re.error as e:
+        raise WorkspaceError(f"Not a valid regular expression: {e}") from e
+    out: list[dict] = []
+    for rel in files(p):
+        if _kind(rel) != "text":
+            continue
+        for n, line in enumerate((root(p) / rel).read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            for m in rx.finditer(line):
+                if not m.group(0):
+                    continue
+                out.append({"path": rel, "line": n, "ch": m.start(), "len": m.end() - m.start(), "text": line[:400]})
+                if len(out) >= limit:
+                    return {"matches": out, "more": True}
+    return {"matches": out, "more": False}
+
+
+def word_count(p: Project) -> dict:
+    """The words of the paper as it is compiled (see wordcount), counted in the files LaTeX reads."""
+    from . import wordcount
+    lines = [t for _, _, t in reading_order(root(p), main_file(p))]
+    return wordcount.count(wordcount.document_body(lines))
+
+
+def texts(p: Project) -> dict[str, str]:
+    return {rel: (root(p) / rel).read_text(encoding="utf-8", errors="replace") for rel in files(p) if _kind(rel) == "text"}
+
+
+def commands(p: Project) -> dict:
+    """The commands and environments LaTeX knows in this project (see texdb), for the editor's suggestions and checks."""
+    from . import texdb
+    return texdb.known(texts(p), meta(p).get("learned"))
+
+
+def _learn_commands(p: Project, res: dict) -> None:
+    """After a compile that made a PDF, the commands the compiled files use that LaTeX did not call undefined are
+    known, however they were defined (some packages make commands in ways no pattern can read)."""
+    if not res.get("has_pdf") or not res.get("engine"):
+        return
+    from . import texdb
+    compiled = {rel for rel, _, _ in reading_order(root(p), main_file(p))}
+    fs = {rel: t for rel, t in texts(p).items() if rel in compiled}
+    k = texdb.known(texts(p), meta(p).get("learned"))
+    new = texdb.used_commands(fs) - set(k["known"]) - texdb.undefined_in_log(res.get("errors") or [])
+    if new:
+        m = meta(p)
+        m["learned"] = sorted(set(m.get("learned") or []) | new)[:3000]
+        p.save("editor", m)
 
 
 def _run(cmd: list[str], cwd: Path, timeout: int, env: dict) -> tuple[int, str]:
@@ -620,7 +934,7 @@ def _compile(p: Project, timeout: int) -> dict:
     if not exists(p):
         res["errors"] = [{"path": "", "line": 0, "message": "The project has no main.tex."}]
         return res
-    engine = paperlib.find_engine()
+    engine = engine_for(p)
     res["engine"] = engine
     if not engine:
         res["errors"] = [{"path": "", "line": 0, "message": "No LaTeX is installed on this computer. Install MiKTeX "
@@ -648,9 +962,13 @@ def _compile(p: Project, timeout: int) -> dict:
         flags = list(paperlib.engine_flags(engine))
         first_timeout = max(timeout, 420) if _is_miktex(engine) else timeout
 
+        opts = meta(p)
+        draft = r"\PassOptionsToPackage{draft}{graphicx}\PassOptionsToPackage{draft}{graphics}" if opts.get("draft") else ""
+        halt = ["-halt-on-error"] if opts.get("halt") else []
+
         def latex(probe: bool, limit: int) -> tuple[int, str]:
-            arg = (PROBE if probe else "") + "\\input{" + main + "}"
-            return _run([engine, *flags, "-synctex=1", "-interaction=nonstopmode", "-file-line-error",
+            arg = (PROBE if probe else "") + draft + "\\input{" + main + "}"
+            return _run([engine, *flags, *halt, "-synctex=1", "-interaction=nonstopmode", "-file-line-error",
                          f"-output-directory={out}", f"-jobname={job}", arg], ws, limit, env)
         if pdf.exists():
             pdf.unlink()

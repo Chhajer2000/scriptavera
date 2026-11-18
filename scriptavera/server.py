@@ -1610,8 +1610,53 @@ async def api_editor_compile(request: Request):
     p = _editor_project(request)
     if not p:
         return fail("Project not found.", 404)
+    body = await _body(request)
+    if body.get("fresh"):                          # "Recompile from scratch"
+        await run_in_threadpool(workspace.clear_cache, p)
     res = await run_in_threadpool(workspace.compile_project, p)
     return ok(build=workspace._public(res))
+
+
+async def api_editor_settings(request: Request):
+    """The compile settings (program, main document, draft mode, stop on the first error)."""
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    try:
+        if request.method == "POST":
+            return ok(**await run_in_threadpool(workspace.save_settings, p, await _body(request)))
+        return ok(**await run_in_threadpool(workspace.settings, p))
+    except workspace.WorkspaceError as e:
+        return fail(str(e))
+
+
+async def api_editor_search(request: Request):
+    """Search the whole project."""
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    q = request.query_params
+    try:
+        return ok(**await run_in_threadpool(workspace.search, p, q.get("q", ""), q.get("case") == "1", q.get("regex") == "1",
+                                            q.get("word") == "1"))
+    except workspace.WorkspaceError as e:
+        return fail(str(e))
+
+
+async def api_editor_wordcount(request: Request):
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    return ok(**await run_in_threadpool(workspace.word_count, p))
+
+
+async def api_editor_commands(request: Request):
+    """The commands and environments LaTeX knows in this project: LaTeX's own, the class's, the loaded packages' (read
+    from the LaTeX installed here) and the project's. The editor checks what the author types against them."""
+    p = _editor_project(request)
+    if not p:
+        return fail("Project not found.", 404)
+    return ok(**await run_in_threadpool(workspace.commands, p))
 
 
 async def api_editor_pdf(request: Request):
@@ -1891,22 +1936,51 @@ async def api_editor_history(request: Request):
     if not p:
         return fail("Project not found.", 404)
     if request.method == "GET":
-        vs = workspace.versions(p)
-        return ok(versions=[{k: v for k, v in x.items() if k != "files"} | {"files": len(x["files"])} for x in reversed(vs)])
+        return ok(**await run_in_threadpool(workspace.history, p))
     body = await _body(request)
+    action = body.get("action")
     try:
-        if body.get("action") == "save":
-            v = await run_in_threadpool(workspace.snapshot, p, str(body.get("label") or "Saved by you")[:120] or "Saved by you",
-                                        "manual", True)
+        if action == "save":
+            name = str(body.get("label") or "Saved by you")[:120] or "Saved by you"
+            v = await run_in_threadpool(workspace.snapshot, p, name, "manual", True)
+            if v and body.get("label"):
+                await run_in_threadpool(workspace.label, p, v["id"], name)
             return ok(version={k: x for k, x in (v or {}).items() if k != "files"})
-        if body.get("action") == "diff":
+        if action == "diff":
             return ok(files=await run_in_threadpool(workspace.diff_version, p, int(body.get("id"))))
-        if body.get("action") == "restore":
+        if action == "compare":
+            path = body.get("path") or None
+            return ok(**await run_in_threadpool(workspace.compare, p, body.get("from", 0), body.get("to", "now"), path))
+        if action == "restore":
             await run_in_threadpool(workspace.restore, p, int(body.get("id")))
             return ok(tree=workspace.tree(p))
+        if action == "restore_file":
+            r = await run_in_threadpool(workspace.restore_file, p, int(body.get("id")), str(body.get("path") or ""))
+            return ok(path=r["path"], tree=workspace.tree(p))
+        if action == "label":
+            vid = body.get("id")
+            r = await run_in_threadpool(workspace.label, p, "now" if vid in (None, "", "now") else int(vid), str(body.get("label") or ""))
+            return ok(**r)
+        if action == "unlabel":
+            return ok(**await run_in_threadpool(workspace.unlabel, p, int(body.get("id")), str(body.get("label") or "")))
     except (workspace.WorkspaceError, TypeError, ValueError) as e:
         return fail(str(e) or "Unknown version.")
     return fail("Unknown action.")
+
+
+async def api_editor_history_zip(request: Request):
+    """The project as it was in one version of the history, as a .zip."""
+    p = _editor_project(request)
+    if not p:
+        return Response(status_code=404)
+    try:
+        vid = int(request.query_params.get("id", ""))
+        data = await run_in_threadpool(workspace.zip_version, p, vid)
+    except (workspace.WorkspaceError, ValueError):
+        return Response(status_code=404)
+    name = re.sub(r"[^A-Za-z0-9._\-]+", "-", (p.state.get("meta", {}).get("name") or "paper"))[:60].strip("-") or "paper"
+    return Response(data, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{name}-version-{vid}.zip"'})
 
 
 async def api_editor_download(request: Request):
@@ -2169,6 +2243,10 @@ routes = [
     Route("/api/projects/{pid}/editor/upload", api_editor_upload, methods=["POST"]),
     Route("/api/projects/{pid}/editor/compile", api_editor_compile, methods=["POST"]),
     Route("/api/projects/{pid}/editor/pdf", api_editor_pdf),
+    Route("/api/projects/{pid}/editor/commands", api_editor_commands),
+    Route("/api/projects/{pid}/editor/settings", api_editor_settings, methods=["GET", "POST"]),
+    Route("/api/projects/{pid}/editor/search", api_editor_search),
+    Route("/api/projects/{pid}/editor/wordcount", api_editor_wordcount),
     Route("/api/projects/{pid}/editor/log", api_editor_log),
     Route("/api/projects/{pid}/editor/outline", api_editor_outline),
     Route("/api/projects/{pid}/editor/sync", api_editor_sync, methods=["POST"]),
@@ -2178,6 +2256,7 @@ routes = [
     Route("/api/projects/{pid}/editor/arxiv", api_arxiv, methods=["POST"]),
     Route("/api/memory", api_memory, methods=["POST"]),
     Route("/api/projects/{pid}/editor/history", api_editor_history, methods=["GET", "POST"]),
+    Route("/api/projects/{pid}/editor/history/zip", api_editor_history_zip),
     Route("/api/projects/{pid}/editor/download", api_editor_download),
     Route("/api/projects/{pid}/editor/assist", api_editor_assist, methods=["POST"]),
     Route("/api/projects/{pid}/editor/apply", api_editor_apply, methods=["POST"]),

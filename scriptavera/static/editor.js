@@ -16,7 +16,7 @@ const store = { get(k, d) { try { const v = localStorage.getItem("sv-ed-" + k); 
 const E = {
   info: null, tree: [], docs: new Map(), current: null, openTabs: [], build: null, outline: [], complete: null,
   numbersFrom: "", proposal: null, busy: false, compiling: false, compileAgain: false, autoTimer: null,
-  folded: new Set(store.get("folded-" + PID, [])), logsOpen: store.get("logs-open", true), lastSel: "",
+  folded: new Set(store.get("folded-" + PID, [])), logsOpen: store.get("logs-open", false), lastSel: "",
 };
 
 async function api(path, opts = {}) {
@@ -152,17 +152,19 @@ let cm = null;
 function makeEditor() {
   cm = CodeMirror($("#cmHost"), {
     value: "", mode: "latex", lineNumbers: true, lineWrapping: true, indentUnit: 2, tabSize: 2, indentWithTabs: false,
-    gutters: ["ed-marks", "CodeMirror-linenumbers"], spellcheck: false, autofocus: false,
+    gutters: ["ed-marks", "CodeMirror-linenumbers"], autofocus: false,
+    /* spell check (Settings) uses the browser's own, which needs the editable kind of input; it is chosen when the page loads */
+    inputStyle: store.get("prefs", {}).spell === false ? "textarea" : "contenteditable", spellcheck: store.get("prefs", {}).spell !== false,
     extraKeys: {
       "Ctrl-S": () => saveAndCompile(), "Cmd-S": () => saveAndCompile(), "Ctrl-Enter": () => saveAndCompile(), "Cmd-Enter": () => saveAndCompile(),
       "Ctrl-F": () => openFind(false), "Cmd-F": () => openFind(false), "Ctrl-H": () => openFind(true), "Cmd-Alt-F": () => openFind(true),
       "Ctrl-/": () => toggleComment(), "Cmd-/": () => toggleComment(), "Ctrl-K": () => $("#askText").focus(), "Cmd-K": () => $("#askText").focus(),
       "Tab": (c) => { if (E.complete) return pickComplete(); if (c.somethingSelected()) c.indentSelection("add"); else c.replaceSelection("  "); },
       "Shift-Tab": (c) => c.indentSelection("subtract"),
-      "Esc": () => { if (E.complete) closeComplete(); else if (!$("#find").hidden) closeFind(); },
+      "Esc": () => { if (E.complete) closeComplete(); else if (!$("#find").hidden) closeFind(); else return CodeMirror.Pass; return undefined; },
     },
   });
-  cm.on("inputRead", (c, ch) => maybeComplete(ch));
+  cm.on("inputRead", (c, ev) => maybeComplete(ev && ev.text ? ev.text.join("") : ""));
   cm.on("cursorActivity", () => { if (E.complete) maybeComplete(); markActiveLine(); });
   cm.on("blur", () => setTimeout(() => { if (!document.activeElement || !$("#complete").contains(document.activeElement)) closeComplete(); }, 150));
   cm.on("gutterClick", (c, line, gutter) => { if (gutter === "ed-marks") showLineIssues(line + 1); });
@@ -246,7 +248,8 @@ function drawTree() {
         <span class="chev ${shut ? "" : "open"}">${ICON.chev}</span><span class="ic">${ICON.folder}</span><span class="nm">${esc(name)}</span>
         <span class="acts"><span data-act="rename" data-path="${esc(it.path)}" title="Rename">rename</span><span data-act="delete" data-path="${esc(it.path)}" title="Delete">delete</span></span></div>`);
     } else {
-      rows.push(`<div class="row ${E.current === it.path ? "on" : ""}" role="treeitem" tabindex="0" data-act="open" data-path="${esc(it.path)}" style="padding-left:${pad}px">
+      const typeCls = it.kind === "binary" ? "img" : /\.tex$/i.test(name) ? "tex" : "";
+      rows.push(`<div class="row ${typeCls} ${E.current === it.path ? "on" : ""}" role="treeitem" tabindex="0" data-act="open" data-path="${esc(it.path)}" style="padding-left:${pad}px">
         <span class="chev"></span><span class="ic">${it.kind === "binary" ? ICON.image : ICON.file}</span><span class="nm">${esc(name)}</span>${dirty ? '<span class="dot" title="Not saved yet"></span>' : ""}
         <span class="acts">${it.path === "main.tex" ? "" : `<span data-act="rename" data-path="${esc(it.path)}" title="Rename">rename</span><span data-act="delete" data-path="${esc(it.path)}" title="Delete">delete</span>`}</span></div>`);
     }
@@ -390,7 +393,9 @@ function lintNow(path) {
   if (!d || !/\.tex$/i.test(path)) { delete LINT[path]; return; }
   const text = d.doc.getValue();
   const whole = /\\begin\s*\{document\}/.test(text);     // a section file: \begin{document} is in main.tex
-  LINT[path] = lintTex(text).filter((x) => whole || !/document/.test(x.message));
+  const off = /^\s*%%novalidate\b/.test(text) || (typeof PREF !== "undefined" && PREF.codeCheck === false);
+  LINT[path] = off ? [] : lintTex(text).filter((x) => whole || !/document/.test(x.message))
+    .concat(typeof lintDeep === "function" ? lintDeep(text, path) : []);
   if (path === E.current) { markIssues(); drawLogs(); }
 }
 function lintSoon(path) { clearTimeout(lintTimer); lintTimer = setTimeout(() => lintNow(path), 350); }
@@ -470,6 +475,7 @@ async function compile() {
     showBuild();
     if (r.build.has_pdf) await loadPdf(r.build.build);
     loadOutline();
+    if (typeof loadCommands === "function") loadCommands();
   } catch (e) { setStatus("Compile failed", "bad"); toast(e.message, true); }
   finally {
     E.compiling = false; $("#compileBtn").disabled = false; $("#compileBtn").textContent = "Recompile";
@@ -492,13 +498,27 @@ function issuesFor(path) {
     .filter((x) => x.path === path && x.line > 0)
     .concat((LINT[path] || []).map((x) => ({ ...x, path, message: "Code check: " + x.message })));
 }
-let marked = [];
+let marked = [], squiggles = [];
 function markIssues() {
   if (!cm) return;
   for (const h of marked) cm.removeLineClass(h, "background", "line-err");
-  marked = [];
+  for (const m of squiggles) m.clear();
+  marked = []; squiggles = [];
   cm.clearGutter("ed-marks");
   if (!E.current) return;
+  for (const x of issuesFor(E.current)) {                 // the exact place, underlined, when it is known
+    if (x.level === "box" || x.line < 1 || x.line > cm.lineCount()) continue;
+    let ch = x.ch, len = x.len;
+    if (ch === undefined && /Undefined control sequence/.test(x.message || "") && typeof undefinedToken === "function") {
+      const tok = undefinedToken(x), text = cm.getLine(x.line - 1);
+      const at = tok ? text.search(new RegExp("\\\\" + tok + "(?![A-Za-z])")) : -1;
+      if (at >= 0) { ch = at; len = tok.length + 1; }
+    }
+    if (ch === undefined || !len) continue;
+    const hint = typeof errorHint === "function" && x.ch === undefined ? errorHint(x) : "";
+    squiggles.push(cm.markText({ line: x.line - 1, ch }, { line: x.line - 1, ch: ch + len },
+      { className: x.level === "error" ? "cm-squiggle-err" : "cm-squiggle-warn", attributes: { title: (hint || x.message).replace(/^Code check: /, "") } }));
+  }
   const by = {};
   for (const x of issuesFor(E.current)) { if (x.level === "box") continue; (by[x.line] = by[x.line] || []).push(x); }
   for (const [ln, xs] of Object.entries(by)) {
@@ -507,7 +527,7 @@ function markIssues() {
     const el = document.createElement("span");
     const bad = xs.some((x) => x.level === "error");
     el.className = bad ? "mark-err" : "mark-warn";
-    el.title = xs.map((x) => x.message).join("\n");
+    el.title = xs.map((x) => { const h = typeof errorHint === "function" && x.ch === undefined ? errorHint(x) : ""; return x.message + (h ? "\n→ " + h : ""); }).join("\n");
     cm.setGutterMarker(line, "ed-marks", el);
     if (bad) marked.push(cm.addLineClass(line, "background", "line-err"));
   }
@@ -521,9 +541,15 @@ function drawLogs() {
   const errs = b.errors || [], warns = (b.warnings || []).filter((w) => w.kind !== "box"), boxes = (b.warnings || []).filter((w) => w.kind === "box");
   const where = (x) => x.path ? `<span class="where" data-act="goto" data-path="${esc(x.path)}" data-line="${x.line}">${esc(x.path)}${x.line ? ":" + x.line : ""}</span>` : `<span></span>`;
   const row = (x, cls) => `<div class="log ${cls}">${where(x)}${cls === "error" && x.path && x.inside !== false ? `<button class="btn small fix" data-act="fixerror" data-i="${errs.indexOf(x)}">Ask the AI to fix it</button>` : "<span></span>"}
-    <div class="msg">${esc(x.message)}</div>${x.context ? `<pre>${esc(x.context)}</pre>` : ""}</div>`;
+    <div class="msg">${esc(x.message)}</div>${typeof errorHint === "function" && errorHint(x) ? `<div class="hint">${esc(errorHint(x))}</div>` : ""}${x.context ? `<pre>${esc(x.context)}</pre>` : ""}</div>`;
   const something = errs.length || warns.length;
-  $("#logs").className = "logs" + ((E.logsOpen && something) || E.logsForced ? "" : " closed");
+  /* A fresh error asks for attention, the way Overleaf's own log bar pops open on a failed compile; once
+     you have seen it and closed the panel, it stays out of the way until the errors actually change, rather
+     than reopening itself on every redraw and eating the bottom of the PDF. */
+  const errSig = errs.map((x) => `${x.path}:${x.line}:${x.message}`).join("|");
+  if (errs.length && errSig !== E.logsLastErrSig) E.logsOpen = true;
+  E.logsLastErrSig = errSig;
+  $("#logs").className = "logs" + (E.logsOpen && something ? "" : " closed");
   $("#logs").innerHTML = `<div class="logs-head" data-act="logs"><span class="t">Logs and messages</span>
       <span class="c ${errs.length ? "err" : ""}">${errs.length} error${errs.length === 1 ? "" : "s"}</span>
       <span class="c ${warns.length ? "warn" : ""}">${warns.length} warning${warns.length === 1 ? "" : "s"}</span>
@@ -698,6 +724,14 @@ async function loadOutline() {
 const ABBR = { definition: "Def.", lemma: "Lem.", theorem: "Thm.", proposition: "Prop.", corollary: "Cor.", remark: "Rem.", example: "Ex.",
   conjecture: "Conj.", notation: "Not.", observation: "Obs.", assumption: "Ass.", hypothesis: "Hyp.", figure: "Fig.", table: "Tab.", claim: "Claim",
   fact: "Fact", problem: "Prob.", question: "Qu.", convention: "Conv.", property: "Prop.", axiom: "Ax.", construction: "Constr.", exercise: "Exer.", note: "Note" };
+/* A soft tone per family of statement, so the outline reads at a glance the way a mathematician's own notes
+   would: what is given (blue), what is proved (green), what is illustrative (amber), what is still open (red),
+   and everything else (tan) -- rather than one flat grey list. */
+const TONE = { definition: "def", notation: "def", assumption: "def", hypothesis: "def", convention: "def", axiom: "def", property: "def",
+  theorem: "thm", lemma: "thm", proposition: "thm", corollary: "thm", claim: "thm", fact: "thm",
+  remark: "note", example: "note", observation: "note",
+  conjecture: "open", problem: "open", question: "open", exercise: "open" };
+function tone(name) { return TONE[String(name).toLowerCase()] || "fig"; }
 function abbrev(name) { const n = String(name).toLowerCase(); return ABBR[n] || (n.length > 5 ? name.slice(0, 4) + "." : name); }
 function plain(t) { return String(t).replace(/\$([^$]*)\$/g, "$1").replace(/\\(?:[A-Za-z]+)\s*/g, "").replace(/[{}]/g, ""); }
 function drawOutline() {
@@ -706,35 +740,55 @@ function drawOutline() {
   $("#outlineNote").title = E.numbersFrom === "counted" ? "The files changed since the last compile: numbers are counted until you compile again." : "";
   $("#outline").innerHTML = items.map((x) => {
     const sec = x.kind === "section", sub = x.kind === "subsection" || x.kind === "subsubsection";
-    const label = sec || sub ? (x.number || "") : `${esc(abbrev(x.name || x.env || ""))} ${esc(x.number || "")}`;
+    const kind = x.name || x.env || "";
+    const label = sec || sub ? (x.number || "") : `${esc(abbrev(kind))} ${esc(x.number || "")}`;
     const text = sec || sub ? mathText(x.title) : (x.title ? mathText(x.title) : `<em>${preview(x.snippet || "")}</em>`);
-    return `<button class="o ${sec ? "sec" : sub ? "sub" : ""}" data-act="goto" data-path="${esc(x.path)}" data-line="${x.line}" title="${esc((x.name || x.kind) + " " + (x.number || ""))}${x.label ? " (" + esc(x.label) + ")" : ""}">
-      <span class="n">${label}</span><span class="t">${text}</span></button>`;
+    const cls = sec ? "sec" : sub ? "sub" : "stmt";
+    const numCls = sec || sub ? "" : ` k-${tone(kind)}`;
+    return `<button class="o ${cls}" data-act="goto" data-path="${esc(x.path)}" data-line="${x.line}" title="${esc((x.name || x.kind) + " " + (x.number || ""))}${x.label ? " (" + esc(x.label) + ")" : ""}">
+      <span class="n${numCls}">${label}</span><span class="t">${text}</span></button>`;
   }).join("") || `<div class="empty-o">Sections and statements appear here.</div>`;
 }
 
 /* ---------------------------------------------------------------- search */
-const F = { marks: [], hits: [], now: -1 };
-function openFind(replace) {
+const F = { marks: [], hits: [], now: -1, scope: null };
+/* Find and replace, as in Overleaf: both fields at once, with match case, regular expression, whole word and
+   within the selection; Enter / Shift+Enter (or Ctrl+G / Ctrl+Shift+G) for the next / previous match. */
+function openFind() {
   const f = $("#find"); f.hidden = false;
   const sel = cm.getSelection();
-  if (sel && !sel.includes("\n")) $("#findText").value = sel;
-  $("#replaceText").hidden = !replace && !$("#replaceText").value;
-  $$("#find [data-act=replace], #find [data-act=replaceall]").forEach((b) => { b.hidden = $("#replaceText").hidden; });
-  $(replace && $("#findText").value ? "#replaceText" : "#findText").focus();
+  if (sel && !sel.includes("\n")) { $("#findText").value = sel; F.scope = null; $("#findSel").checked = false; }
+  else if (sel) { F.scope = [cm.indexFromPos(cm.getCursor("from")), cm.indexFromPos(cm.getCursor("to"))]; $("#findSel").checked = true; }
+  $("#replaceText").hidden = false;
+  $$("#find [data-act=replace], #find [data-act=replaceall]").forEach((b) => { b.hidden = false; });
+  $("#findText").focus();
   $("#findText").select();
   runFind();
 }
-function closeFind() { $("#find").hidden = true; clearFind(); cm.focus(); }
-function clearFind() { F.marks.forEach((m) => m.clear()); F.marks = []; F.hits = []; F.now = -1; $("#findCount").textContent = ""; }
+function closeFind() { $("#find").hidden = true; clearFind(); F.scope = null; cm.focus(); }
+function clearFind() { F.marks.forEach((m) => m.clear()); F.marks = []; F.hits = []; F.now = -1; if (F.cur) F.cur.clear(); $("#findCount").textContent = ""; }
+function findPattern() {
+  const q = $("#findText").value;
+  if (!q) return null;
+  let src = $("#findRegex").checked ? q : q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if ($("#findWord").checked) src = `(?<![A-Za-z0-9_])(?:${src})(?![A-Za-z0-9_])`;
+  try { return new RegExp(src, "gm" + ($("#findCase").checked ? "" : "i")); } catch (e) { return "bad"; }
+}
 function runFind(keepNow) {
   clearFind();
-  const q = $("#findText").value;
-  if (!q) return;
-  const text = cm.getValue(), cs = $("#findCase").checked;
-  const hay = cs ? text : text.toLowerCase(), needle = cs ? q : q.toLowerCase();
-  let i = 0;
-  while ((i = hay.indexOf(needle, i)) !== -1 && F.hits.length < 5000) { F.hits.push([i, i + q.length]); i += Math.max(1, q.length); }
+  const re = findPattern();
+  if (!re) return;
+  if (re === "bad") { $("#findCount").textContent = "Not a valid regular expression"; return; }
+  const text = cm.getValue();
+  if ($("#findSel").checked && !F.scope && cm.somethingSelected()) F.scope = [cm.indexFromPos(cm.getCursor("from")), cm.indexFromPos(cm.getCursor("to"))];
+  const [lo, hi] = $("#findSel").checked && F.scope ? F.scope : [0, text.length];
+  re.lastIndex = lo;
+  let m;
+  while ((m = re.exec(text)) && F.hits.length < 5000) {
+    if (m.index >= hi) break;
+    if (!m[0].length) { re.lastIndex++; continue; }
+    if (m.index + m[0].length <= hi) F.hits.push([m.index, m.index + m[0].length]);
+  }
   for (const [a, b] of F.hits.slice(0, 1500)) F.marks.push(cm.markText(cm.posFromIndex(a), cm.posFromIndex(b), { className: "cm-found" }));
   const cur = cm.indexFromPos(cm.getCursor("from"));
   F.now = keepNow !== undefined ? Math.min(keepNow, F.hits.length - 1) : F.hits.findIndex(([a]) => a >= cur);
@@ -747,7 +801,7 @@ function showHit() {
   const [a, b] = F.hits[F.now];
   if (F.cur) F.cur.clear();
   F.cur = cm.markText(cm.posFromIndex(a), cm.posFromIndex(b), { className: "cm-found-now" });
-  cm.setSelection(cm.posFromIndex(a), cm.posFromIndex(b));
+  if (!$("#findSel").checked) cm.setSelection(cm.posFromIndex(a), cm.posFromIndex(b));
   cm.scrollIntoView({ from: cm.posFromIndex(a), to: cm.posFromIndex(b) }, 80);
 }
 function stepFind(dir) {
@@ -755,16 +809,29 @@ function stepFind(dir) {
   F.now = (F.now + dir + F.hits.length) % F.hits.length;
   showHit();
 }
+function replacement(a, b) {
+  const rep = $("#replaceText").value;
+  if (!$("#findRegex").checked) return rep;
+  const re = findPattern();
+  return re && re !== "bad" ? cm.getRange(cm.posFromIndex(a), cm.posFromIndex(b)).replace(new RegExp(re.source, re.flags.replace("g", "")), rep) : rep;
+}
 function replaceOne() {
   if (F.now < 0 || !F.hits[F.now]) return runFind();
-  const [a, b] = F.hits[F.now];
-  cm.replaceRange($("#replaceText").value, cm.posFromIndex(a), cm.posFromIndex(b));
+  const [a, b] = F.hits[F.now], out = replacement(a, b);
+  cm.replaceRange(out, cm.posFromIndex(a), cm.posFromIndex(b));
+  if (F.scope) F.scope[1] += out.length - (b - a);
   runFind(F.now);
 }
 function replaceAll() {
   if (!F.hits.length) return;
-  const rep = $("#replaceText").value, n = F.hits.length;
-  cm.operation(() => { for (const [a, b] of [...F.hits].reverse()) cm.replaceRange(rep, cm.posFromIndex(a), cm.posFromIndex(b)); });
+  const n = F.hits.length;
+  cm.operation(() => {
+    for (const [a, b] of [...F.hits].reverse()) {
+      const out = replacement(a, b);
+      cm.replaceRange(out, cm.posFromIndex(a), cm.posFromIndex(b));
+      if (F.scope) F.scope[1] += out.length - (b - a);
+    }
+  });
   runFind();
   toast(`Replaced ${n} occurrence${n === 1 ? "" : "s"}.`);
 }
@@ -782,21 +849,63 @@ function toggleComment() {
 }
 
 /* ---------------------------------------------------------------- completion */
-function maybeComplete() {
-  if (!E.comp || !E.current) return closeComplete();
+/* As in Overleaf: typing a backslash and a letter suggests commands (with the places Tab moves through, see
+   editor-typing.js); after \begin{ environments, after \end{ the one to close; labels after \ref{, keys after \cite{,
+   files after \input{ and \includegraphics{, packages after \usepackage{, classes, bibliography styles.
+   Ctrl+Space asks for suggestions where there are none by themselves. */
+const argShape = (snip) => snip.replace(/\$\{\d:([^}]*)\}/g, "$1").replace(/\$\d/g, "").replace(/\n[\s\S]*/, "");
+function cmdName(snip) { const m = snip.match(/^\\([A-Za-z@]+\*?)/); return m ? m[1] : ""; }
+function innermostOpenEnv() {
+  const cur = cm.getCursor(), text = cm.getRange({ line: 0, ch: 0 }, cur).replace(/(^|[^\\])%.*$/gm, "$1");
+  const stack = [];
+  for (const m of text.matchAll(/\\(begin|end)\{([^{}]+)\}/g)) {
+    if (m[1] === "begin") stack.push(m[2]);
+    else { const i = stack.lastIndexOf(m[2]); if (i >= 0) stack.splice(i, 1); }
+  }
+  return stack.reverse();
+}
+function maybeComplete(ch, forced) {
+  if (!E.current || !cm) return closeComplete();
+  if (!forced && typeof PREF !== "undefined" && !PREF.autoComplete) return closeComplete();
   const cur = cm.getCursor();
   const before = cm.getLine(cur.line).slice(0, cur.ch);
+  const C = E.comp || { labels: [], cites: [], envs: [], tex: [], images: [] };
   let m, kind = null, part = "";
-  if ((m = before.match(/\\(?:ref|eqref|cref|Cref|autoref|pageref|nameref)\{([^{}]*)$/))) { kind = "label"; part = m[1]; }
-  else if ((m = before.match(/\\cite[tpa]?\*?(?:\[[^\]]*\])*\{([^{}]*)$/))) { kind = "cite"; part = m[1].split(",").pop().trim(); }
-  else if ((m = before.match(/\\begin\{([A-Za-z*]*)$/))) { kind = "env"; part = m[1]; }
-  else if ((m = before.match(/\\(?:input|include)\{([^{}]*)$/))) { kind = "tex"; part = m[1]; }
+  if ((m = before.match(/\\(?:ref|eqref|cref|Cref|autoref|pageref|nameref|vref|labelcref)\{([^{}]*)$/))) { kind = "label"; part = m[1].split(",").pop().trim(); }
+  else if ((m = before.match(/\\(?:cite[tp]?|citeauthor|citeyear|parencite|textcite|autocite|nocite)\*?(?:\[[^\]]*\])*\{([^{}]*)$/))) { kind = "cite"; part = m[1].split(",").pop().trim(); }
+  else if ((m = before.match(/\\(begin|end)\{([A-Za-z*@]*)$/))) { kind = m[1] === "end" ? "endenv" : "env"; part = m[2]; }
+  else if ((m = before.match(/\\(?:input|include|subfile)\{([^{}]*)$/))) { kind = "tex"; part = m[1]; }
   else if ((m = before.match(/\\includegraphics(?:\[[^\]]*\])?\{([^{}]*)$/))) { kind = "image"; part = m[1]; }
+  else if ((m = before.match(/\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{([^{}]*)$/))) { kind = "pkg"; part = m[1].split(",").pop().trim(); }
+  else if ((m = before.match(/\\documentclass(?:\[[^\]]*\])?\{([^{}]*)$/))) { kind = "cls"; part = m[1]; }
+  else if ((m = before.match(/\\bibliographystyle\{([^{}]*)$/))) { kind = "bst"; part = m[1]; }
+  else if ((m = before.match(/\\([A-Za-z]*)$/)) && (m[1] || forced)) {
+    const slashes = (before.slice(0, before.length - m[1].length).match(/\\+$/) || [""])[0].length;
+    if (slashes % 2 === 1) { kind = "cmd"; part = m[1]; }
+  }
   if (!kind) return closeComplete();
   const p = part.toLowerCase();
-  const pool = { label: E.comp.labels.map((x) => [x.label, x.what]), cite: E.comp.cites.map((x) => [x.key, x.what]),
-    env: E.comp.envs.map((x) => [x, ""]), tex: E.comp.tex.map((x) => [x, ""]), image: E.comp.images.map((x) => [x, ""]) }[kind];
-  const list = pool.filter(([v, w]) => v.toLowerCase().includes(p) || (w || "").toLowerCase().includes(p)).slice(0, 40);
+  let list;
+  if (kind === "cmd") {
+    const seen = new Set(), all = [];
+    for (const [snip, what, where] of (typeof TEX_COMMANDS !== "undefined" ? TEX_COMMANDS : [])) {
+      const name = cmdName(snip);
+      if (name) { all.push([argShape(snip), what, snip, name]); seen.add(name); }
+    }
+    for (const x of (E.cmds && E.cmds.mine) || []) if (!seen.has(x.name)) { seen.add(x.name); all.push([`\\${x.name}${"{}".repeat(x.args || 0)}`, x.what || "defined in this paper", `\\${x.name}${Array.from({ length: x.args || 0 }, (_, i) => `{$${i + 1}}`).join("")}`, x.name]); }
+    for (const name of (E.cmds && E.cmds.known) || []) if (!seen.has(name) && /^[A-Za-z]+$/.test(name)) { seen.add(name); all.push([`\\${name}`, "", `\\${name}`, name]); }
+    const starts = all.filter((x) => x[3].startsWith(part)), istarts = all.filter((x) => !x[3].startsWith(part) && x[3].toLowerCase().startsWith(p));
+    list = [...starts, ...istarts].slice(0, 40);
+    if (list.length && list[0][3] === part && list[0][2] === `\\${part}` && list.filter((x) => x[3].startsWith(part)).length === 1) list = [];   // typed in full, nothing to add
+  } else if (kind === "env" || kind === "endenv") {
+    const names = [...new Set([...(kind === "endenv" ? innermostOpenEnv() : []), ...(C.envs || []), ...Object.keys(typeof TEX_ENVS !== "undefined" ? TEX_ENVS : {})])];
+    list = names.filter((v) => v.toLowerCase().includes(p)).map((v, i) => [v, kind === "endenv" && i === 0 && innermostOpenEnv()[0] === v ? "close this one" : ""]).slice(0, 40);
+  } else {
+    const pool = { label: C.labels.map((x) => [x.label, x.what]), cite: C.cites.map((x) => [x.key, x.what]), tex: C.tex.map((x) => [x, ""]),
+      image: C.images.map((x) => [x, ""]), pkg: (typeof TEX_PACKAGES !== "undefined" ? TEX_PACKAGES : []).map((x) => [x, ""]),
+      cls: (typeof TEX_CLASSES !== "undefined" ? TEX_CLASSES : []).map((x) => [x, ""]), bst: (typeof TEX_BIBSTYLES !== "undefined" ? TEX_BIBSTYLES : []).map((x) => [x, ""]) }[kind];
+    list = pool.filter(([v, w]) => v.toLowerCase().includes(p) || (w || "").toLowerCase().includes(p)).slice(0, 40);
+  }
   if (!list.length) return closeComplete();
   E.complete = { kind, part, list, i: 0, line: cur.line, ch: cur.ch - part.length };
   drawComplete();
@@ -818,19 +927,28 @@ function moveComplete(d) { const C = E.complete; if (!C) return; C.i = (C.i + d 
 function pickComplete(i) {
   const C = E.complete;
   if (!C) return CodeMirror.Pass;
-  const v = C.list[i !== undefined ? i : C.i][0];
+  const item = C.list[i !== undefined ? i : C.i], v = item[0];
   const from = { line: C.line, ch: C.ch }, to = cm.getCursor();
-  const after = cm.getLine(to.line).slice(to.ch);
-  if (C.kind === "env") {
-    const indent = cm.getLine(to.line).match(/^\s*/)[0];
-    const close = after.startsWith("}") ? "" : "}";
-    cm.replaceRange(`${v}${close}\n${indent}  \n${indent}\\end{${v}}`, from, after.startsWith("}") ? { line: to.line, ch: to.ch + 1 } : to);
-    cm.setCursor({ line: from.line + 1, ch: indent.length + 2 });
-  } else {
-    cm.replaceRange(v + (after.startsWith("}") ? "" : "}"), from, to);
-    if (after.startsWith("}")) cm.setCursor({ line: to.line, ch: from.ch + v.length + 1 });
-  }
+  const line = cm.getLine(to.line), after = line.slice(to.ch);
   closeComplete();
+  if (C.kind === "cmd") {
+    const rest = (after.match(/^[A-Za-z]*/) || [""])[0];              // completing in the middle of a word replaces all of it
+    const start = { line: from.line, ch: from.ch - 1 };
+    if (typeof insertSnippet === "function") insertSnippet(start, { line: to.line, ch: to.ch + rest.length }, item[2]);
+    else cm.replaceRange(argShape(item[2]), start, { line: to.line, ch: to.ch + rest.length });
+    return undefined;
+  }
+  const closing = after.startsWith("}");
+  if (C.kind === "env") {
+    const body = (typeof TEX_ENVS !== "undefined" && TEX_ENVS[v]) || "\n  $1\n";
+    const snip = `${v}}${body}\\end{${v}}`;
+    const end = { line: to.line, ch: to.ch + (closing ? 1 : 0) };
+    if (typeof insertSnippet === "function") insertSnippet(from, end, snip);
+    else cm.replaceRange(v + "}", from, end);
+    return undefined;
+  }
+  cm.replaceRange(v + (closing ? "" : "}"), from, to);
+  cm.setCursor({ line: to.line, ch: from.ch + v.length + 1 });
   return undefined;
 }
 function closeComplete() {
@@ -926,7 +1044,6 @@ function menu(anchor, html) {
   m.style.left = `${Math.max(8, Math.min(r.right - m.offsetWidth, window.innerWidth - m.offsetWidth - 8))}px`;
 }
 function closeMenu() { $("#menu").hidden = true; }
-const KIND = { start: ["made from the paper", ""], manual: ["saved by you", "manual"], ai: ["AI change", "ai"], restore: ["restored", ""], auto: ["while editing", ""] };
 /* ------------------------------------------------- references and arXiv */
 const REF = { verified: ["verified", "a"], check: ["check", "w"], mismatch: ["another paper", "d"], not_found: ["not found", "d"], retracted: ["RETRACTED", "d"], unchecked: ["not checked", ""] };
 async function refCheck() {
@@ -1026,41 +1143,7 @@ async function inNotes() {
     const first = $(".src-box", out); if (first) setTimeout(() => first.scrollIntoView({ block: "center" }), 60);
   } catch (e) { const st = $("#srcStatus"); if (st) st.textContent = e.message; }
 }
-async function history() {
-  let vs;
-  try { vs = (await api(`${API}/history`)).versions; } catch (e) { return toast(e.message, true); }
-  modal(`<header><h2>History</h2><button class="btn quiet" data-act="close">Close</button></header><div class="body">
-    <p>Every change is kept: yours (a version every few minutes while you type), each accepted AI change (with the state just before it), and versions you save with a name. Going back keeps the present state as a version too.</p>
-    <form class="field" data-act="savever"><input id="verLabel" placeholder="Name this version, for example: sent to my co-author" maxlength="120"><button class="btn primary" type="submit">Save a version</button></form>
-    ${vs.map((v) => `<div class="ver"><div class="lbl">${esc(v.label)}<span class="kind ${(KIND[v.kind] || ["", ""])[1]}">${esc((KIND[v.kind] || [v.kind])[0])}</span></div>
-      <div class="meta">${when(v.at)}, ${v.files} file${v.files === 1 ? "" : "s"}</div>
-      <div class="acts"><button class="btn small" data-act="diffver" data-id="${v.id}">Compare with now</button><button class="btn small" data-act="restorever" data-id="${v.id}">Go back to this</button></div></div>`).join("")}
-    <div id="diffOut"></div></div>`);
-}
-async function showDiff(id) {
-  try {
-    const r = await api(`${API}/history`, { method: "POST", body: { action: "diff", id } });
-    const out = r.files.length ? r.files.map((f) => `<p><b>${esc(f.path)}</b> ${esc(f.status)}</p>${f.diff ? `<pre class="diff">${f.diff.split("\n").map((l) =>
-      `<span class="${l.startsWith("+") && !l.startsWith("+++") ? "a" : l.startsWith("-") && !l.startsWith("---") ? "d" : l.startsWith("@@") ? "h" : ""}">${esc(l)}</span>`).join("\n")}</pre>` : ""}`).join("")
-      : "<p>Nothing differs: the files are as they were then.</p>";
-    $("#diffOut").innerHTML = `<h3 style="margin:16px 0 6px;font-weight:600">Version ${id} compared with now</h3>${out}`;
-    $("#diffOut").scrollIntoView({ block: "start" });
-  } catch (e) { toast(e.message, true); }
-}
-async function restoreVersion(id) {
-  if (!confirm("Go back to this version? The files as they are now are kept as a version, so you can return to them.")) return;
-  try {
-    await saveAll();
-    await api(`${API}/history`, { method: "POST", body: { action: "restore", id } });
-    await refreshTree();
-    for (const p of [...E.docs.keys()]) {
-      if (E.tree.some((x) => x.path === p)) await reloadFile(p);
-      else { E.docs.delete(p); E.openTabs = E.openTabs.filter((x) => x !== p); }
-    }
-    if (!E.tree.some((x) => x.path === E.current)) openFile("main.tex"); else drawTabs();
-    closeModal(); toast("Back to that version."); compile();
-  } catch (e) { toast(e.message, true); }
-}
+/* the history: editor-history.js */
 async function proofDialog() {
   let r;
   try { r = await api(`/api/projects/${PID}/proof`); } catch (e) { return toast(e.message, true); }
@@ -1167,21 +1250,19 @@ document.addEventListener("click", async (ev) => {
     case "logs": {
       if (ev.target.closest("a")) return;
       const shown = !$("#logs").classList.contains("closed");
-      E.logsForced = !shown; E.logsOpen = !shown; store.set("logs-open", E.logsOpen); drawLogs(); break;
+      E.logsOpen = !shown; store.set("logs-open", E.logsOpen); drawLogs(); break;
     }
     case "fixerror": ask("", { error: (E.build.errors || [])[Number(t.dataset.i)] }); break;
     case "accept": accept(); break;
     case "closereview": $("#review").hidden = true; E.proposal = null; cm.focus(); break;
     case "alt": { const al = E.proposal.alternatives[Number(t.dataset.i)]; $("#askText").value = al.command; ask(al.command); break; }
-    case "history": history(); break;
+    case "history": histOpen(); break;
     case "notes": inNotes(); break;
     case "review": reviewOpen(); break;
     case "rvdo": reviewPost({ action: "decide", round: t.dataset.r, point: t.dataset.p, choice: t.dataset.c, note: ($(`#rvn-${t.dataset.p}`) || {}).value || "" }); break;
     case "rvletter": toast("Writing the letter…"); reviewPost({ action: "letter", round: t.dataset.r }); break;
     case "rvcopy": navigator.clipboard.writeText($(".rv-letter").value).then(() => toast("Copied.")).catch(() => toast("Select the text and copy it.", true)); break;
     case "close": closeModal(); break;
-    case "diffver": showDiff(Number(t.dataset.id)); break;
-    case "restorever": restoreVersion(Number(t.dataset.id)); break;
     case "findnext": stepFind(1); break;
     case "findprev": stepFind(-1); break;
     case "replace": replaceOne(); break;
@@ -1206,6 +1287,8 @@ document.addEventListener("click", async (ev) => {
     case "more":
       menu(t, `<button data-act="refcheck">Check the references<span class="sub">Each looked up: does it exist, is it the paper cited, is it retracted</span></button>
         <button data-act="arxiv">Prepare for arXiv<span class="sub">Checked and compiled the way arXiv does; the form filled in</span></button><hr>
+        <button data-act="wordcount">Word count<span class="sub">Words in the text, headings and captions; formulas</span></button>
+        <button data-act="settings">Settings<span class="sub">Compiler, main document, spell check, keys, font, theme</span></button><hr>
         <button data-act="proof">Record this version<span class="sub">A signed, timestamped record of the files as they are</span></button>
         <button data-act="shortcuts">Keyboard shortcuts</button><hr>
         <button data-act="reset">Start again from Scriptavera's version<span class="sub">Your files are kept in the history</span></button>
@@ -1218,9 +1301,12 @@ document.addEventListener("click", async (ev) => {
     case "shortcuts":
       closeMenu();
       modal(`<header><h2>Keyboard shortcuts</h2><button class="btn quiet" data-act="close">Close</button></header><div class="body">
-        ${[["Ctrl+S or Ctrl+Enter", "Save and compile"], ["Ctrl+F", "Find in this file"], ["Ctrl+H", "Find and replace"], ["Ctrl+/", "Comment or uncomment the lines"],
-          ["Ctrl+K", "Ask the AI to edit"], ["Ctrl+Z, Ctrl+Y", "Undo, redo (each file keeps its own)"], ["Double-click the PDF", "Show the source of that place"],
-          ["Tab in a list of suggestions", "Accept the suggestion (labels after \\ref{, keys after \\cite{, environments after \\begin{)"]]
+        ${[["Ctrl+S or Ctrl+Enter", "Save and compile"], ["Ctrl+F", "Find and replace in this file"], ["Ctrl+G, Ctrl+Shift+G", "Next, previous match"],
+          ["Ctrl+Shift+F", "Search the whole project"], ["Ctrl+Shift+L", "Go to a line"], ["Ctrl+/", "Comment or uncomment the lines"],
+          ["Ctrl+D", "Delete the line"], ["Ctrl+Shift+D", "Duplicate the selection or the line"], ["Alt+↑, Alt+↓", "Move the lines up, down"],
+          ["Alt+Shift+↑, Alt+Shift+↓", "Copy the lines up, down"], ["Ctrl+B, Ctrl+I", "Bold, italic"], ["Ctrl+U, Ctrl+Shift+U", "Upper case, lower case"],
+          ["Ctrl+[, Ctrl+]", "Indent less, more"], ["Ctrl+Space", "Suggestions"], ["Tab", "Accept a suggestion; go to the next place to fill in"],
+          ["Ctrl+K", "Ask the AI to edit"], ["Ctrl+Z, Ctrl+Y", "Undo, redo (each file keeps its own)"], ["Double-click the PDF", "Show the source of that place"]]
           .map(([k, v]) => `<div class="proof-line"><b>${esc(k)}</b><span>${esc(v)}</span></div>`).join("")}</div>`);
       break;
     default: break;
@@ -1230,10 +1316,7 @@ document.addEventListener("submit", (ev) => {
   ev.preventDefault();
   const f = ev.target;
   if (f.id === "ask") ask($("#askText").value);
-  else if (f.dataset.act === "savever") {
-    api(`${API}/history`, { method: "POST", body: { action: "save", label: $("#verLabel").value.trim() || "Saved by you" } })
-      .then(() => { toast("Version saved."); history(); }).catch((e) => toast(e.message, true));
-  } else if (f.dataset.act === "recordver") recordVersion($("#proofLabel").value.trim());
+  else if (f.dataset.act === "recordver") recordVersion($("#proofLabel").value.trim());
   else if (f.dataset.act === "rvstart") {
     const fd = new FormData(), file = $("#rvFile").files[0];
     RV.kind = (f.querySelector("input[name=rvkind]:checked") || {}).value || "referee";
@@ -1255,7 +1338,7 @@ document.addEventListener("keydown", (ev) => {
 });
 $("#complete").addEventListener("mousedown", (ev) => ev.preventDefault());     // keep the cursor in the source
 $("#findText").addEventListener("input", () => runFind());
-$("#findCase").addEventListener("change", () => runFind());
+for (const id of ["findCase", "findRegex", "findWord", "findSel"]) $("#" + id).addEventListener("change", () => { if (id === "findSel" && !$("#findSel").checked) F.scope = null; runFind(); });
 $("#zoom").addEventListener("change", (ev) => setZoom(ev.target.value));
 $("#uploadInput").addEventListener("change", (ev) => { upload(ev.target.files); ev.target.value = ""; });
 $("#autoCompile").checked = store.get("auto", true);
@@ -1308,6 +1391,7 @@ document.addEventListener("drop", (ev) => { if (ev.target.closest("#side")) { ev
   await openFile(was && E.tree.some((x) => x.path === was.current) ? was.current : "main.tex", null, { focus: false });
   showBuild();
   loadOutline();
+  if (typeof loadCommands === "function") loadCommands();
   if (E.build && E.build.has_pdf) loadPdf(E.build.build);
   else if (E.info.engine) compile();
 })();
