@@ -28,6 +28,6 @@ gcloud run deploy scriptavera \
   --project gen-lang-client-0978702057 \
   --session-affinity \
   --max-instances 1 \
-  --set-env-vars SCRIPTAVERA_SESSION_SECRET="scriptavera-secret-key-2026",SCRIPTAVERA_ADMIN_EMAILS="vchhajer0504@gmail.com"
+  --set-env-vars SCRIPTAVERA_SESSION_SECRET="scriptavera-secret-key-2026",SCRIPTAVERA_ADMIN_EMAILS="vchhajer0504@gmail.com",GOOGLE_CLIENT_ID="991836161184-4u1qem087jivf3pjom9na4q0phqqmf1o.apps.googleusercontent.com"
 
 echo "=== Deployment Complete! ==="
