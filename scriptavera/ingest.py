@@ -20,7 +20,9 @@ def _stats(img: Image.Image) -> dict:
 
     Ink is counted at full size against the page's own background, so thin pen or pencil strokes on
     grey or tinted paper still register."""
-    gray = img.convert("L")
+    small = img.copy()
+    small.thumbnail((400, 400))
+    gray = small.convert("L")
     hist = gray.histogram()
     total = sum(hist) or 1
     acc, median = 0, 255
@@ -30,8 +32,6 @@ def _stats(img: Image.Image) -> dict:
             median = level
             break
     dark = sum(hist[:int(median * 0.75)]) / total
-    small = img.copy()
-    small.thumbnail((400, 400))
     sat = small.convert("HSV").split()[1]
     n = sum(sat.histogram()) or 1
     sat_mean = sum(i * c for i, c in enumerate(sat.histogram())) / n
@@ -45,7 +45,7 @@ def _save(img: Image.Image, out_dir: Path, n: int) -> dict:
     if scale < 1:
         img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
     name = f"p{n:03d}.jpg"
-    img.save(out_dir / name, "JPEG", quality=86, optimize=True)
+    img.save(out_dir / name, "JPEG", quality=86)
     thumb = img.copy()
     thumb.thumbnail((THUMB_WIDTH, THUMB_WIDTH * 2))
     thumb.save(out_dir / f"t{n:03d}.jpg", "JPEG", quality=78)

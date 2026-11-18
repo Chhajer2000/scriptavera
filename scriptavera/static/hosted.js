@@ -17,6 +17,7 @@ const HOSTED = {
   async init() {
     if (!(S.meta && S.meta.hosted && S.meta.hosted.public)) return;
     this.on = true;
+    try { localStorage.removeItem(FREE_KEY); } catch (e) {}
     Object.assign(ACT, this.acts);
     if (!document.getElementById("sv-collabs")) {
       const dl = document.createElement("datalist"); dl.id = "sv-collabs"; document.body.appendChild(dl);
@@ -100,7 +101,7 @@ const HOSTED = {
     if (this.admin()) return Infinity;
     const A = this.acct || {}, limit = A.free_limit ?? 3;
     if (this.signedIn()) return (A.subscribed || A.admin) ? Infinity : Math.max(0, limit - (A.user_free_used || 0));
-    return Math.max(0, Math.min(limit - (A.guest_used || 0), (A.network_limit || 25) - (A.network_used || 0)));
+    return Math.max(0, limit - (A.guest_used || 0));
   },
   counted() {                                         // a paper was started: refresh account count
     if (!this.on) return;

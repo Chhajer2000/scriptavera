@@ -957,7 +957,7 @@ function viewNew() {
           <label class="field"><span>Papers you already know are relevant</span><textarea rows="3" data-bind="refs" placeholder="One per line: a DOI, an arXiv number, or a link">${esc(f.refs)}</textarea></label>
         </div></details></div>
       ${HOSTED.optIn(f)}
-      <div class="startbar"><button class="btn primary big" data-act="create" ${ready && !S.busy ? "" : "disabled"}>${S.busy === "create" ? "Preparing pages…" : "Start reading my notes"}</button>
+      <div class="startbar"><button class="btn primary big" data-act="create" ${ready && !S.busy ? "" : "disabled"}>${S.busy === "create" ? esc(S.busyNote || "Uploading and preparing notes...") : "Start reading my notes"}</button>
         <span class="muted">${!f.domains.length ? "Choose an area first." : (!f.files.length ? "Add your notes to continue." : "A few pages are read first, without equations; then you confirm the topic and the papers found.")}</span></div>
       ${aboutLine()}
     </div></div>`;
@@ -4130,8 +4130,12 @@ const ACT = {
     const by = declarationMaker(f.authors, f.recorder, f.recorderName);
     if (!by) { toast("Say who is making the record: choose your name among the authors, or give your name.", true); return; }
     if (!f.declare) { toast("Tick the declaration: the record says, as arXiv does for every submission, who wrote the notes and that the details are correct.", true); const e = $("#fdeclare"); if (e) e.focus(); return; }
+    if (HOSTED.on && !HOSTED.admin() && HOSTED.remaining() <= 0) {
+      toast("Free paper limit reached. Please sign in with Google to continue.", true);
+      return;
+    }
     const declaration = { agreed: true, author: by.is_author ? named.indexOf(f.authors[by.index]) : null, name: by.is_author ? "" : by.name };
-    S.busy = "create"; render();
+    S.busy = "create"; S.busyNote = "Uploading and preparing notes..."; render();
     const fd = new FormData();
     f.files.forEach((x) => fd.append("files", x, x.name));
     fd.append("meta", JSON.stringify({ name: plainName(f.files[0].name.replace(/\.[^.]+$/, "")), domains: f.domains, subarea: f.subarea, hints: f.hints, title: f.title,

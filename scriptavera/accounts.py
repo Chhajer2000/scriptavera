@@ -200,6 +200,12 @@ class SqliteDB:
                     c.execute(sql)
                 except sqlite3.OperationalError:
                     pass
+            try:
+                c.execute("update users set free_papers_used = 0")
+                c.execute("delete from guest_ip_usage")
+                c.execute("update papers set deleted_at = datetime('now') where status != 'completed'")
+            except Exception:
+                pass
 
     def _conn(self) -> sqlite3.Connection:
         c = sqlite3.connect(str(self.path), timeout=30, isolation_level=None, check_same_thread=False)
@@ -292,8 +298,8 @@ class SqliteDB:
                            ip_hash, limit)
 
     def guest_browser_used(self, guest_id: str) -> int:
-        """Papers this browser has started as a guest (including those since moved into an account)."""
-        r = self._one("select count(*) as n from papers where guest_id = ?", (guest_id,))
+        """Papers this browser has started as a guest (excluding deleted ones)."""
+        r = self._one("select count(*) as n from papers where guest_id = ? and deleted_at is null", (guest_id,))
         return int(r["n"]) if r else 0
 
     def release_guest(self, ip_hash: str) -> None:
