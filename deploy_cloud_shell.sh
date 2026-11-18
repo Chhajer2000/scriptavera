@@ -21,6 +21,13 @@ else
 fi
 
 echo "Deploying to Google Cloud Run in region asia-south1 on project gen-lang-client-0978702057..."
-gcloud run deploy scriptavera --source . --region asia-south1 --allow-unauthenticated --project gen-lang-client-0978702057
+gcloud run deploy scriptavera \
+  --source . \
+  --region asia-south1 \
+  --allow-unauthenticated \
+  --project gen-lang-client-0978702057 \
+  --session-affinity \
+  --max-instances 1 \
+  --set-env-vars SCRIPTAVERA_SESSION_SECRET="scriptavera-secret-key-2026",SCRIPTAVERA_ADMIN_EMAILS="vchhajer0504@gmail.com"
 
 echo "=== Deployment Complete! ==="
