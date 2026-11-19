@@ -13,3 +13,5 @@ accounts.db
 .firebase/
 
 .env-backups/
+PASTE_INTO_CLOUD_SHELL.txt
+tikz_dump.json

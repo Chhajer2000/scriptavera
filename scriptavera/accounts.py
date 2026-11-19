@@ -200,12 +200,6 @@ class SqliteDB:
                     c.execute(sql)
                 except sqlite3.OperationalError:
                     pass
-            try:
-                c.execute("update users set free_papers_used = 0")
-                c.execute("delete from guest_ip_usage")
-                c.execute("update papers set deleted_at = datetime('now') where status != 'completed'")
-            except Exception:
-                pass
 
     def _conn(self) -> sqlite3.Connection:
         c = sqlite3.connect(str(self.path), timeout=30, isolation_level=None, check_same_thread=False)
